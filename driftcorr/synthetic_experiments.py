@@ -478,6 +478,7 @@ def save_groundtruth_evaluation_outputs(
     plt.xlabel("Time")
     plt.ylabel("RMS error (um)")
     plt.title("Corrected vs Groundtruth: RMS error over time")
+    plt.ylim(bottom=0.0)
     handles, _ = plt.gca().get_legend_handles_labels()
     if handles:
         plt.legend()
@@ -493,6 +494,7 @@ def save_groundtruth_evaluation_outputs(
         plt.xlabel("Time")
         plt.ylabel("RMS error (um)")
         plt.title("Corrected vs Groundtruth: RMS_stationary_over_time")
+        plt.ylim(bottom=0.0)
         handles, _ = plt.gca().get_legend_handles_labels()
         if handles:
             plt.legend()
@@ -508,6 +510,7 @@ def save_groundtruth_evaluation_outputs(
         plt.xlabel("Time")
         plt.ylabel("RMS error (um)")
         plt.title("Corrected vs Groundtruth: RMS_migrating_over_time")
+        plt.ylim(bottom=0.0)
         handles, _ = plt.gca().get_legend_handles_labels()
         if handles:
             plt.legend()

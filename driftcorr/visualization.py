@@ -301,6 +301,75 @@ def plot_timepoint_side_by_side_3d(
     return saved
 
 
+def plot_tracks_over_time_panels(
+    df_orig: pd.DataFrame,
+    df_corr: pd.DataFrame,
+    out_path: str | Path,
+    title_prefix: str = "",
+    df_groundtruth: pd.DataFrame | None = None,
+) -> Path:
+    """Plot full track trajectories over all timepoints in 2 panels (or 3 with GT)."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x_min, x_max, y_min, y_max, z_min, z_max = _compute_limits(df_orig, df_corr, df_groundtruth=df_groundtruth)
+
+    has_gt = df_groundtruth is not None and df_groundtruth.shape[0] > 0
+    if has_gt:
+        fig = plt.figure(figsize=(20, 6), constrained_layout=True)
+        ax_gt = fig.add_subplot(131, projection="3d")
+        ax1 = fig.add_subplot(132, projection="3d")
+        ax2 = fig.add_subplot(133, projection="3d")
+    else:
+        fig = plt.figure(figsize=(14, 6), constrained_layout=True)
+        ax1 = fig.add_subplot(121, projection="3d")
+        ax2 = fig.add_subplot(122, projection="3d")
+
+    if has_gt:
+        assert df_groundtruth is not None
+        for tid in df_groundtruth["TrackID"].unique():
+            d = df_groundtruth[df_groundtruth["TrackID"] == tid]
+            ax_gt.plot(d["Position X"], d["Position Y"], d["Position Z"], alpha=0.8, linewidth=1.0)
+        ax_gt.set_title("Ground Truth tracks (all frames)")
+        ax_gt.set_xlim(x_min, x_max)
+        ax_gt.set_ylim(y_min, y_max)
+        ax_gt.set_zlim(z_min, z_max)
+        ax_gt.set_xlabel("X")
+        ax_gt.set_ylabel("Y")
+        ax_gt.set_zlabel("Z")
+        ax_gt.view_init(elev=25, azim=-60)
+
+    for tid in df_orig["TrackID"].unique():
+        d = df_orig[df_orig["TrackID"] == tid]
+        ax1.plot(d["Position X"], d["Position Y"], d["Position Z"], alpha=0.8, linewidth=1.0)
+    ax1.set_title("Original tracks (all frames)")
+    ax1.set_xlim(x_min, x_max)
+    ax1.set_ylim(y_min, y_max)
+    ax1.set_zlim(z_min, z_max)
+    ax1.set_xlabel("X")
+    ax1.set_ylabel("Y")
+    ax1.set_zlabel("Z")
+    ax1.view_init(elev=25, azim=-60)
+
+    for tid in df_corr["TrackID"].unique():
+        d = df_corr[df_corr["TrackID"] == tid]
+        ax2.plot(d["Position X_corr"], d["Position Y_corr"], d["Position Z_corr"], alpha=0.8, linewidth=1.0)
+    ax2.set_title("Corrected tracks (all frames)")
+    ax2.set_xlim(x_min, x_max)
+    ax2.set_ylim(y_min, y_max)
+    ax2.set_zlim(z_min, z_max)
+    ax2.set_xlabel("X")
+    ax2.set_ylabel("Y")
+    ax2.set_zlabel("Z")
+    ax2.view_init(elev=25, azim=-60)
+
+    if title_prefix:
+        fig.suptitle(f"{title_prefix} | Track trajectories over all frames", fontsize=12)
+    plt.savefig(out_path, dpi=220)
+    plt.close(fig)
+    return out_path
+
+
 def save_visual_inspection_plots(
     df_orig: pd.DataFrame,
     df_corr: pd.DataFrame,
@@ -328,11 +397,19 @@ def save_visual_inspection_plots(
         title_prefix=method_name,
         df_groundtruth=df_groundtruth,
     )
+    tracks_over_time_path = plot_tracks_over_time_panels(
+        df_orig=df_orig,
+        df_corr=df_corr,
+        out_path=frames_dir / "tracks_over_time_panels.png",
+        title_prefix=method_name,
+        df_groundtruth=df_groundtruth,
+    )
     gif_path = _save_frames_as_gif(frame_paths, frames_dir / "timeseries.gif", fps=4.0)
 
     out: dict[str, Path] = {
         "tracks_comparison": tracks_path,
         "timeseries_dir": frames_dir,
+        "tracks_over_time_panels": tracks_over_time_path,
     }
     if gif_path is not None:
         out["timeseries_gif"] = gif_path

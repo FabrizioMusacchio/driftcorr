@@ -86,6 +86,7 @@ Per method:
   - folder: `<base>_timeseries_<method>/`
   - files: `frame_0000_t_...png`, `frame_0001_t_...png`, ...
   - GIF animation: `<base>_timeseries_<method>/timeseries.gif`
+  - full-track summary panel: `<base>_timeseries_<method>/tracks_over_time_panels.png`
 
 For synthetic runs (ground truth available), frame plots include:
 - `Ground Truth | Original | Corrected`

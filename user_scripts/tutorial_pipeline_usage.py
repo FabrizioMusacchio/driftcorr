@@ -250,10 +250,10 @@ if RUN_BATCH:
         postprocess_outputs(df_batch, file_path, out_prefix_batch, corr_batch)
 
 
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA
+# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: DEFAULT SETTINGS
 RUN_SYNTHETIC = False
 if RUN_SYNTHETIC:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files tutorial"
+    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files tutorial run 2"
     synthetic = generate_synthetic_imaris_folder(
         out_dir=synthetic_root,
         n_files=5,
@@ -278,11 +278,20 @@ if RUN_SYNTHETIC:
             use_stationary_subset=False)
         postprocess_outputs(df_syn, file_path, out_prefix_syn, corr_syn)
 
-# %% JOB A EXAMPLE (RBF center-mode + bias + coverage diagnostics)
+# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: RBF center-mode + bias + coverage diagnostics
+
 RUN_SYNTHETIC_JOB_A_EXAMPLE = False
 if RUN_SYNTHETIC_JOB_A_EXAMPLE:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobA"
-    generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=80, n_times=20, seed=21)
+    synthetic = generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=5,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9)
     opts_a = dict(OPTIONS)
     opts_a["center_mode"] = "kmeans_pooled"
     opts_a["center_pooled_time_stride"] = 1
@@ -293,11 +302,19 @@ if RUN_SYNTHETIC_JOB_A_EXAMPLE:
         corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts_a)
         postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
-# %% JOB B EXAMPLE (RBF robust-mode track_trim)
+# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: RBF robust-mode track_trim
 RUN_SYNTHETIC_JOB_B_EXAMPLE = False
 if RUN_SYNTHETIC_JOB_B_EXAMPLE:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobB"
-    generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=90, n_times=22, seed=31)
+    synthetic = generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=5,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9)
     opts_b = dict(OPTIONS)
     opts_b["robust_mode"] = "track_trim"
     opts_b["track_trim_iters"] = 4
@@ -308,11 +325,19 @@ if RUN_SYNTHETIC_JOB_B_EXAMPLE:
         corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts_b)
         postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
-# %% JOB C EXAMPLE (stationary-only fitting for RBF/ST-RBF)
+# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: stationary-only fitting for RBF/ST-RBF
 RUN_SYNTHETIC_JOB_C_EXAMPLE = False
 if RUN_SYNTHETIC_JOB_C_EXAMPLE:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobC"
-    generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=90, n_times=22, seed=41)
+    synthetic = generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=2,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9)
     opts_c = dict(OPTIONS)
     opts_c["robust_mode"] = "track_trim"
     for file_path in list_imaris_xls_files(synthetic_root):
@@ -327,11 +352,19 @@ if RUN_SYNTHETIC_JOB_C_EXAMPLE:
         )
         postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
-# %% JOB D EXAMPLE (ST-RBF anchor mode + normalization + refinement)
+# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: ST-RBF anchor mode + normalization + refinement
 RUN_SYNTHETIC_JOB_D_EXAMPLE = False
 if RUN_SYNTHETIC_JOB_D_EXAMPLE:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobD"
-    generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=90, n_times=22, seed=51)
+    synthetic = generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=2,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9)
     opts_d = dict(OPTIONS)
     opts_d["space_input_mode"] = "ref_position"
     opts_d["st_refine_iters"] = 2
@@ -342,11 +375,19 @@ if RUN_SYNTHETIC_JOB_D_EXAMPLE:
         corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts_d)
         postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
-# %% JOB E EXAMPLE (two-stage translation + residual field)
+# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: two-stage translation + residual field
 RUN_SYNTHETIC_JOB_E_EXAMPLE = False
 if RUN_SYNTHETIC_JOB_E_EXAMPLE:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobE"
-    generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=90, n_times=22, seed=61)
+    synthetic = generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=2,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9)
     opts_e = dict(OPTIONS)
     opts_e["two_stage"] = 1
     opts_e["center_mode"] = "pooled"

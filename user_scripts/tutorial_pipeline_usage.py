@@ -12,25 +12,52 @@ date: Feb 2026
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import pandas as pd
 
-from driftcorr.evaluate import run_all_methods_and_compare, save_evaluation_outputs
-from driftcorr.io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris_position_xls
-from driftcorr.method_local_communities import run_local_drift_correction_for_file
-from driftcorr.method_rbf_ref import correct_positions_rbf_to_reference, make_rbf_diagnostic_plots
-from driftcorr.method_rigid_step import apply_rigid_correction_to_tracks, build_step_transforms
-from driftcorr.method_spacetime_rbf import apply_correction as apply_spacetime_correction
-from driftcorr.method_spacetime_rbf import fit_spacetime_rbf_model
-from driftcorr.stationary import find_stationary_tracks
-from driftcorr.synthetic_experiments import (
-    generate_synthetic_imaris_folder,
-    load_groundtruth_for_imaris_file,
-    save_groundtruth_evaluation_outputs,
-)
-from driftcorr.visualization import save_visual_inspection_plots
-# %% GLOBAL SETTINGS
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+try:
+    from driftcorr.evaluate import run_all_methods_and_compare, save_evaluation_outputs
+    from driftcorr.io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris_position_xls
+    from driftcorr.method_local_communities import run_local_drift_correction_for_file
+    from driftcorr.method_rbf_ref import correct_positions_rbf_to_reference, make_rbf_diagnostic_plots
+    from driftcorr.method_rigid_step import apply_rigid_correction_to_tracks, build_step_transforms
+    from driftcorr.method_spacetime_rbf import apply_correction as apply_spacetime_correction
+    from driftcorr.method_spacetime_rbf import fit_spacetime_rbf_model
+    from driftcorr.stationary import find_stationary_tracks
+    from driftcorr.synthetic_experiments import (
+        generate_synthetic_imaris_folder,
+        load_groundtruth_for_imaris_file,
+        save_groundtruth_evaluation_outputs,
+    )
+    from driftcorr.visualization import save_visual_inspection_plots
+except ModuleNotFoundError as exc:
+    # Fallback for cloned repo usage without installing driftcorr via pip.
+    root_str = str(PROJECT_ROOT)
+    if root_str not in sys.path:
+        sys.path.insert(0, root_str)
+    try:
+        from driftcorr.evaluate import run_all_methods_and_compare, save_evaluation_outputs
+        from driftcorr.io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris_position_xls
+        from driftcorr.method_local_communities import run_local_drift_correction_for_file
+        from driftcorr.method_rbf_ref import correct_positions_rbf_to_reference, make_rbf_diagnostic_plots
+        from driftcorr.method_rigid_step import apply_rigid_correction_to_tracks, build_step_transforms
+        from driftcorr.method_spacetime_rbf import apply_correction as apply_spacetime_correction
+        from driftcorr.method_spacetime_rbf import fit_spacetime_rbf_model
+        from driftcorr.stationary import find_stationary_tracks
+        from driftcorr.synthetic_experiments import (
+            generate_synthetic_imaris_folder,
+            load_groundtruth_for_imaris_file,
+            save_groundtruth_evaluation_outputs,
+        )
+        from driftcorr.visualization import save_visual_inspection_plots
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError(
+            "Could not import 'driftcorr'. Install the package or run this script from inside the cloned project."
+        ) from exc
+# %% GLOBAL SETTINGS
 IMARIS_DIR = PROJECT_ROOT / "IMARIS xls files"
 RESULTS_ROOT = IMARIS_DIR / "driftcorr_results_from_python"
 

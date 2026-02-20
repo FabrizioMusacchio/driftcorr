@@ -417,6 +417,8 @@ def save_groundtruth_evaluation_outputs(
     rows_summary: list[dict[str, Any]] = []
     per_method_track: dict[str, pd.DataFrame] = {}
     per_method_time: dict[str, pd.DataFrame] = {}
+    per_method_time_stationary: dict[str, pd.DataFrame] = {}
+    per_method_time_migrating: dict[str, pd.DataFrame] = {}
 
     for method, df_corr in corrected_by_method.items():
         summary, merged, per_track, per_time = evaluate_corrected_vs_groundtruth(df_corr, groundtruth_df)
@@ -430,12 +432,29 @@ def save_groundtruth_evaluation_outputs(
         per_track.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_rms_per_track_{method}.csv"), index=False)
         per_time.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_rms_over_time_{method}.csv"), index=False)
 
+        if "CellType" in merged.columns:
+            for ctype, store, suffix in [
+                ("stationary", per_method_time_stationary, "stationary"),
+                ("migrating", per_method_time_migrating, "migrating"),
+            ]:
+                tab = (
+                    merged[merged["CellType"] == ctype]
+                    .groupby("Time", as_index=False)
+                    .agg(rms_error=("err_norm", lambda x: float(np.sqrt(np.mean(np.asarray(x, dtype=float) ** 2)))))
+                    .sort_values("Time")
+                    .reset_index(drop=True)
+                )
+                store[method] = tab
+                tab.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_rms_{suffix}_over_time_{method}.csv"), index=False)
+
     summary_df = pd.DataFrame(rows_summary).sort_values("method").reset_index(drop=True)
     out_summary = base_out_prefix.with_name(base_out_prefix.name + "_gt_metrics_summary.csv")
     summary_df.to_csv(out_summary, index=False)
 
     out_hist = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_per_track_hist.png")
     out_time = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_over_time.png")
+    out_time_stationary = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_stationary_over_time.png")
+    out_time_migrating = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_migrating_over_time.png")
 
     fig = plt.figure(figsize=(9, 5))
     for method, tab in per_method_track.items():
@@ -466,8 +485,43 @@ def save_groundtruth_evaluation_outputs(
     plt.savefig(out_time, dpi=300)
     plt.close(fig)
 
-    return {
+    if per_method_time_stationary:
+        fig = plt.figure(figsize=(9, 5))
+        for method, tab in per_method_time_stationary.items():
+            if tab.shape[0]:
+                plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), marker="o", label=method)
+        plt.xlabel("Time")
+        plt.ylabel("RMS error (um)")
+        plt.title("Corrected vs Groundtruth: RMS_stationary_over_time")
+        handles, _ = plt.gca().get_legend_handles_labels()
+        if handles:
+            plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_time_stationary, dpi=300)
+        plt.close(fig)
+
+    if per_method_time_migrating:
+        fig = plt.figure(figsize=(9, 5))
+        for method, tab in per_method_time_migrating.items():
+            if tab.shape[0]:
+                plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), marker="o", label=method)
+        plt.xlabel("Time")
+        plt.ylabel("RMS error (um)")
+        plt.title("Corrected vs Groundtruth: RMS_migrating_over_time")
+        handles, _ = plt.gca().get_legend_handles_labels()
+        if handles:
+            plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_time_migrating, dpi=300)
+        plt.close(fig)
+
+    out: dict[str, Path] = {
         "gt_metrics_summary": out_summary,
         "gt_rms_per_track_hist": out_hist,
         "gt_rms_over_time": out_time,
     }
+    if per_method_time_stationary:
+        out["gt_rms_stationary_over_time"] = out_time_stationary
+    if per_method_time_migrating:
+        out["gt_rms_migrating_over_time"] = out_time_migrating
+    return out

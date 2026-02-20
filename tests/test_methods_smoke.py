@@ -36,6 +36,18 @@ def test_rbf_rigid_local_smoke(tmp_path):
     assert "Position X_corr" in df_rbf_temporal.columns
     assert "temporal_gamma" in tf_temporal.columns
 
+    df_rbf_tracktrim, tf_tracktrim, *_ = correct_positions_rbf_to_reference(
+        df,
+        m=12,
+        min_pairs=8,
+        center_mode="pooled",
+        robust_mode="track_trim",
+        track_trim_iters=3,
+        two_stage=True,
+    )
+    assert "Position X_corr" in df_rbf_tracktrim.columns
+    assert "center_mode" in tf_tracktrim.columns
+
     step, _, times = build_step_transforms(df, min_pairs=8)
     df_rigid = apply_rigid_correction_to_tracks(df, step, times=times, ref_time=float(times.min()))
     assert "Position Y_corr" in df_rigid.columns
@@ -48,7 +60,14 @@ def test_rbf_rigid_local_smoke(tmp_path):
     df_local, *_ = run_local_drift_correction_for_file(df, out_prefix=out_prefix, k_neighbors=5)
     assert "Position Z_corr" in df_local.columns
 
-    st_model, st_info = fit_spacetime_rbf_model(df, m_centers=20, robust_iters=2)
+    st_model, st_info = fit_spacetime_rbf_model(
+        df,
+        m_centers=20,
+        robust_iters=2,
+        space_input_mode="track_anchor",
+        n_refine=2,
+        two_stage=True,
+    )
     df_st = apply_correction(df, st_model)
     assert "Position X_corr" in df_st.columns
     assert st_info["n_samples"] > 0

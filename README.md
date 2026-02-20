@@ -16,7 +16,7 @@ The goal is to remove (1) and (2) while preserving (3).
 ### `rbf`: RBF-to-reference drift correction
 For each timepoint `t` (relative to a reference time `t_ref`), fit a smooth drift field:
 - Training target: `D_t = X_t - X_ref`
-- Model: `D_t ≈ K(X_t, C) W_t`
+- Model: `D_t ≈ [K(X_t, C), 1] W_t` (bias-augmented kernel)
 - Kernel: Gaussian RBF
 - Correction: `X_corr = X - d_hat(X,t)`
 
@@ -24,6 +24,11 @@ Optional temporal consistency (`--temporal-gamma`):
 - shared centers across time,
 - jointly fit `W(t)` with penalty:
   `sum_t ||K_t W(t)-D_t||^2 + lambda ||W(t)||^2 + gamma ||W(t)-W(t-1)||^2`
+
+Additional controls:
+- center selection: `--center-mode {ref,pooled,kmeans_pooled}`
+- robust fitting: `--robust-mode {sample_trim,track_trim}`
+- two-stage translation + residual field: `--two-stage 0/1`
 
 ### `rigid`: rigid step-wise correction
 Between consecutive times `t0 -> t1`:
@@ -47,7 +52,10 @@ Optional piecewise rigid (`--rigid-spatial-groups > 1`):
 ### `st_rbf`: space-time RBF drift model
 Jointly fit drift in 4D input space `(x,y,z,t)`:
 - `d(u) ≈ K(u, C) W`
-- Separate spatial and temporal length scales (`--st-ell-space`, `--st-ell-time`)
+- Bias-augmented kernel (`[K,1]`) and optional two-stage decomposition
+- Space input modes: `--space-input-mode {row_position,track_anchor,ref_position}`
+- Normalized coordinates (space robustly scaled, time mapped to `[0,1]`)
+- Optional iterative refinement (`--st-refine-iters`)
 - Robust trimming / reweighting to reduce influence of migrating tracks.
 
 ### Stationary subset discovery
@@ -102,6 +110,8 @@ Additional ground-truth evaluation outputs:
 - `<base>_gt_metrics_summary.csv`
 - `<base>_gt_rms_per_track_hist.png`
 - `<base>_gt_rms_over_time.png`
+- `<base>_gt_rms_stationary_over_time.png`
+- `<base>_gt_rms_migrating_over_time.png`
 - plus per-method CSV tables for per-track/per-time RMS errors.
 
 ## Result Folder Structure
@@ -149,13 +159,13 @@ It contains these sections:
 - `# %% HOW TO GENERATE AND RUN SYNTHETIC DATA`
 
 ## Commonly Tuned Options
-- RBF: `--m-centers`, `--lam`, `--temporal-gamma`
+- RBF: `--m-centers`, `--lam`, `--sigma`, `--temporal-gamma`, `--center-mode`, `--robust-mode`, `--two-stage`
 - Rigid: `--inlier-reestimate-iters`, `--rigid-spatial-groups`, `--rigid-compare-piecewise`
 - Local: `--k-neighbors`, `--ell-um-graph`, `--ell-um-field`
-- ST-RBF: `--st-m-centers`, `--st-ell-space`, `--st-ell-time`
-- Stationary subset: `--use-stationary-subset`
+- ST-RBF: `--st-m-centers`, `--st-ell-space`, `--st-ell-time`, `--space-input-mode`, `--st-refine-iters`, `--two-stage`
+- Stationary subset: `--use-stationary-subset` or `--use-stationary-only 1`
 - Disable visual plots: `--skip-visual-plots`
 
 Current tuned defaults (Feb 2026):
 - RBF defaults: `--m-centers 45 --lam 3e-4 --sigma 180 --temporal-gamma 0`
-- ST-RBF defaults: `--st-m-centers 70 --st-ell-space 260 --st-ell-time 6 --st-robust-keep-fraction 0.8 --lam 3e-4`
+- ST-RBF defaults: `--st-m-centers 70 --st-ell-space 1.2 --st-ell-time 0.3 --st-robust-keep-fraction 0.8 --st-refine-iters 2 --lam 3e-4`

@@ -137,17 +137,24 @@ def build_static_baselines(datasets: list[DatasetPair]) -> dict[str, dict[str, p
             min_pairs=15,
             seed=0,
             temporal_gamma=0.0,
+            center_mode="ref",
+            robust_mode="sample_trim",
+            track_trim_iters=4,
+            two_stage=True,
         )
         st_model, _ = fit_spacetime_rbf_model(
             df,
             reference_time=None,
             m_centers=70,
-            ell_space=260.0,
-            ell_time=6.0,
+            ell_space=1.2,
+            ell_time=0.3,
             lam=3e-4,
             robust_keep_fraction=0.8,
             robust_iters=4,
             seed=0,
+            space_input_mode="row_position",
+            n_refine=2,
+            two_stage=True,
         )
         df_st_default = apply_spacetime_correction(df, st_model)
 
@@ -167,13 +174,16 @@ def sweep_rbf(
     rows: list[dict[str, float | str]] = []
     grid = list(
         product(
-            [25, 45],  # m
-            [3e-4, 1e-2, 3e-1],  # lam
-            [0.0, 1.0, 5.0],  # temporal_gamma
-            [None, 180.0],  # sigma
+            [45, 70],  # m
+            [1e-4, 3e-4, 1e-3],  # lam
+            [0.0, 0.5],  # temporal_gamma
+            [140.0, 180.0, 240.0],  # sigma
+            ["ref", "pooled", "kmeans_pooled"],
+            ["sample_trim", "track_trim"],
+            [0, 1],  # two_stage
         )
     )
-    for config_id, (m, lam, gamma, sigma) in enumerate(grid, start=1):
+    for config_id, (m, lam, gamma, sigma, center_mode, robust_mode, two_stage) in enumerate(grid, start=1):
         for ds in datasets:
             df_rbf, _, _, _, _ = correct_positions_rbf_to_reference(
                 ds.df_orig,
@@ -181,10 +191,14 @@ def sweep_rbf(
                 m=int(m),
                 keep_fraction=0.7,
                 lam=float(lam),
-                sigma=None if sigma is None else float(sigma),
+                sigma=float(sigma),
                 min_pairs=15,
                 seed=0,
                 temporal_gamma=float(gamma),
+                center_mode=str(center_mode),
+                robust_mode=str(robust_mode),
+                track_trim_iters=4,
+                two_stage=bool(two_stage),
             )
             method_tables = {
                 "rbf": df_rbf,
@@ -203,12 +217,18 @@ def sweep_rbf(
                         "rbf_m": int(m),
                         "rbf_lam": float(lam),
                         "rbf_temporal_gamma": float(gamma),
-                        "rbf_sigma": "auto" if sigma is None else float(sigma),
+                        "rbf_sigma": float(sigma),
+                        "rbf_center_mode": str(center_mode),
+                        "rbf_robust_mode": str(robust_mode),
+                        "rbf_two_stage": int(two_stage),
                         "st_m_centers": 70,
                         "st_lam": 3e-4,
-                        "st_ell_space": 260.0,
-                        "st_ell_time": 6.0,
+                        "st_ell_space": 1.2,
+                        "st_ell_time": 0.3,
                         "st_robust_keep_fraction": 0.8,
+                        "st_space_input_mode": "row_position",
+                        "st_n_refine": 2,
+                        "st_two_stage": 1,
                         **ev,
                     }
                 )
@@ -222,14 +242,17 @@ def sweep_st_rbf(
     rows: list[dict[str, float | str]] = []
     grid = list(
         product(
-            [40, 70],  # m_centers
-            [3e-4, 1e-2, 3e-1],  # lam
-            [90.0, 160.0, 260.0],  # ell_space
-            [2.5, 6.0],  # ell_time
-            [0.6, 0.8],  # robust_keep_fraction
+            [50, 70],  # m_centers
+            [1e-4, 3e-4, 1e-3],  # lam
+            [0.8, 1.2, 1.8],  # ell_space (normalized)
+            [0.15, 0.30, 0.45],  # ell_time (normalized)
+            [0.7, 0.8],  # robust_keep_fraction
+            ["row_position", "track_anchor", "ref_position"],
+            [1, 2],  # n_refine
+            [0, 1],  # two_stage
         )
     )
-    for config_id, (m_centers, lam, ell_space, ell_time, keep_frac) in enumerate(grid, start=1):
+    for config_id, (m_centers, lam, ell_space, ell_time, keep_frac, space_mode, n_refine, two_stage) in enumerate(grid, start=1):
         for ds in datasets:
             model, _ = fit_spacetime_rbf_model(
                 ds.df_orig,
@@ -241,6 +264,9 @@ def sweep_st_rbf(
                 robust_keep_fraction=float(keep_frac),
                 robust_iters=4,
                 seed=0,
+                space_input_mode=str(space_mode),
+                n_refine=int(n_refine),
+                two_stage=bool(two_stage),
             )
             df_st = apply_spacetime_correction(ds.df_orig, model)
             method_tables = {
@@ -261,11 +287,17 @@ def sweep_st_rbf(
                         "rbf_lam": 3e-4,
                         "rbf_temporal_gamma": 0.0,
                         "rbf_sigma": 180.0,
+                        "rbf_center_mode": "ref",
+                        "rbf_robust_mode": "sample_trim",
+                        "rbf_two_stage": 1,
                         "st_m_centers": int(m_centers),
                         "st_lam": float(lam),
                         "st_ell_space": float(ell_space),
                         "st_ell_time": float(ell_time),
                         "st_robust_keep_fraction": float(keep_frac),
+                        "st_space_input_mode": str(space_mode),
+                        "st_n_refine": int(n_refine),
+                        "st_two_stage": int(two_stage),
                         **ev,
                     }
                 )
@@ -286,6 +318,12 @@ def aggregate_results(df_raw: pd.DataFrame) -> pd.DataFrame:
         "st_ell_space",
         "st_ell_time",
         "st_robust_keep_fraction",
+        "rbf_center_mode",
+        "rbf_robust_mode",
+        "rbf_two_stage",
+        "st_space_input_mode",
+        "st_n_refine",
+        "st_two_stage",
     ]
     agg = (
         df_raw.groupby(group_cols, as_index=False)

@@ -147,6 +147,11 @@ def _run_rbf(
         robust_mode=args.robust_mode,
         track_trim_iters=args.track_trim_iters,
         two_stage=bool(args.two_stage),
+        space_input_mode=args.rbf_space_input_mode,
+        rbf_linear_terms=bool(args.rbf_linear_terms),
+        row_position_iters=args.row_position_iters,
+        row_position_tol=args.row_position_tol,
+        weight_abort_threshold=args.weight_abort_threshold,
     )
     if save_outputs:
         df_corr.to_csv(str(out_prefix) + "_positions_corrected_rbf.csv", index=False)
@@ -242,7 +247,7 @@ def _run_st_rbf(
         m_centers=args.st_m_centers,
         ell_space=args.st_ell_space,
         ell_time=args.st_ell_time,
-        lam=args.lam,
+        lam=args.st_lam if args.st_lam is not None else args.lam,
         robust_keep_fraction=args.st_robust_keep_fraction,
         robust_iters=args.st_robust_iters,
         seed=args.seed,
@@ -250,6 +255,10 @@ def _run_st_rbf(
         space_input_mode=args.space_input_mode,
         n_refine=args.st_refine_iters,
         two_stage=bool(args.two_stage),
+        robust_mode=args.st_robust_mode,
+        track_trim_iters=args.st_track_trim_iters,
+        rbf_linear_terms=bool(args.rbf_linear_terms),
+        weight_abort_threshold=args.weight_abort_threshold,
     )
     df_corr = apply_spacetime_correction(df, model)
     if save_outputs:
@@ -469,12 +478,17 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--sigma", type=float, default=180.0)
     p.add_argument("--seed", type=int, default=0)
 
-    p.add_argument("--temporal-gamma", type=float, default=0.0)
+    p.add_argument("--temporal-gamma", type=float, default=1.0)
     p.add_argument("--center-mode", choices=["ref", "pooled", "kmeans_pooled"], default="ref")
     p.add_argument("--center-pooled-time-stride", type=int, default=1)
-    p.add_argument("--robust-mode", choices=["sample_trim", "track_trim"], default="sample_trim")
+    p.add_argument("--robust-mode", choices=["none", "sample_trim", "track_trim"], default="sample_trim")
     p.add_argument("--track-trim-iters", type=int, default=4)
     p.add_argument("--two-stage", type=int, choices=[0, 1], default=0)
+    p.add_argument("--rbf-linear-terms", type=int, choices=[0, 1], default=0)
+    p.add_argument("--rbf-space-input-mode", choices=["row_position", "track_anchor", "ref_position"], default="track_anchor")
+    p.add_argument("--row-position-iters", type=int, default=3)
+    p.add_argument("--row-position-tol", type=float, default=1e-3)
+    p.add_argument("--weight-abort-threshold", type=float, default=1e4)
 
     p.add_argument("--rigid-mode", choices=["rigid", "rotz"], default="rigid")
     p.add_argument("--inlier-reestimate-iters", type=int, default=30)
@@ -496,12 +510,15 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     )
 
     p.add_argument("--st-m-centers", type=int, default=70)
-    p.add_argument("--st-ell-space", type=float, default=1.2)
-    p.add_argument("--st-ell-time", type=float, default=0.3)
-    p.add_argument("--st-robust-keep-fraction", type=float, default=0.8)
-    p.add_argument("--st-robust-iters", type=int, default=4)
-    p.add_argument("--space-input-mode", choices=["row_position", "track_anchor", "ref_position"], default="row_position")
-    p.add_argument("--st-refine-iters", type=int, default=2)
+    p.add_argument("--st-lam", type=float, default=8.5e-4)
+    p.add_argument("--st-ell-space", type=float, default=2.0)
+    p.add_argument("--st-ell-time", type=float, default=0.8)
+    p.add_argument("--st-robust-keep-fraction", type=float, default=0.83)
+    p.add_argument("--st-robust-iters", type=int, default=2)
+    p.add_argument("--space-input-mode", choices=["row_position", "track_anchor", "ref_position"], default="ref_position")
+    p.add_argument("--st-refine-iters", type=int, default=3)
+    p.add_argument("--st-robust-mode", choices=["none", "sample_trim", "track_trim"], default="sample_trim")
+    p.add_argument("--st-track-trim-iters", type=int, default=4)
 
     p.add_argument("--use-stationary-subset", action="store_true")
     p.add_argument("--use-stationary-only", type=int, choices=[0, 1], default=0)

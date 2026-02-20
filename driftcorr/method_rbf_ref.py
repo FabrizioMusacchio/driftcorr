@@ -57,6 +57,8 @@ class RBFField:
     global_stage1: np.ndarray
     center_mode: str
     robust_mode: str
+    space_input_mode: str
+    rbf_linear_terms: bool
 
 
 def _rbf_kernel(x: np.ndarray, c: np.ndarray, sigma: float) -> np.ndarray:
@@ -65,8 +67,19 @@ def _rbf_kernel(x: np.ndarray, c: np.ndarray, sigma: float) -> np.ndarray:
     return np.exp(-r2 / (2.0 * sigma * sigma))
 
 
-def _augment_kernel(k: np.ndarray) -> np.ndarray:
-    return np.hstack([k, np.ones((k.shape[0], 1), dtype=float)])
+def _augment_kernel(
+    k: np.ndarray,
+    x: np.ndarray,
+    t: np.ndarray,
+    rbf_linear_terms: bool = False,
+) -> np.ndarray:
+    n = int(k.shape[0])
+    cols: list[np.ndarray] = [k]
+    if bool(rbf_linear_terms):
+        tt = np.asarray(t, dtype=float).reshape(-1, 1)
+        cols.extend([x[:, [0]], x[:, [1]], x[:, [2]], tt])
+    cols.append(np.ones((n, 1), dtype=float))
+    return np.hstack(cols)
 
 
 def _choose_centers_random(x: np.ndarray, m: int, seed: int = 0) -> np.ndarray:
@@ -130,7 +143,7 @@ def _ridge_solve_aug(k_aug: np.ndarray, d: np.ndarray, lam: float, lam_bias: flo
     reg[-1] = float(lam_bias)
     a.flat[:: m_aug + 1] += reg
     b = k_aug.T @ d
-    return np.linalg.solve(a, b)
+    return _stable_solve(a, b)
 
 
 def _stable_solve(a: np.ndarray, b: np.ndarray, jitter: float = 1e-9) -> np.ndarray:
@@ -155,6 +168,81 @@ def _merge_with_reference(
         ids = set(np.asarray(fit_track_ids, dtype=float).tolist())
         mdf = mdf[mdf["TrackID"].astype(float).isin(ids)]
     return mdf
+
+
+def _build_track_space_table(df: pd.DataFrame, reference_time: float, space_input_mode: str) -> pd.DataFrame:
+    mode = str(space_input_mode)
+    d = ensure_numeric_tracks(df)
+    if mode == "row_position":
+        return pd.DataFrame(columns=["TrackID", "Input X", "Input Y", "Input Z"])
+
+    means = d.groupby("TrackID", as_index=False)[["Position X", "Position Y", "Position Z"]].mean()
+    means = means.rename(
+        columns={"Position X": "Input X_mean", "Position Y": "Input Y_mean", "Position Z": "Input Z_mean"}
+    )
+    if mode == "track_anchor":
+        out = means.rename(
+            columns={"Input X_mean": "Input X", "Input Y_mean": "Input Y", "Input Z_mean": "Input Z"}
+        )
+        return out[["TrackID", "Input X", "Input Y", "Input Z"]]
+
+    if mode == "ref_position":
+        ref = d[d["Time"] == float(reference_time)][["TrackID", "Position X", "Position Y", "Position Z"]].copy()
+        ref = ref.rename(columns={"Position X": "Input X", "Position Y": "Input Y", "Position Z": "Input Z"})
+        out = means.merge(ref, on="TrackID", how="left")
+        miss = ~np.all(np.isfinite(out[["Input X", "Input Y", "Input Z"]].to_numpy(float)), axis=1)
+        if np.any(miss):
+            out.loc[miss, "Input X"] = out.loc[miss, "Input X_mean"]
+            out.loc[miss, "Input Y"] = out.loc[miss, "Input Y_mean"]
+            out.loc[miss, "Input Z"] = out.loc[miss, "Input Z_mean"]
+        return out[["TrackID", "Input X", "Input Y", "Input Z"]]
+
+    raise ValueError(f"Unknown space_input_mode: {mode}")
+
+
+def _input_positions_for_pairs(
+    mdf: pd.DataFrame,
+    track_space_table: pd.DataFrame,
+    space_input_mode: str,
+) -> np.ndarray:
+    xt = mdf[["Position X_t", "Position Y_t", "Position Z_t"]].to_numpy(float)
+    if str(space_input_mode) == "row_position":
+        return xt
+
+    inp = mdf[["TrackID"]].merge(track_space_table, on="TrackID", how="left")
+    x = inp[["Input X", "Input Y", "Input Z"]].to_numpy(float)
+    miss = ~np.all(np.isfinite(x), axis=1)
+    if np.any(miss):
+        x[miss] = xt[miss]
+    return x
+
+
+def _input_positions_for_rows(
+    df_rows: pd.DataFrame,
+    track_space_table: pd.DataFrame,
+    space_input_mode: str,
+) -> np.ndarray:
+    xobs = df_rows[["Position X", "Position Y", "Position Z"]].to_numpy(float)
+    if str(space_input_mode) == "row_position":
+        return xobs
+    inp = df_rows[["TrackID"]].merge(track_space_table, on="TrackID", how="left")
+    x = inp[["Input X", "Input Y", "Input Z"]].to_numpy(float)
+    miss = ~np.all(np.isfinite(x), axis=1)
+    if np.any(miss):
+        x[miss] = xobs[miss]
+    return x
+
+
+def _condition_proxy(k_aug: np.ndarray, lam: float, lam_bias: float = 0.0) -> float:
+    m_aug = int(k_aug.shape[1])
+    a = k_aug.T @ k_aug
+    reg = np.full((m_aug,), float(lam), dtype=float)
+    reg[-1] = float(lam_bias)
+    a.flat[:: m_aug + 1] += reg
+    try:
+        return float(np.linalg.cond(a))
+    except np.linalg.LinAlgError:
+        return float("inf")
 
 
 def _reference_track_ids(df: pd.DataFrame, reference_time: float, fit_track_ids: np.ndarray | None = None) -> np.ndarray:
@@ -224,6 +312,7 @@ def _nearest_center_median_distance(x: np.ndarray, centers: np.ndarray) -> float
 
 def robust_fit_rbf_field(
     x: np.ndarray,
+    t: np.ndarray,
     d: np.ndarray,
     centers: np.ndarray,
     keep_fraction: float = 0.7,
@@ -234,6 +323,8 @@ def robust_fit_rbf_field(
     lam_bias: float = 0.0,
     center_mode: str = "ref",
     global_stage1: np.ndarray | None = None,
+    space_input_mode: str = "track_anchor",
+    rbf_linear_terms: bool = False,
 ) -> tuple[RBFField, np.ndarray, np.ndarray]:
     """Fit D ~= [K(X,C),1]W with sample trimming or plain ridge."""
     n = int(x.shape[0])
@@ -245,7 +336,7 @@ def robust_fit_rbf_field(
     sigma = float(sigma)
 
     k = _rbf_kernel(x, centers, sigma)
-    k_aug = _augment_kernel(k)
+    k_aug = _augment_kernel(k, x=x, t=t, rbf_linear_terms=rbf_linear_terms)
 
     if robust_mode not in {"sample_trim", "none"}:
         raise ValueError(f"Unsupported robust_mode in robust_fit_rbf_field: {robust_mode}")
@@ -293,14 +384,22 @@ def robust_fit_rbf_field(
         global_stage1=np.zeros((3,), dtype=float) if global_stage1 is None else np.asarray(global_stage1, dtype=float),
         center_mode=str(center_mode),
         robust_mode=str(robust_mode),
+        space_input_mode=str(space_input_mode),
+        rbf_linear_terms=bool(rbf_linear_terms),
     )
     return field, inlier_mask, res
 
 
-def predict_rbf_field(field: RBFField, x: np.ndarray) -> np.ndarray:
+def predict_rbf_field(field: RBFField, x: np.ndarray, t: np.ndarray | float) -> np.ndarray:
     """Predict drift vectors at positions x."""
+    if np.isscalar(t):
+        tt = np.full((x.shape[0],), float(t), dtype=float)
+    else:
+        tt = np.asarray(t, dtype=float).reshape(-1)
+        if tt.shape[0] != x.shape[0]:
+            raise ValueError("Time vector size does not match x rows in predict_rbf_field.")
     k = _rbf_kernel(x, field.centers, field.sigma)
-    k_aug = _augment_kernel(k)
+    k_aug = _augment_kernel(k, x=x, t=tt, rbf_linear_terms=field.rbf_linear_terms)
     return k_aug @ field.W_aug + field.global_stage1[None, :]
 
 
@@ -338,11 +437,14 @@ def _collect_pair_blocks(
     reference_time: float,
     min_pairs: int,
     fit_track_ids: np.ndarray | None,
-) -> tuple[list[float], list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+    track_space_table: pd.DataFrame,
+    space_input_mode: str,
+) -> tuple[list[float], list[np.ndarray], list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
     valid_times: list[float] = []
     x_blocks: list[np.ndarray] = []
     d_blocks: list[np.ndarray] = []
     tid_blocks: list[np.ndarray] = []
+    t_blocks: list[np.ndarray] = []
 
     for t in times:
         t = float(t)
@@ -351,17 +453,20 @@ def _collect_pair_blocks(
         mdf = _merge_with_reference(df, t=t, tref=reference_time, fit_track_ids=fit_track_ids)
         if int(mdf.shape[0]) < int(min_pairs):
             continue
-        xt = mdf[["Position X_t", "Position Y_t", "Position Z_t"]].to_numpy(float)
+        x_in = _input_positions_for_pairs(mdf, track_space_table=track_space_table, space_input_mode=space_input_mode)
+        xt_obs = mdf[["Position X_t", "Position Y_t", "Position Z_t"]].to_numpy(float)
         xr = mdf[["Position X_ref", "Position Y_ref", "Position Z_ref"]].to_numpy(float)
-        d = xt - xr
+        d = xt_obs - xr
         tids = mdf["TrackID"].to_numpy(float)
+        ts = np.full((x_in.shape[0],), float(t), dtype=float)
 
         valid_times.append(t)
-        x_blocks.append(xt)
+        x_blocks.append(x_in)
         d_blocks.append(d)
         tid_blocks.append(tids)
+        t_blocks.append(ts)
 
-    return valid_times, x_blocks, d_blocks, tid_blocks
+    return valid_times, x_blocks, d_blocks, tid_blocks, t_blocks
 
 
 def fit_temporal_rbf_fields_to_reference(
@@ -377,6 +482,9 @@ def fit_temporal_rbf_fields_to_reference(
     center_mode: str = "ref",
     two_stage: bool = False,
     lam_bias: float = 0.0,
+    track_space_table: pd.DataFrame | None = None,
+    space_input_mode: str = "track_anchor",
+    rbf_linear_terms: bool = False,
 ) -> tuple[dict[float, RBFField], dict[float, dict[str, float | int | bool | str]]]:
     """Fit all non-reference timepoint RBF fields jointly with temporal smoothness."""
     rows_by_time: dict[float, dict[str, float | int | bool | str]] = {}
@@ -388,19 +496,24 @@ def fit_temporal_rbf_fields_to_reference(
         sigma = _default_sigma(centers)
     sigma = float(sigma)
 
-    valid_times, x_blocks, d_blocks_raw, _ = _collect_pair_blocks(
+    if track_space_table is None:
+        track_space_table = _build_track_space_table(df, reference_time=reference_time, space_input_mode=space_input_mode)
+
+    valid_times, x_blocks, d_blocks_raw, _, t_blocks = _collect_pair_blocks(
         df=df,
         times=times,
         reference_time=reference_time,
         min_pairs=min_pairs,
         fit_track_ids=fit_track_ids,
+        track_space_table=track_space_table,
+        space_input_mode=space_input_mode,
     )
     t_count = len(valid_times)
     if t_count == 0:
         return fields_by_time, rows_by_time
 
     m_count = centers.shape[0]
-    m_aug = m_count + 1
+    m_aug = m_count + 1 + (4 if bool(rbf_linear_terms) else 0)
 
     d_blocks: list[np.ndarray] = []
     stage1: list[np.ndarray] = []
@@ -409,7 +522,12 @@ def fit_temporal_rbf_fields_to_reference(
         d_raw = d_blocks_raw[i]
         g = np.median(d_raw, axis=0) if two_stage else np.zeros((3,), dtype=float)
         d_res = d_raw - g[None, :]
-        k_aug = _augment_kernel(_rbf_kernel(x_blocks[i], centers, sigma))
+        k_aug = _augment_kernel(
+            _rbf_kernel(x_blocks[i], centers, sigma),
+            x=x_blocks[i],
+            t=t_blocks[i],
+            rbf_linear_terms=rbf_linear_terms,
+        )
 
         stage1.append(np.asarray(g, dtype=float))
         d_blocks.append(d_res)
@@ -463,12 +581,17 @@ def fit_temporal_rbf_fields_to_reference(
             global_stage1=stage1[i],
             center_mode=str(center_mode),
             robust_mode="sample_trim",
+            space_input_mode=str(space_input_mode),
+            rbf_linear_terms=bool(rbf_linear_terms),
         )
         fields_by_time[t] = field
 
-        d_pred_total = predict_rbf_field(field, x_blocks[i])
+        d_pred_total = predict_rbf_field(field, x_blocks[i], t=t_blocks[i])
         d_target_total = d_blocks_raw[i]
         res = np.linalg.norm(d_pred_total - d_target_total, axis=1)
+        weight_max_abs = float(np.nanmax(np.abs(field.W_aug))) if field.W_aug.size else float("nan")
+        weights_all_finite = bool(np.all(np.isfinite(field.W_aug)))
+        cond_proxy = _condition_proxy(k_aug_blocks[i], lam=lam, lam_bias=lam_bias)
 
         rows_by_time[t] = {
             "diag_type": "timepoint",
@@ -491,6 +614,11 @@ def fit_temporal_rbf_fields_to_reference(
             "pred_drift_median": float(np.median(np.linalg.norm(d_pred_total, axis=1))),
             "global_stage1_mag": float(np.linalg.norm(stage1[i])),
             "two_stage": bool(two_stage),
+            "space_input_mode": str(space_input_mode),
+            "rbf_linear_terms": bool(rbf_linear_terms),
+            "weight_max_abs": weight_max_abs,
+            "weights_all_finite": bool(weights_all_finite),
+            "cond_proxy": float(cond_proxy),
         }
 
     return fields_by_time, rows_by_time
@@ -510,6 +638,9 @@ def estimate_rbf_field_to_reference(
     center_mode: str = "ref",
     two_stage: bool = False,
     lam_bias: float = 0.0,
+    track_space_table: pd.DataFrame | None = None,
+    space_input_mode: str = "track_anchor",
+    rbf_linear_terms: bool = False,
 ) -> tuple[RBFField | None, dict[str, float | int | bool | str]]:
     """Fit a drift field for one timepoint against the reference time."""
     mdf = _merge_with_reference(df, t=t, tref=tref, fit_track_ids=fit_track_ids)
@@ -529,6 +660,11 @@ def estimate_rbf_field_to_reference(
         }
         return None, info
 
+    if track_space_table is None:
+        track_space_table = _build_track_space_table(df, reference_time=tref, space_input_mode=space_input_mode)
+    x_in = _input_positions_for_pairs(mdf, track_space_table=track_space_table, space_input_mode=space_input_mode)
+    t_in = np.full((mdf.shape[0],), float(t), dtype=float)
+
     xt = mdf[["Position X_t", "Position Y_t", "Position Z_t"]].to_numpy(float)
     xr = mdf[["Position X_ref", "Position Y_ref", "Position Z_ref"]].to_numpy(float)
     d_total = xt - xr
@@ -537,7 +673,8 @@ def estimate_rbf_field_to_reference(
     d_res = d_total - g[None, :]
 
     field, inlier_mask, _ = robust_fit_rbf_field(
-        x=xt,
+        x=x_in,
+        t=t_in,
         d=d_res,
         centers=centers,
         keep_fraction=keep_fraction,
@@ -547,10 +684,21 @@ def estimate_rbf_field_to_reference(
         lam_bias=lam_bias,
         center_mode=center_mode,
         global_stage1=g,
+        space_input_mode=space_input_mode,
+        rbf_linear_terms=rbf_linear_terms,
     )
 
-    d_pred = predict_rbf_field(field, xt)
+    d_pred = predict_rbf_field(field, x_in, t=t_in)
     res = np.linalg.norm(d_pred - d_total, axis=1)
+    k_aug = _augment_kernel(
+        _rbf_kernel(x_in, centers, field.sigma),
+        x=x_in,
+        t=t_in,
+        rbf_linear_terms=rbf_linear_terms,
+    )
+    weight_max_abs = float(np.nanmax(np.abs(field.W_aug))) if field.W_aug.size else float("nan")
+    weights_all_finite = bool(np.all(np.isfinite(field.W_aug)))
+    cond_proxy = _condition_proxy(k_aug, lam=lam, lam_bias=lam_bias)
 
     info = {
         "diag_type": "timepoint",
@@ -566,10 +714,15 @@ def estimate_rbf_field_to_reference(
         "M": int(field.centers.shape[0]),
         "center_mode": str(center_mode),
         "robust_mode": str(robust_mode),
-        "center_nn_median": _nearest_center_median_distance(xt, field.centers),
+        "center_nn_median": _nearest_center_median_distance(x_in, field.centers),
         "pred_drift_median": float(np.median(np.linalg.norm(d_pred, axis=1))),
         "global_stage1_mag": float(np.linalg.norm(g)),
         "two_stage": bool(two_stage),
+        "space_input_mode": str(space_input_mode),
+        "rbf_linear_terms": bool(rbf_linear_terms),
+        "weight_max_abs": weight_max_abs,
+        "weights_all_finite": bool(weights_all_finite),
+        "cond_proxy": float(cond_proxy),
     }
     return field, info
 
@@ -579,6 +732,8 @@ def _compute_track_trim_residuals(
     reference_time: float,
     fields_by_time: dict[float, Optional[RBFField]],
     candidate_track_ids: np.ndarray,
+    track_space_table: pd.DataFrame,
+    space_input_mode: str,
 ) -> pd.DataFrame:
     """Compute per-track residual medians across all available timepoints."""
     residuals: dict[float, list[float]] = {float(tid): [] for tid in candidate_track_ids.tolist()}
@@ -589,10 +744,12 @@ def _compute_track_trim_residuals(
         mdf = _merge_with_reference(df, t=float(t), tref=float(reference_time), fit_track_ids=candidate_track_ids)
         if mdf.shape[0] == 0:
             continue
+        x_in = _input_positions_for_pairs(mdf, track_space_table=track_space_table, space_input_mode=space_input_mode)
+        tt = np.full((mdf.shape[0],), float(t), dtype=float)
         xt = mdf[["Position X_t", "Position Y_t", "Position Z_t"]].to_numpy(float)
         xr = mdf[["Position X_ref", "Position Y_ref", "Position Z_ref"]].to_numpy(float)
         d = xt - xr
-        pred = predict_rbf_field(field, xt)
+        pred = predict_rbf_field(field, x_in, t=tt)
         res = np.linalg.norm(pred - d, axis=1)
         tids = mdf["TrackID"].to_numpy(float)
         for tid, rr in zip(tids, res):
@@ -621,6 +778,10 @@ def _fit_fields_once(
     center_mode: str,
     two_stage: bool,
     lam_bias: float,
+    track_space_table: pd.DataFrame,
+    space_input_mode: str,
+    rbf_linear_terms: bool,
+    weight_abort_threshold: float,
 ) -> tuple[dict[float, Optional[RBFField]], list[dict[str, float | int | bool | str]]]:
     fields_by_time: dict[float, Optional[RBFField]] = {float(reference_time): None}
     tf_rows: list[dict[str, float | int | bool | str]] = []
@@ -644,12 +805,21 @@ def _fit_fields_once(
             "center_mode": str(center_mode),
             "robust_mode": str(robust_mode),
             "center_nn_median": _nearest_center_median_distance(
-                df[df["Time"] == float(reference_time)][["Position X", "Position Y", "Position Z"]].to_numpy(float),
+                _input_positions_for_rows(
+                    df[df["Time"] == float(reference_time)],
+                    track_space_table=track_space_table,
+                    space_input_mode=space_input_mode,
+                ),
                 centers,
             ),
             "pred_drift_median": 0.0,
             "global_stage1_mag": 0.0,
             "two_stage": bool(two_stage),
+            "space_input_mode": str(space_input_mode),
+            "rbf_linear_terms": bool(rbf_linear_terms),
+            "weight_max_abs": 0.0,
+            "weights_all_finite": True,
+            "cond_proxy": np.nan,
         }
     )
 
@@ -667,6 +837,9 @@ def _fit_fields_once(
             center_mode=center_mode,
             two_stage=two_stage,
             lam_bias=lam_bias,
+            track_space_table=track_space_table,
+            space_input_mode=space_input_mode,
+            rbf_linear_terms=rbf_linear_terms,
         )
         for t in times:
             t = float(t)
@@ -685,12 +858,21 @@ def _fit_fields_once(
                     "robust_mode": str(robust_mode),
                     "temporal_gamma": float(temporal_gamma),
                     "two_stage": bool(two_stage),
+                    "space_input_mode": str(space_input_mode),
+                    "rbf_linear_terms": bool(rbf_linear_terms),
                 },
             )
             tf_rows.append(row)
             field = temporal_fields.get(t)
             if field is not None:
-                fields_by_time[t] = field
+                wmax = float(np.nanmax(np.abs(field.W_aug))) if field.W_aug.size else float("nan")
+                finite_w = bool(np.all(np.isfinite(field.W_aug)))
+                if (not finite_w) or (np.isfinite(wmax) and wmax > float(weight_abort_threshold)):
+                    row["ok"] = False
+                    row["reason"] = f"Unstable weights (max_abs={wmax:.3g})"
+                    print(f"[WARN] RBF temporal fit skipped at t={t}: unstable weights max_abs={wmax:.3g}")
+                else:
+                    fields_by_time[t] = field
     else:
         for t in times:
             t = float(t)
@@ -710,13 +892,23 @@ def _fit_fields_once(
                 center_mode=center_mode,
                 two_stage=two_stage,
                 lam_bias=lam_bias,
+                track_space_table=track_space_table,
+                space_input_mode=space_input_mode,
+                rbf_linear_terms=rbf_linear_terms,
             )
             info["temporal_gamma"] = float(temporal_gamma)
             info.setdefault("temporal_res_median", info.get("res_median", np.nan))
             info.setdefault("temporal_smoothness_prev", np.nan)
             tf_rows.append(info)
             if bool(info.get("ok", False)) and field is not None:
-                fields_by_time[t] = field
+                wmax = float(info.get("weight_max_abs", np.nan))
+                finite_w = bool(info.get("weights_all_finite", True))
+                if (not finite_w) or (np.isfinite(wmax) and wmax > float(weight_abort_threshold)):
+                    info["ok"] = False
+                    info["reason"] = f"Unstable weights (max_abs={wmax:.3g})"
+                    print(f"[WARN] RBF fit skipped at t={t}: unstable weights max_abs={wmax:.3g}")
+                else:
+                    fields_by_time[t] = field
 
     return fields_by_time, tf_rows
 
@@ -737,6 +929,11 @@ def correct_positions_rbf_to_reference(
     robust_mode: str = "sample_trim",
     track_trim_iters: int = 4,
     two_stage: bool = False,
+    space_input_mode: str = "track_anchor",
+    rbf_linear_terms: bool = False,
+    row_position_iters: int = 3,
+    row_position_tol: float = 1e-3,
+    weight_abort_threshold: float = 1e4,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict[float, Optional[RBFField]], np.ndarray, float]:
     """Correct all timepoints with robust RBF fits to a fixed reference.
 
@@ -768,6 +965,7 @@ def correct_positions_rbf_to_reference(
     if sigma is None:
         sigma = _default_sigma(centers)
     sigma = float(sigma)
+    track_space_table = _build_track_space_table(d, reference_time=reference_time, space_input_mode=space_input_mode)
 
     used_track_ids = fit_track_ids
     track_diag_rows: list[dict[str, float | int | bool | str]] = []
@@ -780,7 +978,7 @@ def correct_positions_rbf_to_reference(
             n_iters = max(1, int(track_trim_iters))
 
             for it in range(n_iters):
-                fields_tmp, _ = _fit_fields_once(
+                fields_tmp, rows_tmp = _fit_fields_once(
                     df=d,
                     times=times,
                     reference_time=reference_time,
@@ -795,8 +993,29 @@ def correct_positions_rbf_to_reference(
                     center_mode=center_mode,
                     two_stage=two_stage,
                     lam_bias=0.0,
+                    track_space_table=track_space_table,
+                    space_input_mode=space_input_mode,
+                    rbf_linear_terms=rbf_linear_terms,
+                    weight_abort_threshold=weight_abort_threshold,
                 )
-                tab = _compute_track_trim_residuals(d, reference_time, fields_tmp, candidate_track_ids=base_ids)
+                bad_weights = False
+                for rr in rows_tmp:
+                    wf = bool(rr.get("weights_all_finite", True))
+                    wmax = float(rr.get("weight_max_abs", np.nan))
+                    if (not wf) or (np.isfinite(wmax) and wmax > float(weight_abort_threshold)):
+                        bad_weights = True
+                        break
+                if bad_weights:
+                    print(f"[WARN] RBF track-trim iteration aborted at iter={it+1} due to unstable weights.")
+                    break
+                tab = _compute_track_trim_residuals(
+                    d,
+                    reference_time,
+                    fields_tmp,
+                    candidate_track_ids=base_ids,
+                    track_space_table=track_space_table,
+                    space_input_mode=space_input_mode,
+                )
                 if tab.shape[0] == 0:
                     break
 
@@ -838,6 +1057,10 @@ def correct_positions_rbf_to_reference(
         center_mode=center_mode,
         two_stage=two_stage,
         lam_bias=0.0,
+        track_space_table=track_space_table,
+        space_input_mode=space_input_mode,
+        rbf_linear_terms=rbf_linear_terms,
+        weight_abort_threshold=weight_abort_threshold,
     )
 
     if robust_mode == "track_trim" and track_diag_rows:
@@ -862,9 +1085,25 @@ def correct_positions_rbf_to_reference(
         if field is None:
             continue
         mask_t = df_corr["Time"] == t
-        x = df_corr.loc[mask_t, ["Position X", "Position Y", "Position Z"]].to_numpy(float)
-        dhat = predict_rbf_field(field, x)
-        xc = x - dhat
+        rows_t = df_corr.loc[mask_t, ["TrackID", "Position X", "Position Y", "Position Z"]].copy()
+        x_obs = rows_t[["Position X", "Position Y", "Position Z"]].to_numpy(float)
+        t_vec = np.full((x_obs.shape[0],), float(t), dtype=float)
+
+        if str(space_input_mode) == "row_position":
+            xk = x_obs.copy()
+            x_next = x_obs.copy()
+            for _ in range(max(1, int(row_position_iters))):
+                dhat = predict_rbf_field(field, xk, t=t_vec)
+                x_next = x_obs - dhat
+                step = np.linalg.norm(x_next - xk, axis=1)
+                xk = x_next
+                if step.size and float(np.nanmedian(step)) <= float(row_position_tol):
+                    break
+            xc = x_next
+        else:
+            x_in = _input_positions_for_rows(rows_t, track_space_table=track_space_table, space_input_mode=space_input_mode)
+            dhat = predict_rbf_field(field, x_in, t=t_vec)
+            xc = x_obs - dhat
         df_corr.loc[mask_t, ["Position X_corr", "Position Y_corr", "Position Z_corr"]] = xc
 
     tf_table = pd.DataFrame(tf_rows)
@@ -980,6 +1219,28 @@ def make_rbf_diagnostic_plots(tf_table: pd.DataFrame, out_prefix: str | Path) ->
         plt.title("RBF predicted drift magnitude over time")
         plt.tight_layout()
         plt.savefig(out_prefix + "_rbf_pred_drift_median.png", dpi=300)
+        plt.close(fig)
+
+    if "weight_max_abs" in ttab.columns:
+        fig = plt.figure()
+        plt.plot(ttab.loc[ok, "t1"], ttab.loc[ok, "weight_max_abs"], marker="o")
+        plt.xlabel("Time (t)")
+        plt.ylabel("max |weight|")
+        plt.title("RBF max absolute weight over time")
+        plt.tight_layout()
+        plt.savefig(out_prefix + "_rbf_weight_max_abs.png", dpi=300)
+        plt.close(fig)
+
+    if "cond_proxy" in ttab.columns:
+        fig = plt.figure()
+        vals = np.maximum(ttab.loc[ok, "cond_proxy"].to_numpy(float), 1.0)
+        plt.plot(ttab.loc[ok, "t1"], vals, marker="o")
+        plt.yscale("log")
+        plt.xlabel("Time (t)")
+        plt.ylabel("cond(K^T K + reg)")
+        plt.title("RBF condition proxy over time")
+        plt.tight_layout()
+        plt.savefig(out_prefix + "_rbf_condition_proxy.png", dpi=300)
         plt.close(fig)
 
     if "diag_type" in tf_table.columns:

@@ -44,9 +44,21 @@ def test_rbf_rigid_local_smoke(tmp_path):
         robust_mode="track_trim",
         track_trim_iters=3,
         two_stage=True,
+        space_input_mode="track_anchor",
     )
     assert "Position X_corr" in df_rbf_tracktrim.columns
     assert "center_mode" in tf_tracktrim.columns
+
+    df_rbf_rowpos, tf_rowpos, *_ = correct_positions_rbf_to_reference(
+        df,
+        m=12,
+        min_pairs=8,
+        space_input_mode="row_position",
+        row_position_iters=4,
+        rbf_linear_terms=True,
+    )
+    assert "Position X_corr" in df_rbf_rowpos.columns
+    assert "weight_max_abs" in tf_rowpos.columns
 
     step, _, times = build_step_transforms(df, min_pairs=8)
     df_rigid = apply_rigid_correction_to_tracks(df, step, times=times, ref_time=float(times.min()))
@@ -64,9 +76,12 @@ def test_rbf_rigid_local_smoke(tmp_path):
         df,
         m_centers=20,
         robust_iters=2,
-        space_input_mode="track_anchor",
+        space_input_mode="ref_position",
         n_refine=2,
         two_stage=True,
+        robust_mode="track_trim",
+        track_trim_iters=3,
+        rbf_linear_terms=True,
     )
     df_st = apply_correction(df, st_model)
     assert "Position X_corr" in df_st.columns

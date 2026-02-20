@@ -130,10 +130,10 @@ def build_static_baselines(datasets: list[DatasetPair]) -> dict[str, dict[str, p
         df_rbf_default, _, _, _, _ = correct_positions_rbf_to_reference(
             df,
             reference_time=None,
-            m=25,
+            m=45,
             keep_fraction=0.7,
-            lam=1e-2,
-            sigma=None,
+            lam=3e-4,
+            sigma=180.0,
             min_pairs=15,
             seed=0,
             temporal_gamma=0.0,
@@ -141,11 +141,11 @@ def build_static_baselines(datasets: list[DatasetPair]) -> dict[str, dict[str, p
         st_model, _ = fit_spacetime_rbf_model(
             df,
             reference_time=None,
-            m_centers=40,
-            ell_space=120.0,
-            ell_time=5.0,
-            lam=1e-2,
-            robust_keep_fraction=0.7,
+            m_centers=70,
+            ell_space=260.0,
+            ell_time=6.0,
+            lam=3e-4,
+            robust_keep_fraction=0.8,
             robust_iters=4,
             seed=0,
         )
@@ -204,11 +204,11 @@ def sweep_rbf(
                         "rbf_lam": float(lam),
                         "rbf_temporal_gamma": float(gamma),
                         "rbf_sigma": "auto" if sigma is None else float(sigma),
-                        "st_m_centers": 40,
-                        "st_lam": 1e-2,
-                        "st_ell_space": 120.0,
-                        "st_ell_time": 5.0,
-                        "st_robust_keep_fraction": 0.7,
+                        "st_m_centers": 70,
+                        "st_lam": 3e-4,
+                        "st_ell_space": 260.0,
+                        "st_ell_time": 6.0,
+                        "st_robust_keep_fraction": 0.8,
                         **ev,
                     }
                 )
@@ -257,10 +257,10 @@ def sweep_st_rbf(
                         "config_id": int(config_id),
                         "dataset": ds.name,
                         "method": method,
-                        "rbf_m": 25,
-                        "rbf_lam": 1e-2,
+                        "rbf_m": 45,
+                        "rbf_lam": 3e-4,
                         "rbf_temporal_gamma": 0.0,
-                        "rbf_sigma": "auto",
+                        "rbf_sigma": 180.0,
                         "st_m_centers": int(m_centers),
                         "st_lam": float(lam),
                         "st_ell_space": float(ell_space),
@@ -369,4 +369,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

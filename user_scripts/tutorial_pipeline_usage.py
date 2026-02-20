@@ -67,11 +67,11 @@ DEFAULT_METHODS = ["rbf", "rigid", "local", "st_rbf"]
 OPTIONS = {
     "reference_time": None,
     "seed": 0,
-    "lam": 1e-2,
+    "lam": 3e-4,
     "keep_fraction": 0.7,
     "min_pairs": 15,
-    "m_centers": 25,
-    "sigma": None,
+    "m_centers": 45,
+    "sigma": 180.0,
     "temporal_gamma": 0.0,
     "rigid_mode": "rigid",
     "inlier_reestimate_iters": 30,
@@ -81,10 +81,10 @@ OPTIONS = {
     "ell_um_field": 120.0,
     "min_edge_weight": 0.25,
     "max_pairs_per_node": 50,
-    "st_m_centers": 40,
-    "st_ell_space": 120.0,
-    "st_ell_time": 5.0,
-    "st_robust_keep_fraction": 0.7,
+    "st_m_centers": 70,
+    "st_ell_space": 260.0,
+    "st_ell_time": 6.0,
+    "st_robust_keep_fraction": 0.8,
     "st_robust_iters": 4,
 }
 
@@ -263,4 +263,4 @@ if RUN_SYNTHETIC:
             use_stationary_subset=False)
         postprocess_outputs(df_syn, file_path, out_prefix_syn, corr_syn)
 
-# %%
+# %% END

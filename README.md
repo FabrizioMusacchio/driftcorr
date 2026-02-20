@@ -155,3 +155,7 @@ It contains these sections:
 - ST-RBF: `--st-m-centers`, `--st-ell-space`, `--st-ell-time`
 - Stationary subset: `--use-stationary-subset`
 - Disable visual plots: `--skip-visual-plots`
+
+Current tuned defaults (Feb 2026):
+- RBF defaults: `--m-centers 45 --lam 3e-4 --sigma 180 --temporal-gamma 0`
+- ST-RBF defaults: `--st-m-centers 70 --st-ell-space 260 --st-ell-time 6 --st-robust-keep-fraction 0.8 --lam 3e-4`

@@ -1,3 +1,5 @@
+import numpy as np
+
 from driftcorr.method_local_communities import run_local_drift_correction_for_file
 from driftcorr.method_rbf_ref import correct_positions_rbf_to_reference
 from driftcorr.method_rigid_step import (
@@ -6,9 +8,21 @@ from driftcorr.method_rigid_step import (
     build_piecewise_rigid_model,
     build_step_transforms,
 )
-from driftcorr.method_spacetime_rbf import apply_correction, fit_spacetime_rbf_model
+from driftcorr.method_spacetime_rbf import _choose_centers, apply_correction, fit_spacetime_rbf_model
 from driftcorr.stationary import find_stationary_tracks
 from driftcorr.synthetic import make_synthetic_tracks
+
+
+def test_spacetime_choose_centers_returns_subset_rows():
+    u = np.arange(60, dtype=float).reshape(15, 4)
+    c = _choose_centers(u, m=6, seed=7)
+    assert c.shape == (6, 4)
+    assert c is not u
+
+    # Every selected center row must correspond to one row from input u.
+    u_rows = {tuple(row.tolist()) for row in u}
+    c_rows = {tuple(row.tolist()) for row in c}
+    assert c_rows.issubset(u_rows)
 
 
 def test_rbf_rigid_local_smoke(tmp_path):

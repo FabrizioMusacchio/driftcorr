@@ -402,9 +402,9 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--keep-fraction", type=float, default=0.7)
     p.add_argument("--min-pairs", type=int, default=15)
 
-    p.add_argument("--m-centers", type=int, default=25)
-    p.add_argument("--lam", type=float, default=1e-2)
-    p.add_argument("--sigma", type=float, default=None)
+    p.add_argument("--m-centers", type=int, default=45)
+    p.add_argument("--lam", type=float, default=3e-4)
+    p.add_argument("--sigma", type=float, default=180.0)
     p.add_argument("--seed", type=int, default=0)
 
     p.add_argument("--temporal-gamma", type=float, default=0.0)
@@ -428,10 +428,10 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
         help="Use per-row position instead of per-track mean for local method assignment",
     )
 
-    p.add_argument("--st-m-centers", type=int, default=40)
-    p.add_argument("--st-ell-space", type=float, default=120.0)
-    p.add_argument("--st-ell-time", type=float, default=5.0)
-    p.add_argument("--st-robust-keep-fraction", type=float, default=0.7)
+    p.add_argument("--st-m-centers", type=int, default=70)
+    p.add_argument("--st-ell-space", type=float, default=260.0)
+    p.add_argument("--st-ell-time", type=float, default=6.0)
+    p.add_argument("--st-robust-keep-fraction", type=float, default=0.8)
     p.add_argument("--st-robust-iters", type=int, default=4)
 
     p.add_argument("--use-stationary-subset", action="store_true")

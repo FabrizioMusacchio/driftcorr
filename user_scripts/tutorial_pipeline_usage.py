@@ -236,7 +236,7 @@ if RUN_BATCH:
 
 
 # %% HOW TO GENERATE AND RUN SYNTHETIC DATA
-RUN_SYNTHETIC = False
+RUN_SYNTHETIC = True
 if RUN_SYNTHETIC:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files tutorial"
     synthetic = generate_synthetic_imaris_folder(
@@ -247,8 +247,7 @@ if RUN_SYNTHETIC:
         stationary_fraction=0.45,
         migrating_fraction=0.35,
         seed=42,
-        temporal_smoothness=0.9,
-    )
+        temporal_smoothness=0.9)
 
     synthetic_results = synthetic_root / "driftcorr_results"
 
@@ -261,6 +260,7 @@ if RUN_SYNTHETIC:
             out_prefix=out_prefix_syn,
             methods=DEFAULT_METHODS,
             opts=OPTIONS,
-            use_stationary_subset=False,
-        )
+            use_stationary_subset=False)
         postprocess_outputs(df_syn, file_path, out_prefix_syn, corr_syn)
+
+# %%

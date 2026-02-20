@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "driftcorr"
+version = "0.1.0"
+description = "Drift correction for IMARIS cell tracking exports"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pandas",
+  "matplotlib",
+  "scipy",
+  "networkx",
+  "scikit-learn",
+  "xlrd",
+]
+
+[project.scripts]
+driftcorr = "driftcorr.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["driftcorr*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

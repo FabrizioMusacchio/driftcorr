@@ -1,0 +1,299 @@
+"""Visualization utilities for qualitative drift-correction inspection.
+
+This module produces method-comparison figures designed for manual review:
+- trajectory-level comparison plots (original vs corrected),
+- frame-by-frame 3D snapshots for scrolling inspection,
+- optional ground-truth panel on synthetic data (GT | Original | Corrected).
+
+These plots complement scalar metrics by revealing local geometric artifacts,
+over-correction, or residual drift patterns that are difficult to diagnose from
+single summary numbers.
+
+Mathematical role:
+- No optimization is performed here.
+- The module visualizes outputs from models that typically apply:
+  `x_corr = x_obs - d_hat(x,t)` or rigid equivalents.
+
+Controlling parameters:
+- figure sizing and axis limits are derived from data ranges,
+- optional `df_groundtruth` enables a third GT panel in frame plots.
+
+Effects:
+- Consistent axis limits make before/after comparisons visually trustworthy.
+
+Author
+-------
+author: Fabrizio Musacchio
+date: Feb 2026
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+
+def _compute_limits(
+    df_orig: pd.DataFrame,
+    df_corr: pd.DataFrame,
+    df_groundtruth: pd.DataFrame | None = None,
+) -> tuple[float, float, float, float, float, float]:
+    x_min = min(float(df_orig["Position X"].min()), float(df_corr["Position X_corr"].min()))
+    x_max = max(float(df_orig["Position X"].max()), float(df_corr["Position X_corr"].max()))
+    y_min = min(float(df_orig["Position Y"].min()), float(df_corr["Position Y_corr"].min()))
+    y_max = max(float(df_orig["Position Y"].max()), float(df_corr["Position Y_corr"].max()))
+    z_min = min(float(df_orig["Position Z"].min()), float(df_corr["Position Z_corr"].min()))
+    z_max = max(float(df_orig["Position Z"].max()), float(df_corr["Position Z_corr"].max()))
+    if df_groundtruth is not None and df_groundtruth.shape[0] > 0:
+        x_min = min(x_min, float(df_groundtruth["Position X"].min()))
+        x_max = max(x_max, float(df_groundtruth["Position X"].max()))
+        y_min = min(y_min, float(df_groundtruth["Position Y"].min()))
+        y_max = max(y_max, float(df_groundtruth["Position Y"].max()))
+        z_min = min(z_min, float(df_groundtruth["Position Z"].min()))
+        z_max = max(z_max, float(df_groundtruth["Position Z"].max()))
+    return x_min, x_max, y_min, y_max, z_min, z_max
+
+
+def plot_tracks_comparison(
+    df_orig: pd.DataFrame,
+    df_corr: pd.DataFrame,
+    out_path: str | Path,
+    title: str = "",
+) -> None:
+    """Plot original vs corrected tracks as full trajectories in 3D/2D views."""
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig = plt.figure(figsize=(16, 18))
+
+    x_min, x_max, y_min, y_max, z_min, z_max = _compute_limits(df_orig, df_corr)
+
+    ax1 = fig.add_subplot(321, projection="3d")
+    for tid in df_orig["TrackID"].unique():
+        d = df_orig[df_orig["TrackID"] == tid]
+        ax1.plot(d["Position X"], d["Position Y"], d["Position Z"], alpha=0.9)
+    ax1.set_title("Original (3D)")
+    ax1.set_xlim(x_min, x_max)
+    ax1.set_ylim(y_min, y_max)
+    ax1.set_zlim(z_min, z_max)
+    ax1.set_xlabel("X")
+    ax1.set_ylabel("Y")
+    ax1.set_zlabel("Z")
+
+    ax2 = fig.add_subplot(322, projection="3d")
+    for tid in df_corr["TrackID"].unique():
+        d = df_corr[df_corr["TrackID"] == tid]
+        ax2.plot(d["Position X_corr"], d["Position Y_corr"], d["Position Z_corr"], alpha=0.9)
+    ax2.set_title("Corrected (3D)")
+    ax2.set_xlim(x_min, x_max)
+    ax2.set_ylim(y_min, y_max)
+    ax2.set_zlim(z_min, z_max)
+    ax2.set_xlabel("X")
+    ax2.set_ylabel("Y")
+    ax2.set_zlabel("Z")
+
+    ax3 = fig.add_subplot(323)
+    for tid in df_orig["TrackID"].unique():
+        d = df_orig[df_orig["TrackID"] == tid]
+        ax3.plot(d["Position X"], d["Position Y"], alpha=0.7)
+    ax3.set_title("Original XY")
+    ax3.set_aspect("equal", adjustable="box")
+    ax3.set_xlim(x_min, x_max)
+    ax3.set_ylim(y_min, y_max)
+    ax3.set_xlabel("X")
+    ax3.set_ylabel("Y")
+
+    ax4 = fig.add_subplot(324)
+    for tid in df_corr["TrackID"].unique():
+        d = df_corr[df_corr["TrackID"] == tid]
+        ax4.plot(d["Position X_corr"], d["Position Y_corr"], alpha=0.7)
+    ax4.set_title("Corrected XY")
+    ax4.set_aspect("equal", adjustable="box")
+    ax4.set_xlim(x_min, x_max)
+    ax4.set_ylim(y_min, y_max)
+    ax4.set_xlabel("X")
+    ax4.set_ylabel("Y")
+
+    ax5 = fig.add_subplot(325)
+    for tid in df_orig["TrackID"].unique():
+        d = df_orig[df_orig["TrackID"] == tid]
+        ax5.plot(d["Position X"], d["Position Z"], alpha=0.7)
+    ax5.set_title("Original XZ")
+    ax5.set_aspect("equal", adjustable="box")
+    ax5.set_xlim(x_min, x_max)
+    ax5.set_ylim(z_min, z_max)
+    ax5.set_xlabel("X")
+    ax5.set_ylabel("Z")
+
+    ax6 = fig.add_subplot(326)
+    for tid in df_corr["TrackID"].unique():
+        d = df_corr[df_corr["TrackID"] == tid]
+        ax6.plot(d["Position X_corr"], d["Position Z_corr"], alpha=0.7)
+    ax6.set_title("Corrected XZ")
+    ax6.set_aspect("equal", adjustable="box")
+    ax6.set_xlim(x_min, x_max)
+    ax6.set_ylim(z_min, z_max)
+    ax6.set_xlabel("X")
+    ax6.set_ylabel("Z")
+
+    fig.suptitle(title, fontsize=14)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300)
+    plt.close(fig)
+
+
+def _format_time_for_filename(t: float) -> str:
+    s = f"{float(t):.6f}".rstrip("0").rstrip(".")
+    return s.replace("-", "m").replace(".", "p")
+
+
+def plot_timepoint_side_by_side_3d(
+    df_orig: pd.DataFrame,
+    df_corr: pd.DataFrame,
+    out_dir: str | Path,
+    title_prefix: str = "",
+    df_groundtruth: pd.DataFrame | None = None,
+) -> list[Path]:
+    """Save one 3D figure per timepoint: optionally GT, then original and corrected."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    x_min, x_max, y_min, y_max, z_min, z_max = _compute_limits(df_orig, df_corr, df_groundtruth=df_groundtruth)
+
+    all_times = np.array(sorted(np.intersect1d(df_orig["Time"].unique(), df_corr["Time"].unique())), dtype=float)
+    if df_groundtruth is not None:
+        all_times = np.array(sorted(np.intersect1d(all_times, df_groundtruth["Time"].unique())), dtype=float)
+    all_tids = np.array(sorted(np.intersect1d(df_orig["TrackID"].unique(), df_corr["TrackID"].unique())), dtype=float)
+    if df_groundtruth is not None:
+        all_tids = np.array(sorted(np.intersect1d(all_tids, df_groundtruth["TrackID"].unique())), dtype=float)
+    if all_tids.size == 0:
+        all_tids = np.array(sorted(np.union1d(df_orig["TrackID"].unique(), df_corr["TrackID"].unique())), dtype=float)
+    if df_groundtruth is not None:
+        all_tids = np.array(sorted(np.union1d(all_tids, df_groundtruth["TrackID"].unique())), dtype=float)
+
+    vmin = float(np.min(all_tids)) if all_tids.size else 0.0
+    vmax = float(np.max(all_tids)) if all_tids.size else 1.0
+
+    saved: list[Path] = []
+    for idx, t in enumerate(all_times):
+        do = df_orig[df_orig["Time"] == float(t)]
+        dc = df_corr[df_corr["Time"] == float(t)]
+        dgt = df_groundtruth[df_groundtruth["Time"] == float(t)] if df_groundtruth is not None else None
+
+        has_gt = dgt is not None
+        if has_gt:
+            fig = plt.figure(figsize=(20, 6), constrained_layout=True)
+            ax_gt = fig.add_subplot(131, projection="3d")
+            ax1 = fig.add_subplot(132, projection="3d")
+            ax2 = fig.add_subplot(133, projection="3d")
+            ax_gt.scatter(
+                dgt["Position X"],
+                dgt["Position Y"],
+                dgt["Position Z"],
+                c=dgt["TrackID"],
+                cmap="turbo",
+                vmin=vmin,
+                vmax=vmax,
+                s=18,
+                alpha=0.9,
+            )
+            ax_gt.set_title(f"Ground Truth (no imaging drift) | Time={t}")
+            ax_gt.set_xlim(x_min, x_max)
+            ax_gt.set_ylim(y_min, y_max)
+            ax_gt.set_zlim(z_min, z_max)
+            ax_gt.set_xlabel("X")
+            ax_gt.set_ylabel("Y")
+            ax_gt.set_zlabel("Z")
+        else:
+            fig = plt.figure(figsize=(14, 6), constrained_layout=True)
+            ax1 = fig.add_subplot(121, projection="3d")
+            ax2 = fig.add_subplot(122, projection="3d")
+
+        ax1.scatter(
+            do["Position X"],
+            do["Position Y"],
+            do["Position Z"],
+            c=do["TrackID"],
+            cmap="turbo",
+            vmin=vmin,
+            vmax=vmax,
+            s=18,
+            alpha=0.9,
+        )
+        ax1.set_title(f"Original | Time={t}")
+        ax1.set_xlim(x_min, x_max)
+        ax1.set_ylim(y_min, y_max)
+        ax1.set_zlim(z_min, z_max)
+        ax1.set_xlabel("X")
+        ax1.set_ylabel("Y")
+        ax1.set_zlabel("Z")
+
+        ax2.scatter(
+            dc["Position X_corr"],
+            dc["Position Y_corr"],
+            dc["Position Z_corr"],
+            c=dc["TrackID"],
+            cmap="turbo",
+            vmin=vmin,
+            vmax=vmax,
+            s=18,
+            alpha=0.9,
+        )
+        ax2.set_title(f"Corrected | Time={t}")
+        ax2.set_xlim(x_min, x_max)
+        ax2.set_ylim(y_min, y_max)
+        ax2.set_zlim(z_min, z_max)
+        ax2.set_xlabel("X")
+        ax2.set_ylabel("Y")
+        ax2.set_zlabel("Z")
+
+        if has_gt:
+            ax_gt.view_init(elev=25, azim=-60)
+        ax1.view_init(elev=25, azim=-60)
+        ax2.view_init(elev=25, azim=-60)
+
+        fig.suptitle(f"{title_prefix} | Time={t}", fontsize=12)
+        t_tag = _format_time_for_filename(float(t))
+        out_path = out_dir / f"frame_{idx:04d}_t_{t_tag}.png"
+        plt.savefig(out_path, dpi=220)
+        plt.close(fig)
+        saved.append(out_path)
+
+    return saved
+
+
+def save_visual_inspection_plots(
+    df_orig: pd.DataFrame,
+    df_corr: pd.DataFrame,
+    out_prefix: str | Path,
+    method_name: str,
+    df_groundtruth: pd.DataFrame | None = None,
+) -> dict[str, Path]:
+    """Save both trajectory and per-timepoint visual inspection plots."""
+    out_prefix = Path(out_prefix)
+    out_prefix.parent.mkdir(parents=True, exist_ok=True)
+
+    tracks_path = out_prefix.with_name(out_prefix.name + f"_tracks_comparison_{method_name}.png")
+    frames_dir = out_prefix.parent / f"{out_prefix.name}_timeseries_{method_name}"
+
+    plot_tracks_comparison(
+        df_orig=df_orig,
+        df_corr=df_corr,
+        out_path=tracks_path,
+        title=f"Track comparison: {method_name}",
+    )
+    plot_timepoint_side_by_side_3d(
+        df_orig=df_orig,
+        df_corr=df_corr,
+        out_dir=frames_dir,
+        title_prefix=method_name,
+        df_groundtruth=df_groundtruth,
+    )
+
+    return {
+        "tracks_comparison": tracks_path,
+        "timeseries_dir": frames_dir,
+    }

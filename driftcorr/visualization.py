@@ -150,6 +150,42 @@ def _format_time_for_filename(t: float) -> str:
     return s.replace("-", "m").replace(".", "p")
 
 
+def _save_frames_as_gif(frame_paths: list[Path], gif_path: Path, fps: float = 4.0) -> Path | None:
+    """Create a GIF animation from frame images if Pillow is available."""
+    if not frame_paths:
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+
+    duration_ms = int(round(1000.0 / max(float(fps), 0.1)))
+    images: list[Image.Image] = []
+    try:
+        for p in frame_paths:
+            with Image.open(p) as im:
+                images.append(im.convert("P", palette=Image.ADAPTIVE))
+        if not images:
+            return None
+        gif_path.parent.mkdir(parents=True, exist_ok=True)
+        first, rest = images[0], images[1:]
+        first.save(
+            gif_path,
+            save_all=True,
+            append_images=rest,
+            duration=duration_ms,
+            loop=0,
+            optimize=False,
+        )
+        return gif_path
+    finally:
+        for im in images:
+            try:
+                im.close()
+            except Exception:
+                pass
+
+
 def plot_timepoint_side_by_side_3d(
     df_orig: pd.DataFrame,
     df_corr: pd.DataFrame,
@@ -285,15 +321,19 @@ def save_visual_inspection_plots(
         out_path=tracks_path,
         title=f"Track comparison: {method_name}",
     )
-    plot_timepoint_side_by_side_3d(
+    frame_paths = plot_timepoint_side_by_side_3d(
         df_orig=df_orig,
         df_corr=df_corr,
         out_dir=frames_dir,
         title_prefix=method_name,
         df_groundtruth=df_groundtruth,
     )
+    gif_path = _save_frames_as_gif(frame_paths, frames_dir / "timeseries.gif", fps=4.0)
 
-    return {
+    out: dict[str, Path] = {
         "tracks_comparison": tracks_path,
         "timeseries_dir": frames_dir,
     }
+    if gif_path is not None:
+        out["timeseries_gif"] = gif_path
+    return out

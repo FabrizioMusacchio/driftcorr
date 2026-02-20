@@ -77,6 +77,7 @@ Per method:
 - frame-by-frame 3D snapshots:
   - folder: `<base>_timeseries_<method>/`
   - files: `frame_0000_t_...png`, `frame_0001_t_...png`, ...
+  - GIF animation: `<base>_timeseries_<method>/timeseries.gif`
 
 For synthetic runs (ground truth available), frame plots include:
 - `Ground Truth | Original | Corrected`
@@ -140,6 +141,7 @@ conda run -n manual_registration env PYTHONPATH="$PWD" python -m driftcorr.cli s
 ## Python Tutorial Script
 A notebook-style tutorial script is provided here:
 - `user_scripts/tutorial_pipeline_usage.py`
+- `user_scripts/param_sweep_synthetic.py` (RBF/ST-RBF parameter sweep on synthetic data)
 
 It contains these sections:
 - `# %% HOW TO RUN A SIGNLE FILE`

@@ -38,6 +38,7 @@ class SpaceTimeStageModel:
     centers_u: np.ndarray
     weights_aug: np.ndarray
     ell_space: float
+    ell_xyz: np.ndarray
     ell_time: float
     lam: float
     reference_time: float
@@ -46,6 +47,7 @@ class SpaceTimeStageModel:
     space_input_mode: str
     two_stage: bool
     rbf_linear_terms: bool
+    st_linear_interactions: bool
     spatial_center: np.ndarray
     spatial_scale: np.ndarray
     time_min: float
@@ -70,26 +72,45 @@ class SpaceTimeRBFModel:
 def _kernel_spacetime(
     u: np.ndarray,
     c: np.ndarray,
-    ell_space: float,
+    ell_space: float | np.ndarray,
     ell_time: float,
 ) -> np.ndarray:
     diff_space = u[:, None, :3] - c[None, :, :3]
-    d2_space = np.sum(diff_space * diff_space, axis=2)
+    if np.isscalar(ell_space):
+        ex = np.array([float(ell_space), float(ell_space), float(ell_space)], dtype=float)
+    else:
+        ex = np.asarray(ell_space, dtype=float).reshape(3)
+    ex2 = np.maximum(ex * ex, 1e-12)
+    d2_space = (
+        (diff_space[:, :, 0] ** 2) / (2.0 * ex2[0])
+        + (diff_space[:, :, 1] ** 2) / (2.0 * ex2[1])
+        + (diff_space[:, :, 2] ** 2) / (2.0 * ex2[2])
+    )
     dt2 = (u[:, None, 3] - c[None, :, 3]) ** 2
-    es2 = max(float(ell_space) ** 2, 1e-12)
     et2 = max(float(ell_time) ** 2, 1e-12)
-    return np.exp(-(d2_space / (2.0 * es2) + dt2 / (2.0 * et2)))
+    return np.exp(-(d2_space + dt2 / (2.0 * et2)))
 
 
 def _augment_kernel(k: np.ndarray) -> np.ndarray:
     return np.hstack([k, np.ones((k.shape[0], 1), dtype=float)])
 
 
-def _augment_kernel_with_linear(k: np.ndarray, u: np.ndarray, rbf_linear_terms: bool = False) -> np.ndarray:
+def _augment_kernel_with_linear(
+    k: np.ndarray,
+    u: np.ndarray,
+    rbf_linear_terms: bool = False,
+    include_interactions: bool = False,
+) -> np.ndarray:
     n = int(k.shape[0])
     cols: list[np.ndarray] = [k]
     if bool(rbf_linear_terms):
-        cols.extend([u[:, [0]], u[:, [1]], u[:, [2]], u[:, [3]]])
+        x = u[:, [0]]
+        y = u[:, [1]]
+        z = u[:, [2]]
+        t = u[:, [3]]
+        cols.extend([x, y, z, t])
+        if bool(include_interactions):
+            cols.extend([x * t, y * t, z * t])
     cols.append(np.ones((n, 1), dtype=float))
     return np.hstack(cols)
 
@@ -293,11 +314,12 @@ def _fit_stage_weights(
     robust_iters: int,
     robust_mode: str,
     track_trim_iters: int,
+    huber_delta_scale: float = 1.345,
 ) -> tuple[np.ndarray, np.ndarray]:
     n = int(k_aug.shape[0])
     keep_fraction = float(np.clip(robust_keep_fraction, 0.1, 0.99))
     mode = str(robust_mode)
-    if mode not in {"none", "sample_trim", "track_trim"}:
+    if mode not in {"none", "sample_trim", "track_trim", "irls_huber", "hybrid_track_irls"}:
         raise ValueError(f"Unknown robust_mode: {mode}")
 
     if mode == "none":
@@ -317,6 +339,55 @@ def _fit_stage_weights(
             wv[idx] = 1.0
             w_aug = _weighted_ridge_aug(k_aug, d_target, wv, lam=lam, lam_bias=0.0)
         return w_aug, wv > 0
+
+    if mode == "irls_huber":
+        wv = np.ones((n,), dtype=float)
+        w_aug = _weighted_ridge_aug(k_aug, d_target, wv, lam=lam, lam_bias=0.0)
+        for _ in range(max(1, int(robust_iters))):
+            pred = k_aug @ w_aug
+            res = np.linalg.norm(pred - d_target, axis=1)
+            mad = float(np.median(np.abs(res - np.median(res))))
+            scale = max(1e-9, 1.4826 * mad)
+            delta = float(huber_delta_scale) * scale
+            wv = np.minimum(1.0, delta / np.maximum(res, 1e-12))
+            w_aug = _weighted_ridge_aug(k_aug, d_target, wv, lam=lam, lam_bias=0.0)
+        return w_aug, wv > 1e-6
+
+    if mode == "hybrid_track_irls":
+        dmag = np.linalg.norm(d_target, axis=1)
+        tids = np.asarray(track_ids, dtype=float)
+        uniq = np.array(sorted(np.unique(tids)), dtype=float)
+        energy_rows: list[tuple[float, float]] = []
+        for tid in uniq:
+            mt = tids == float(tid)
+            if np.any(mt):
+                energy_rows.append((float(tid), float(np.median(dmag[mt]))))
+        energy_rows.sort(key=lambda x: x[1])
+        keep_tracks = max(2, int(np.floor(keep_fraction * len(energy_rows))))
+        keep_ids = set([tid for tid, _ in energy_rows[:keep_tracks]])
+        mask_track = np.array([float(tid) in keep_ids for tid in tids], dtype=bool)
+        if int(np.sum(mask_track)) < 10:
+            mask_track = np.ones((n,), dtype=bool)
+
+        w_aug = _weighted_ridge_aug(
+            k_aug[mask_track],
+            d_target[mask_track],
+            np.ones((int(np.sum(mask_track)),), dtype=float),
+            lam=lam,
+            lam_bias=0.0,
+        )
+        wv = mask_track.astype(float)
+        for _ in range(max(1, int(robust_iters))):
+            pred = k_aug @ w_aug
+            res = np.linalg.norm(pred - d_target, axis=1)
+            base = res[mask_track] if np.any(mask_track) else res
+            mad = float(np.median(np.abs(base - np.median(base))))
+            scale = max(1e-9, 1.4826 * mad)
+            delta = float(huber_delta_scale) * scale
+            w_huber = np.minimum(1.0, delta / np.maximum(res, 1e-12))
+            wv = w_huber * mask_track.astype(float)
+            w_aug = _weighted_ridge_aug(k_aug, d_target, wv, lam=lam, lam_bias=0.0)
+        return w_aug, wv > 1e-6
 
     # track_trim
     tids = np.asarray(track_ids, dtype=float)
@@ -374,9 +445,13 @@ def _fit_stage(
     two_stage: bool,
     robust_mode: str = "sample_trim",
     track_trim_iters: int = 4,
+    ell_x: float | None = None,
+    ell_y: float | None = None,
+    ell_z: float | None = None,
     global_time_values: np.ndarray | None = None,
     global_drift_values: np.ndarray | None = None,
     rbf_linear_terms: bool = False,
+    st_linear_interactions: bool = False,
     spatial_source_df: pd.DataFrame | None = None,
     per_axis_scaling: bool = True,
 ) -> tuple[SpaceTimeStageModel, dict[str, float | int | str | bool]]:
@@ -418,8 +493,21 @@ def _fit_stage(
     u = np.column_stack([xn, tn])
 
     centers = _choose_centers(u, m=int(m_centers), seed=seed)
-    k = _kernel_spacetime(u, centers, ell_space=float(ell_space), ell_time=float(ell_time))
-    k_aug = _augment_kernel_with_linear(k, u=u, rbf_linear_terms=rbf_linear_terms)
+    ell_xyz = np.array(
+        [
+            float(ell_space if ell_x is None else ell_x),
+            float(ell_space if ell_y is None else ell_y),
+            float(ell_space if ell_z is None else ell_z),
+        ],
+        dtype=float,
+    )
+    k = _kernel_spacetime(u, centers, ell_space=ell_xyz, ell_time=float(ell_time))
+    k_aug = _augment_kernel_with_linear(
+        k,
+        u=u,
+        rbf_linear_terms=rbf_linear_terms,
+        include_interactions=st_linear_interactions,
+    )
 
     keep_fraction = float(np.clip(robust_keep_fraction, 0.1, 0.99))
     weights_aug, inlier_mask = _fit_stage_weights(
@@ -431,6 +519,7 @@ def _fit_stage(
         robust_iters=robust_iters,
         robust_mode=robust_mode,
         track_trim_iters=track_trim_iters,
+        huber_delta_scale=1.345,
     )
 
     pred_res = k_aug @ weights_aug
@@ -472,6 +561,7 @@ def _fit_stage(
         centers_u=centers,
         weights_aug=weights_aug,
         ell_space=float(ell_space),
+        ell_xyz=ell_xyz.copy(),
         ell_time=float(ell_time),
         lam=float(lam),
         reference_time=float(reference_time),
@@ -480,6 +570,7 @@ def _fit_stage(
         space_input_mode=str(space_input_mode),
         two_stage=bool(two_stage and global_time_values is not None and global_drift_values is not None and np.asarray(global_time_values).size > 0),
         rbf_linear_terms=bool(rbf_linear_terms),
+        st_linear_interactions=bool(st_linear_interactions),
         spatial_center=center_spatial,
         spatial_scale=np.asarray(scale_spatial, dtype=float),
         time_min=float(tmin),
@@ -497,6 +588,9 @@ def _fit_stage(
         "res_p90": float(np.percentile(res_total, 90)),
         "ell_space": float(ell_space),
         "ell_time": float(ell_time),
+        "ell_x": float(ell_xyz[0]),
+        "ell_y": float(ell_xyz[1]),
+        "ell_z": float(ell_xyz[2]),
         "lam": float(lam),
         "robust_keep_fraction": float(keep_fraction),
         "robust_iters": int(robust_iters),
@@ -505,6 +599,7 @@ def _fit_stage(
         "space_input_mode": str(space_input_mode),
         "two_stage": bool(stage.two_stage),
         "rbf_linear_terms": bool(rbf_linear_terms),
+        "st_linear_interactions": bool(st_linear_interactions),
         "cond_proxy": float(cond_proxy),
         "ill_conditioned": bool(ill_conditioned),
         "weight_max_abs": float(weight_max_abs),
@@ -555,8 +650,13 @@ def _predict_stage_drift(
     tn = (t_raw - stage.time_min) / tr
     u = np.column_stack([xn, tn])
 
-    k = _kernel_spacetime(u, stage.centers_u, stage.ell_space, stage.ell_time)
-    pred_res = _augment_kernel_with_linear(k, u=u, rbf_linear_terms=stage.rbf_linear_terms) @ stage.weights_aug
+    k = _kernel_spacetime(u, stage.centers_u, stage.ell_xyz, stage.ell_time)
+    pred_res = _augment_kernel_with_linear(
+        k,
+        u=u,
+        rbf_linear_terms=stage.rbf_linear_terms,
+        include_interactions=stage.st_linear_interactions,
+    ) @ stage.weights_aug
 
     if stage.two_stage:
         g = _interp_global_drift(t_raw, stage.global_time_values, stage.global_drift_values)
@@ -572,6 +672,9 @@ def fit_spacetime_rbf_model(
     m_centers: int = 70,
     ell_space: float = 1.2,
     ell_time: float = 0.3,
+    ell_x: float | None = None,
+    ell_y: float | None = None,
+    ell_z: float | None = None,
     lam: float = 3e-4,
     robust_keep_fraction: float = 0.8,
     robust_iters: int = 4,
@@ -583,8 +686,10 @@ def fit_spacetime_rbf_model(
     robust_mode: str = "sample_trim",
     track_trim_iters: int = 4,
     rbf_linear_terms: bool = False,
+    st_linear_interactions: bool = False,
     weight_abort_threshold: float = 1e4,
     per_axis_scaling: bool = True,
+    refine_tol: float = 0.0,
 ) -> tuple[SpaceTimeRBFModel, dict[str, float | int | str | bool]]:
     """Fit space-time RBF drift model with optional refinement stages."""
     d0 = ensure_numeric_tracks(df)
@@ -632,6 +737,7 @@ def fit_spacetime_rbf_model(
             global_time_values = np.array([], dtype=float)
             global_drift_values = np.zeros((0, 3), dtype=float)
 
+    prev_stage_drift_pred: np.ndarray | None = None
     for i in range(n_ref):
         stage_two_stage = bool(two_stage and i == 0 and global_time_values.size > 0)
         fit_tab_before = _build_fit_table(
@@ -658,6 +764,9 @@ def fit_spacetime_rbf_model(
             m_centers=m_centers,
             ell_space=ell_space,
             ell_time=ell_time,
+            ell_x=ell_x,
+            ell_y=ell_y,
+            ell_z=ell_z,
             lam=lam,
             robust_keep_fraction=robust_keep_fraction,
             robust_iters=robust_iters,
@@ -670,6 +779,7 @@ def fit_spacetime_rbf_model(
             global_time_values=global_time_values if stage_two_stage else None,
             global_drift_values=global_drift_values if stage_two_stage else None,
             rbf_linear_terms=rbf_linear_terms,
+            st_linear_interactions=st_linear_interactions,
             spatial_source_df=spatial_source_df,
             per_axis_scaling=per_axis_scaling,
         )
@@ -724,8 +834,18 @@ def fit_spacetime_rbf_model(
         stages.append(stage)
         stage_infos.append(info)
 
+        drift_pred_for_refine = _predict_stage_drift(stage, current, spatial_source_df=spatial_source_df)
+        if str(space_input_mode) == "row_position" and prev_stage_drift_pred is not None and float(refine_tol) > 0:
+            mmin = min(prev_stage_drift_pred.shape[0], drift_pred_for_refine.shape[0])
+            dd = np.linalg.norm(drift_pred_for_refine[:mmin] - prev_stage_drift_pred[:mmin], axis=1)
+            delta_med = float(np.nanmedian(dd)) if dd.size else float("nan")
+            stage_infos[-1]["refine_delta_median"] = delta_med
+            if np.isfinite(delta_med) and delta_med <= float(refine_tol):
+                break
+        prev_stage_drift_pred = drift_pred_for_refine
+
         if i < n_ref - 1:
-            drift_pred = _predict_stage_drift(stage, current, spatial_source_df=spatial_source_df)
+            drift_pred = drift_pred_for_refine
             xyz = current[["Position X", "Position Y", "Position Z"]].to_numpy(float)
             xyz_corr = xyz - drift_pred
             if str(space_input_mode) == "row_position":
@@ -770,6 +890,9 @@ def fit_spacetime_rbf_model(
         "res_p90": float(last["res_p90"]),
         "ell_space": float(last["ell_space"]),
         "ell_time": float(last["ell_time"]),
+        "ell_x": float(last.get("ell_x", ell_space if ell_x is None else ell_x)),
+        "ell_y": float(last.get("ell_y", ell_space if ell_y is None else ell_y)),
+        "ell_z": float(last.get("ell_z", ell_space if ell_z is None else ell_z)),
         "lam": float(last["lam"]),
         "robust_keep_fraction": float(last["robust_keep_fraction"]),
         "robust_iters": int(last["robust_iters"]),
@@ -779,7 +902,9 @@ def fit_spacetime_rbf_model(
         "two_stage": bool(two_stage),
         "n_refine": int(n_ref),
         "rbf_linear_terms": bool(rbf_linear_terms),
+        "st_linear_interactions": bool(st_linear_interactions),
         "per_axis_scaling": bool(per_axis_scaling),
+        "refine_tol": float(refine_tol),
         "cond_proxy_max": float(np.max([float(ii["cond_proxy"]) for ii in stage_infos])) if stage_infos else float("nan"),
         "ill_conditioned_any": bool(np.any([bool(ii["ill_conditioned"]) for ii in stage_infos])) if stage_infos else False,
         "weight_max_abs_max": float(np.max([float(ii["weight_max_abs"]) for ii in stage_infos])) if stage_infos else float("nan"),
@@ -807,8 +932,13 @@ def predict_spacetime_drift(model: SpaceTimeRBFModel, u: np.ndarray) -> np.ndarr
     tn = (t_raw - stage.time_min) / tr
     uu = np.column_stack([xn, tn])
 
-    k = _kernel_spacetime(uu, stage.centers_u, stage.ell_space, stage.ell_time)
-    pred_res = _augment_kernel_with_linear(k, u=uu, rbf_linear_terms=stage.rbf_linear_terms) @ stage.weights_aug
+    k = _kernel_spacetime(uu, stage.centers_u, stage.ell_xyz, stage.ell_time)
+    pred_res = _augment_kernel_with_linear(
+        k,
+        u=uu,
+        rbf_linear_terms=stage.rbf_linear_terms,
+        include_interactions=stage.st_linear_interactions,
+    ) @ stage.weights_aug
     if stage.two_stage:
         g = _interp_global_drift(t_raw, stage.global_time_values, stage.global_drift_values)
     else:
@@ -900,3 +1030,79 @@ def make_spacetime_diagnostic_plots(model: SpaceTimeRBFModel, out_prefix: str | 
         plt.tight_layout()
         plt.savefig(str(out_prefix) + "_st_rbf_refinement_residual_rms.png", dpi=300)
         plt.close(fig)
+
+
+def search_st_rbf_hyperparams(
+    df_obs: pd.DataFrame,
+    df_groundtruth: pd.DataFrame,
+    drift_field_groundtruth: pd.DataFrame | None = None,
+    ell_space_grid: tuple[float, ...] = (1.2, 1.6, 2.0),
+    ell_time_grid: tuple[float, ...] = (0.4, 0.8, 1.2),
+    reference_time: float | None = None,
+    **fit_kwargs: object,
+) -> pd.DataFrame:
+    """Small helper grid search for ST-RBF on synthetic data.
+
+    Objective (lower is better):
+    `objective = RMS_stationary + drift_bias_mean`.
+    """
+    from .synthetic_experiments import evaluate_corrected_vs_groundtruth
+
+    rows: list[dict[str, float | int | str | bool]] = []
+    for es in ell_space_grid:
+        for et in ell_time_grid:
+            model, info = fit_spacetime_rbf_model(
+                df_obs,
+                reference_time=reference_time,
+                ell_space=float(es),
+                ell_time=float(et),
+                **fit_kwargs,
+            )
+            df_corr = apply_correction(df_obs, model)
+            summary, merged, _, _ = evaluate_corrected_vs_groundtruth(df_corr, df_groundtruth)
+            rms_stat = float(summary.get("overall_rms_error_stationary", np.nan))
+            if drift_field_groundtruth is not None:
+                pred = df_corr[["TrackID", "Time", "Position X", "Position Y", "Position Z", "Position X_corr", "Position Y_corr", "Position Z_corr"]].copy()
+                pred["pred_dx"] = pred["Position X"].to_numpy(float) - pred["Position X_corr"].to_numpy(float)
+                pred["pred_dy"] = pred["Position Y"].to_numpy(float) - pred["Position Y_corr"].to_numpy(float)
+                pred["pred_dz"] = pred["Position Z"].to_numpy(float) - pred["Position Z_corr"].to_numpy(float)
+                tru = drift_field_groundtruth[["TrackID", "Time", "drift_x_total", "drift_y_total", "drift_z_total"]].copy()
+                mm = pred.merge(tru, on=["TrackID", "Time"], how="inner")
+                if mm.shape[0] > 0:
+                    bt = mm.groupby("Time", as_index=False).agg(
+                        pred_dx=("pred_dx", "median"),
+                        pred_dy=("pred_dy", "median"),
+                        pred_dz=("pred_dz", "median"),
+                        true_dx=("drift_x_total", "median"),
+                        true_dy=("drift_y_total", "median"),
+                        true_dz=("drift_z_total", "median"),
+                    )
+                    drift_bias_mean = float(
+                        np.mean(
+                            np.sqrt(
+                                (bt["pred_dx"].to_numpy(float) - bt["true_dx"].to_numpy(float)) ** 2
+                                + (bt["pred_dy"].to_numpy(float) - bt["true_dy"].to_numpy(float)) ** 2
+                                + (bt["pred_dz"].to_numpy(float) - bt["true_dz"].to_numpy(float)) ** 2
+                            )
+                        )
+                    )
+                else:
+                    drift_bias_mean = float("nan")
+            else:
+                drift_bias_mean = float("nan")
+            objective = float(rms_stat + drift_bias_mean) if np.isfinite(rms_stat) and np.isfinite(drift_bias_mean) else float("nan")
+            rows.append(
+                {
+                    "ell_space": float(es),
+                    "ell_time": float(et),
+                    "overall_rms_error": float(summary.get("overall_rms_error", np.nan)),
+                    "overall_rms_error_stationary": float(rms_stat),
+                    "drift_bias_mean": float(drift_bias_mean),
+                    "objective": float(objective),
+                    "n_stages_fitted": int(info.get("n_stages_fitted", 0)),
+                }
+            )
+    out = pd.DataFrame(rows)
+    if out.shape[0]:
+        out = out.sort_values("objective", na_position="last").reset_index(drop=True)
+    return out

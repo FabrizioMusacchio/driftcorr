@@ -346,7 +346,7 @@ def robust_fit_rbf_field(
     k = _rbf_kernel(x, centers, sigma)
     k_aug = _augment_kernel(k, x=x, t=t, rbf_linear_terms=rbf_linear_terms)
 
-    if robust_mode not in {"sample_trim", "none"}:
+    if robust_mode not in {"sample_trim", "none", "irls_huber"}:
         raise ValueError(f"Unsupported robust_mode in robust_fit_rbf_field: {robust_mode}")
 
     if robust_mode == "none":
@@ -354,7 +354,7 @@ def robust_fit_rbf_field(
         pred = k_aug @ w_aug
         res = np.linalg.norm(pred - d, axis=1)
         inlier_mask = np.ones((n,), dtype=bool)
-    else:
+    elif robust_mode == "sample_trim":
         keep_fraction = float(np.clip(keep_fraction, 0.1, 0.99))
         k_keep = max(8, int(np.floor(keep_fraction * n)))
 
@@ -383,6 +383,23 @@ def robust_fit_rbf_field(
         res = np.linalg.norm(pred - d, axis=1)
         inlier_mask = np.zeros((n,), dtype=bool)
         inlier_mask[inlier_idx] = True
+    else:  # irls_huber
+        wv = np.ones((n,), dtype=float)
+        w_aug = _ridge_solve_aug(k_aug, d, lam=lam, lam_bias=lam_bias)
+        for _ in range(int(max_iters)):
+            pred = k_aug @ w_aug
+            res = np.linalg.norm(pred - d, axis=1)
+            mad = float(np.median(np.abs(res - np.median(res))))
+            scale = max(1e-9, 1.4826 * mad)
+            delta = 1.345 * scale
+            wv = np.minimum(1.0, delta / np.maximum(res, 1e-12))
+            sw = np.sqrt(wv)[:, None]
+            ki = k_aug * sw
+            di = d * sw
+            w_aug = _ridge_solve_aug(ki, di, lam=lam, lam_bias=lam_bias)
+        pred = k_aug @ w_aug
+        res = np.linalg.norm(pred - d, axis=1)
+        inlier_mask = wv > 1e-6
 
     field = RBFField(
         centers=centers.copy(),
@@ -573,6 +590,7 @@ def fit_temporal_rbf_fields_to_reference(
     w_blocks = _solve_temporal_block_tridiagonal(diag_blocks, off_blocks, rhs_blocks)
 
     smoothness_prev: dict[int, float] = {}
+    weight_delta_prev: dict[int, float] = {}
     if t_count > 1:
         for i in range(1, t_count):
             pred_prev = k_aug_blocks[i - 1] @ w_blocks[i - 1] + stage1[i - 1][None, :]
@@ -580,6 +598,9 @@ def fit_temporal_rbf_fields_to_reference(
             mmin = min(pred_prev.shape[0], pred_cur.shape[0])
             step = np.linalg.norm(pred_cur[:mmin] - pred_prev[:mmin], axis=1)
             smoothness_prev[i] = float(np.median(step)) if step.size else float("nan")
+            dw = w_blocks[i] - w_blocks[i - 1]
+            dw_row = np.linalg.norm(dw, axis=1)
+            weight_delta_prev[i] = float(np.median(dw_row)) if dw_row.size else float("nan")
 
     for i, t in enumerate(valid_times):
         field = RBFField(
@@ -619,6 +640,7 @@ def fit_temporal_rbf_fields_to_reference(
             "temporal_gamma": float(temporal_gamma),
             "temporal_res_median": float(np.median(res)),
             "temporal_smoothness_prev": float(smoothness_prev.get(i, np.nan)),
+            "weight_delta_median_prev": float(weight_delta_prev.get(i, np.nan)),
             "center_nn_median": _nearest_center_median_distance(x_blocks[i], centers),
             "center_nn_p90": _nearest_center_p90_distance(x_blocks[i], centers),
             "pred_drift_median": float(np.median(np.linalg.norm(d_pred_total, axis=1))),
@@ -833,6 +855,7 @@ def _fit_fields_once(
             "temporal_gamma": float(temporal_gamma),
             "temporal_res_median": 0.0,
             "temporal_smoothness_prev": np.nan,
+            "weight_delta_median_prev": np.nan,
             "center_mode": str(center_mode),
             "robust_mode": str(robust_mode),
             "center_nn_median": _nearest_center_median_distance(
@@ -1258,6 +1281,16 @@ def make_rbf_diagnostic_plots(tf_table: pd.DataFrame, out_prefix: str | Path) ->
         plt.title("RBF temporal smoothness diagnostic")
         plt.tight_layout()
         plt.savefig(out_prefix + "_rbf_temporal_smoothness.png", dpi=300)
+        plt.close(fig)
+
+    if "weight_delta_median_prev" in ttab.columns:
+        fig = plt.figure()
+        plt.plot(ttab.loc[ok, "t1"], ttab.loc[ok, "weight_delta_median_prev"], marker="o")
+        plt.xlabel("Time (t)")
+        plt.ylabel("Median ||W_t-W_(t-1)|| row norm")
+        plt.title("RBF temporal weight smoothness")
+        plt.tight_layout()
+        plt.savefig(out_prefix + "_rbf_temporal_weight_delta.png", dpi=300)
         plt.close(fig)
 
     if "center_nn_median" in ttab.columns:

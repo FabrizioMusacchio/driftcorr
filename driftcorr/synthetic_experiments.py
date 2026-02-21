@@ -51,6 +51,7 @@ import numpy as np
 import pandas as pd
 
 from .io_imaris import ensure_numeric_tracks
+from .metrics import per_time_groundtruth_metrics
 
 
 def _smooth_random_series(
@@ -410,6 +411,19 @@ def load_drift_field_for_imaris_file(imaris_file: str | Path) -> pd.DataFrame | 
     return pd.read_csv(drift_path)
 
 
+def load_meta_for_imaris_file(imaris_file: str | Path) -> dict[str, Any] | None:
+    """Load matching synthetic meta CSV as dict for one IMARIS file if available."""
+    p = Path(imaris_file)
+    meta_path = p.parent / "_groundtruth" / f"{p.stem}_meta.csv"
+    if not meta_path.exists():
+        return None
+    tab = pd.read_csv(meta_path)
+    if tab.shape[0] == 0:
+        return None
+    row = tab.iloc[0].to_dict()
+    return {str(k): v for k, v in row.items()}
+
+
 def evaluate_corrected_vs_groundtruth(
     df_corr: pd.DataFrame,
     df_groundtruth: pd.DataFrame,
@@ -497,6 +511,7 @@ def save_groundtruth_evaluation_outputs(
     per_method_time_stationary: dict[str, pd.DataFrame] = {}
     per_method_time_migrating: dict[str, pd.DataFrame] = {}
     per_method_drift_bias: dict[str, pd.DataFrame] = {}
+    per_method_time_ci: dict[str, pd.DataFrame] = {}
 
     for method, df_corr in corrected_by_method.items():
         summary, merged, per_track, per_time = evaluate_corrected_vs_groundtruth(df_corr, groundtruth_df)
@@ -554,6 +569,18 @@ def save_groundtruth_evaluation_outputs(
                 bt["drift_bias_norm"] = bias
                 bt.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_drift_bias_over_time_{method}.csv"), index=False)
                 per_method_drift_bias[method] = bt
+
+        # Publication-quality per-time metrics with CI across tracks.
+        time_ci = per_time_groundtruth_metrics(
+            df_corr=df_corr,
+            df_groundtruth=groundtruth_df,
+            drift_field_groundtruth=drift_field_groundtruth,
+            near_stationary_threshold_um=2.0,
+            ci_z=1.96,
+        )
+        if time_ci.shape[0] > 0:
+            per_method_time_ci[method] = time_ci
+            time_ci.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_per_time_metrics_ci_{method}.csv"), index=False)
 
     summary_df = pd.DataFrame(rows_summary).sort_values("method").reset_index(drop=True)
     out_summary = base_out_prefix.with_name(base_out_prefix.name + "_gt_metrics_summary.csv")

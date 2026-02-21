@@ -44,6 +44,10 @@ class SpaceTimeRBFMoEModel:
     blend_sigma_um: float
     cluster_mode: str
     reference_time: float
+    shared_global_time_values: np.ndarray
+    shared_global_drift_values: np.ndarray
+    drift_cap_um: float
+    group_coupling_alpha: float
 
 
 def _fit_table_total_drift(df: pd.DataFrame, reference_time: float, fit_track_ids: np.ndarray | None = None) -> pd.DataFrame:
@@ -61,6 +65,47 @@ def _fit_table_total_drift(df: pd.DataFrame, reference_time: float, fit_track_id
     tab["dy_true"] = tab["Position Y"].to_numpy(float) - tab["Y_ref"].to_numpy(float)
     tab["dz_true"] = tab["Position Z"].to_numpy(float) - tab["Z_ref"].to_numpy(float)
     return tab
+
+
+def _estimate_global_translation(
+    df: pd.DataFrame,
+    reference_time: float,
+    fit_track_ids: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Estimate shared global translation g(t) from robust per-time medians."""
+    tab = _fit_table_total_drift(df, reference_time=reference_time, fit_track_ids=fit_track_ids)
+    if tab.shape[0] == 0:
+        return np.array([], dtype=float), np.zeros((0, 3), dtype=float)
+    gtab = (
+        tab.groupby("Time", as_index=False)
+        .agg(dx=("dx_true", "median"), dy=("dy_true", "median"), dz=("dz_true", "median"))
+        .sort_values("Time")
+        .reset_index(drop=True)
+    )
+    return gtab["Time"].to_numpy(float), gtab[["dx", "dy", "dz"]].to_numpy(float)
+
+
+def _interp_global_drift(times: np.ndarray, g_time: np.ndarray, g_drift: np.ndarray) -> np.ndarray:
+    if g_time.size == 0:
+        return np.zeros((times.size, 3), dtype=float)
+    out = np.zeros((times.size, 3), dtype=float)
+    for ax in range(3):
+        out[:, ax] = np.interp(times, g_time, g_drift[:, ax])
+    return out
+
+
+def _subtract_global_from_positions(df: pd.DataFrame, g_time: np.ndarray, g_drift: np.ndarray) -> pd.DataFrame:
+    d = ensure_numeric_tracks(df).copy()
+    if g_time.size == 0:
+        return d
+    t = d["Time"].to_numpy(float)
+    g = _interp_global_drift(t, g_time, g_drift)
+    xyz = d[["Position X", "Position Y", "Position Z"]].to_numpy(float)
+    xyz_res = xyz - g
+    d.loc[:, "Position X"] = xyz_res[:, 0]
+    d.loc[:, "Position Y"] = xyz_res[:, 1]
+    d.loc[:, "Position Z"] = xyz_res[:, 2]
+    return d
 
 
 def _kmeans_simple(points: np.ndarray, k: int, seed: int = 0, n_iters: int = 30) -> tuple[np.ndarray, np.ndarray]:
@@ -130,6 +175,9 @@ def fit_spacetime_rbf_moe_model(
     seed: int = 0,
     reference_time: float | None = None,
     fit_track_ids: np.ndarray | None = None,
+    drift_cap_factor: float = 3.0,
+    cond_abort_threshold: float = 1e12,
+    group_coupling_alpha: float = 0.0,
     **st_kwargs: object,
 ) -> tuple[SpaceTimeRBFMoEModel, pd.DataFrame]:
     """Fit a spatial mixture of ST-RBF experts."""
@@ -138,6 +186,8 @@ def fit_spacetime_rbf_moe_model(
     if reference_time is None:
         reference_time = float(times.min())
     reference_time = float(reference_time)
+    g_time, g_drift = _estimate_global_translation(d, reference_time=reference_time, fit_track_ids=fit_track_ids)
+    d_res = _subtract_global_from_positions(d, g_time=g_time, g_drift=g_drift)
 
     anchors = _track_anchor_table(d, reference_time=reference_time, mode=cluster_mode)
     if fit_track_ids is not None:
@@ -161,17 +211,21 @@ def fit_spacetime_rbf_moe_model(
         if ids_i.size == 0:
             continue
         expert_kwargs = dict(st_kwargs)
-        n_rows_i = int(d[d["TrackID"].astype(float).isin(set(ids_i.tolist()))].shape[0])
+        n_rows_i = int(d_res[d_res["TrackID"].astype(float).isin(set(ids_i.tolist()))].shape[0])
         max_centers_i = max(8, n_rows_i // 2)
         m_req = int(expert_kwargs.get("m_centers", 70))
         expert_kwargs["m_centers"] = int(min(m_req, max_centers_i))
+        expert_kwargs["two_stage"] = False
         model_i, info_i = fit_spacetime_rbf_model(
-            d,
+            d_res,
             reference_time=reference_time,
             fit_track_ids=ids_i,
             seed=int(seed + i),
             **expert_kwargs,
         )
+        cond_max = float(info_i.get("cond_proxy_max", np.nan))
+        if np.isfinite(cond_max) and cond_max > float(cond_abort_threshold):
+            raise ValueError(f"ST-RBF-MoE expert {i} ill-conditioned (cond={cond_max:.3g}).")
         experts.append(
             SpaceTimeRBFExpert(
                 center_xyz=centers[i].copy(),
@@ -193,7 +247,7 @@ def fit_spacetime_rbf_moe_model(
                 "n_stages_fitted": int(info_i.get("n_stages_fitted", 0)),
             }
         )
-        corr_i = apply_correction(d, model_i)
+        corr_i = apply_correction(d_res, model_i)
         corr_i = corr_i[["TrackID", "Time", "Position X_corr", "Position Y_corr", "Position Z_corr"]].copy()
         corr_i = corr_i.rename(
             columns={
@@ -207,13 +261,48 @@ def fit_spacetime_rbf_moe_model(
     if not experts:
         raise ValueError("Failed to fit ST-RBF-MoE experts.")
 
+    # Optional soft coupling between neighboring experts to reduce overfitting.
+    alpha = float(np.clip(group_coupling_alpha, 0.0, 1.0))
+    if alpha > 0.0 and len(experts) > 1:
+        cexp = np.vstack([ex.center_xyz for ex in experts])
+        d2 = np.sum((cexp[:, None, :] - cexp[None, :, :]) ** 2, axis=2)
+        np.fill_diagonal(d2, np.inf)
+        w_nb = np.exp(-d2 / (2.0 * float(max(blend_sigma_um, 1e-6)) ** 2))
+        for i, ex in enumerate(experts):
+            wi = w_nb[i]
+            s = float(np.sum(wi))
+            if s <= 1e-12:
+                continue
+            wi = wi / s
+            for si in range(min([len(ex.model.stages) for ex in experts])):
+                ref = np.zeros_like(ex.model.stages[si].weights_aug)
+                for j, exj in enumerate(experts):
+                    if j == i:
+                        continue
+                    ref += wi[j] * exj.model.stages[si].weights_aug
+                ex.model.stages[si].weights_aug = (1.0 - alpha) * ex.model.stages[si].weights_aug + alpha * ref
+
+    tab_tot = _fit_table_total_drift(d, reference_time=reference_time, fit_track_ids=fit_track_ids)
+    if tab_tot.shape[0] > 0:
+        dmag = np.linalg.norm(tab_tot[["dx_true", "dy_true", "dz_true"]].to_numpy(float), axis=1)
+        drift_cap_um = float(np.percentile(dmag, 99)) * float(max(drift_cap_factor, 1.0))
+    else:
+        drift_cap_um = float("inf")
+
     model = SpaceTimeRBFMoEModel(
         experts=experts,
         blend_sigma_um=float(max(blend_sigma_um, 1e-6)),
         cluster_mode=str(cluster_mode),
         reference_time=float(reference_time),
+        shared_global_time_values=np.asarray(g_time, dtype=float),
+        shared_global_drift_values=np.asarray(g_drift, dtype=float),
+        drift_cap_um=float(drift_cap_um),
+        group_coupling_alpha=float(alpha),
     )
     et = pd.DataFrame(rows).sort_values("expert_id").reset_index(drop=True)
+    et["shared_global_translation"] = True
+    et["drift_cap_um"] = float(drift_cap_um)
+    et["group_coupling_alpha"] = float(alpha)
 
     # Blended residual diagnostics on fit samples: compare predicted blended drift vs D(t)=X(t)-X(ref).
     fit_tab = _fit_table_total_drift(d, reference_time=reference_time, fit_track_ids=fit_track_ids)
@@ -228,9 +317,10 @@ def fit_spacetime_rbf_moe_model(
         w = w / wsum
 
         pred_stack = []
-        fit_obs = fit_tab[["TrackID", "Time", "Position X", "Position Y", "Position Z"]].copy()
+        fit_obs_res = d_res[["TrackID", "Time", "Position X", "Position Y", "Position Z"]].copy()
+        fit_obs_res = fit_tab[["TrackID", "Time"]].merge(fit_obs_res, on=["TrackID", "Time"], how="left")
         for i, corr_i in enumerate(expert_raw_corrs):
-            mm = fit_obs.merge(corr_i, on=["TrackID", "Time"], how="left")
+            mm = fit_obs_res.merge(corr_i, on=["TrackID", "Time"], how="left")
             pred_i = np.column_stack(
                 [
                     mm["Position X"].to_numpy(float) - mm[f"Xc_{i}"].to_numpy(float),
@@ -246,14 +336,17 @@ def fit_spacetime_rbf_moe_model(
             pred_blend += pred_stack_arr[:, :, i] * w[:, [i]]
 
         dtrue = fit_tab[["dx_true", "dy_true", "dz_true"]].to_numpy(float)
-        res_blend = np.linalg.norm(pred_blend - dtrue, axis=1)
+        tt = fit_tab["Time"].to_numpy(float)
+        gfit = _interp_global_drift(tt, g_time, g_drift)
+        pred_total_blend = pred_blend + gfit
+        res_blend = np.linalg.norm(pred_total_blend - dtrue, axis=1)
         et["blend_res_median"] = float(np.median(res_blend)) if res_blend.size else float("nan")
         et["blend_res_p90"] = float(np.percentile(res_blend, 90)) if res_blend.size else float("nan")
 
         assigned_map = {float(tid): int(lbl) for tid, lbl in zip(tids.tolist(), labels.tolist())}
         assigned = np.array([assigned_map.get(float(tid), -1) for tid in fit_tab["TrackID"].to_numpy(float)], dtype=int)
         for i_local, i_global in enumerate(expert_ids):
-            resid_i = np.linalg.norm(pred_stack_arr[:, :, i_local] - dtrue, axis=1)
+            resid_i = np.linalg.norm(pred_stack_arr[:, :, i_local] + gfit - dtrue, axis=1)
             ma = assigned == int(i_global)
             if np.any(ma):
                 et.loc[et["expert_id"] == int(i_global), "assigned_res_median"] = float(np.median(resid_i[ma]))
@@ -268,30 +361,48 @@ def fit_spacetime_rbf_moe_model(
 def apply_spacetime_rbf_moe_correction(df: pd.DataFrame, model: SpaceTimeRBFMoEModel) -> pd.DataFrame:
     """Apply blended ST-RBF expert correction to all rows."""
     d = ensure_numeric_tracks(df)
+    t = d["Time"].to_numpy(float)
+    g = _interp_global_drift(t, model.shared_global_time_values, model.shared_global_drift_values)
+    d_res = d.copy()
+    xyz_obs = d[["Position X", "Position Y", "Position Z"]].to_numpy(float)
+    xyz_res = xyz_obs - g
+    d_res.loc[:, "Position X"] = xyz_res[:, 0]
+    d_res.loc[:, "Position Y"] = xyz_res[:, 1]
+    d_res.loc[:, "Position Z"] = xyz_res[:, 2]
+
     anchor_table = _track_anchor_table(d, reference_time=model.reference_time, mode=model.cluster_mode)
     a = _anchors_for_rows(d, anchor_table)
 
     centers = np.vstack([ex.center_xyz for ex in model.experts])
     d2 = np.sum((a[:, None, :] - centers[None, :, :]) ** 2, axis=2)
     w = np.exp(-d2 / (2.0 * float(model.blend_sigma_um) ** 2))
+    w = np.clip(w, 1e-8, 1.0)
     wsum = np.sum(w, axis=1, keepdims=True)
     wsum[wsum <= 1e-12] = 1.0
     w = w / wsum
 
     drifts = []
-    xyz_obs = d[["Position X", "Position Y", "Position Z"]].to_numpy(float)
     for ex in model.experts:
-        corr = apply_correction(d, ex.model)
+        corr = apply_correction(d_res, ex.model)
         xyz_corr = corr[["Position X_corr", "Position Y_corr", "Position Z_corr"]].to_numpy(float)
-        drifts.append(xyz_obs - xyz_corr)
+        drifts.append(xyz_res - xyz_corr)
     drift_stack = np.stack(drifts, axis=2)  # (N,3,K)
 
     drift_blend = np.zeros((d.shape[0], 3), dtype=float)
     for k in range(drift_stack.shape[2]):
         drift_blend += drift_stack[:, :, k] * w[:, [k]]
 
+    drift_total = drift_blend + g
+    cap = float(model.drift_cap_um)
+    if np.isfinite(cap) and cap > 0:
+        mag = np.linalg.norm(drift_total, axis=1)
+        over = mag > cap
+        if np.any(over):
+            scale = (cap / np.maximum(mag[over], 1e-12))[:, None]
+            drift_total[over] = drift_total[over] * scale
+
     out = d.copy()
-    xyz_corr = xyz_obs - drift_blend
+    xyz_corr = xyz_obs - drift_total
     out["Position X_corr"] = xyz_corr[:, 0]
     out["Position Y_corr"] = xyz_corr[:, 1]
     out["Position Z_corr"] = xyz_corr[:, 2]

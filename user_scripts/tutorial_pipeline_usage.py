@@ -100,17 +100,23 @@ OPTIONS = {
     "st_lam": 8.5e-4,
     "st_ell_space": 2.0,
     "st_ell_time": 0.8,
+    "st_ell_x": None,
+    "st_ell_y": None,
+    "st_ell_z": None,
     "st_robust_keep_fraction": 0.83,
     "st_robust_iters": 2,
     "space_input_mode": "ref_position",
     "st_refine_iters": 3,
+    "st_refine_tol": 0.0,
     "st_robust_mode": "sample_trim",
     "st_track_trim_iters": 4,
     "st_per_axis_scaling": 1,
+    "st_linear_interactions": 0,
     "st_moe_k": 3,
     "st_moe_k_list": [2, 3, 5],
     "st_moe_blend_sigma_um": 140.0,
     "st_moe_cluster_mode": "track_anchor",
+    "st_moe_drift_cap_factor": 3.0,
 }
 
 # %% FUNCTIONS
@@ -198,6 +204,9 @@ def run_methods_for_dataframe(
             m_centers=opts["st_m_centers"],
             ell_space=opts["st_ell_space"],
             ell_time=opts["st_ell_time"],
+            ell_x=opts["st_ell_x"],
+            ell_y=opts["st_ell_y"],
+            ell_z=opts["st_ell_z"],
             lam=opts.get("st_lam", opts["lam"]),
             robust_keep_fraction=opts["st_robust_keep_fraction"],
             robust_iters=opts["st_robust_iters"],
@@ -209,8 +218,10 @@ def run_methods_for_dataframe(
             robust_mode=opts["st_robust_mode"],
             track_trim_iters=opts["st_track_trim_iters"],
             rbf_linear_terms=bool(opts["rbf_linear_terms"]),
+            st_linear_interactions=bool(opts["st_linear_interactions"]),
             weight_abort_threshold=opts["weight_abort_threshold"],
             per_axis_scaling=bool(opts["st_per_axis_scaling"]),
+            refine_tol=opts["st_refine_tol"],
         )
         df_st = apply_spacetime_correction(df, st_model)
         pd.DataFrame([st_info]).to_csv(str(out_prefix) + "_st_rbf_fit_info.csv", index=False)
@@ -233,6 +244,9 @@ def run_methods_for_dataframe(
                 m_centers=opts["st_m_centers"],
                 ell_space=opts["st_ell_space"],
                 ell_time=opts["st_ell_time"],
+                ell_x=opts["st_ell_x"],
+                ell_y=opts["st_ell_y"],
+                ell_z=opts["st_ell_z"],
                 lam=opts.get("st_lam", opts["lam"]),
                 robust_keep_fraction=opts["st_robust_keep_fraction"],
                 robust_iters=opts["st_robust_iters"],
@@ -242,8 +256,11 @@ def run_methods_for_dataframe(
                 robust_mode=opts["st_robust_mode"],
                 track_trim_iters=opts["st_track_trim_iters"],
                 rbf_linear_terms=bool(opts["rbf_linear_terms"]),
+                st_linear_interactions=bool(opts["st_linear_interactions"]),
                 weight_abort_threshold=opts["weight_abort_threshold"],
                 per_axis_scaling=bool(opts["st_per_axis_scaling"]),
+                refine_tol=opts["st_refine_tol"],
+                drift_cap_factor=opts["st_moe_drift_cap_factor"],
             )
             df_moe = apply_spacetime_rbf_moe_correction(df, moe_model)
             name = f"st_rbf_moe_k{int(k)}"
@@ -627,6 +644,50 @@ if RUN_SYNTHETIC_REGIME_SUITE:
         "5",
         "--st-moe-k-list",
         "2,3,5",
+    ]
+    env = dict(os.environ)
+    env.update({"PYTHONPATH": str(PROJECT_ROOT)})
+    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=env)
+
+# %% HOW TO GENERATE SYNTHETIC DATA ONLY (CLI synthetic-generate)
+RUN_SYNTHETIC_GENERATE_ONLY = False
+if RUN_SYNTHETIC_GENERATE_ONLY:
+    import subprocess
+    cmd = [
+        sys.executable,
+        "-m",
+        "driftcorr",
+        "synthetic-generate",
+        "--synthetic-dir",
+        str(PROJECT_ROOT / "Synthetic IMARIS files generated_only"),
+        "--synthetic-seed",
+        "123",
+        "--synthetic-n-files",
+        "2",
+    ]
+    env = dict(os.environ)
+    env.update({"PYTHONPATH": str(PROJECT_ROOT)})
+    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=env)
+
+# %% HOW TO RUN PAPER OUTPUT REGRESSION HARNESS (manifest check)
+RUN_PAPER_OUTPUT_REGRESSION = False
+if RUN_PAPER_OUTPUT_REGRESSION:
+    import subprocess
+    cmd = [
+        sys.executable,
+        "-m",
+        "driftcorr",
+        "paper-regression",
+        "--synthetic-dir",
+        str(PROJECT_ROOT / "Synthetic IMARIS files paper_regression"),
+        "--manifest",
+        str(PROJECT_ROOT / "paper_outputs_manifest.txt"),
+        "--columns-manifest",
+        str(PROJECT_ROOT / "paper_metrics_columns.json"),
+        "--methods",
+        "rbf,rigid,local,st_rbf",
+        "--reuse-existing",
+        "1",
     ]
     env = dict(os.environ)
     env.update({"PYTHONPATH": str(PROJECT_ROOT)})

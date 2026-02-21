@@ -31,8 +31,10 @@ date: Feb 2026
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -64,6 +66,7 @@ from .synthetic_experiments import (
     generate_synthetic_imaris_folder,
     load_drift_field_for_imaris_file,
     load_groundtruth_for_imaris_file,
+    load_meta_for_imaris_file,
     save_groundtruth_evaluation_outputs,
 )
 from .visualization import save_visual_inspection_plots
@@ -91,6 +94,156 @@ def _resolve_output_dir_for_batch(args: argparse.Namespace, imaris_dir: Path) ->
     if args.out is not None:
         return Path(args.out)
     return imaris_dir / "driftcorr_results"
+
+
+def _count_synthetic_celltypes(groundtruth_df: pd.DataFrame | None) -> tuple[int | None, int | None]:
+    if groundtruth_df is None or "CellType" not in groundtruth_df.columns:
+        return None, None
+    tab = groundtruth_df[["TrackID", "CellType"]].drop_duplicates("TrackID")
+    n_stat = int(np.sum(tab["CellType"] == "stationary"))
+    n_migr = int(np.sum(tab["CellType"] == "migrating"))
+    return n_stat, n_migr
+
+
+def _snapshot_method_config(args: argparse.Namespace, method: str) -> dict[str, object]:
+    cfg = {
+        "method": str(method),
+        "reference_time": args.reference_time,
+        "seed": args.seed,
+        "keep_fraction": args.keep_fraction,
+        "min_pairs": args.min_pairs,
+    }
+    if method == "rbf":
+        cfg.update(
+            {
+                "m_centers": args.m_centers,
+                "lam": args.lam,
+                "sigma": args.sigma,
+                "temporal_gamma": args.temporal_gamma,
+                "center_mode": args.center_mode,
+                "robust_mode": args.robust_mode,
+                "track_trim_iters": args.track_trim_iters,
+                "two_stage": int(args.two_stage),
+                "space_input_mode": args.rbf_space_input_mode,
+                "rbf_linear_terms": int(args.rbf_linear_terms),
+            }
+        )
+    if method == "st_rbf":
+        cfg.update(
+            {
+                "st_m_centers": args.st_m_centers,
+                "st_lam": args.st_lam if args.st_lam is not None else args.lam,
+                "st_ell_space": args.st_ell_space,
+                "st_ell_time": args.st_ell_time,
+                "st_ell_x": args.st_ell_x,
+                "st_ell_y": args.st_ell_y,
+                "st_ell_z": args.st_ell_z,
+                "st_robust_mode": args.st_robust_mode,
+                "st_track_trim_iters": args.st_track_trim_iters,
+                "st_refine_iters": args.st_refine_iters,
+                "st_refine_tol": args.st_refine_tol,
+                "space_input_mode": args.space_input_mode,
+                "st_per_axis_scaling": args.st_per_axis_scaling,
+                "rbf_linear_terms": int(args.rbf_linear_terms),
+                "st_linear_interactions": int(args.st_linear_interactions),
+                "two_stage": int(args.two_stage),
+            }
+        )
+    if method == "st_rbf_moe":
+        cfg.update(
+            {
+                "st_moe_k": args.st_moe_k,
+                "st_moe_k_list": args.st_moe_k_list,
+                "st_moe_blend_sigma_um": args.st_moe_blend_sigma_um,
+                "st_moe_cluster_mode": args.st_moe_cluster_mode,
+                "st_moe_drift_cap_factor": args.st_moe_drift_cap_factor,
+                "st_moe_group_coupling_alpha": args.st_moe_group_coupling_alpha,
+            }
+        )
+    return cfg
+
+
+def _print_run_config(
+    method: str,
+    args: argparse.Namespace,
+    imaris_file: Path,
+    groundtruth_df: pd.DataFrame | None = None,
+    regime_label: str | None = None,
+) -> None:
+    meta = load_meta_for_imaris_file(imaris_file)
+    n_stat, n_migr = _count_synthetic_celltypes(groundtruth_df)
+    payload: dict[str, object] = {
+        "input_file": str(imaris_file),
+        "regime": regime_label,
+        "dataset_seed": meta.get("seed") if isinstance(meta, dict) else None,
+        "n_stationary_tracks": n_stat,
+        "n_migrating_tracks": n_migr,
+        "method_config": _snapshot_method_config(args, method),
+    }
+    print("[RUN_CONFIG] " + json.dumps(payload, ensure_ascii=True, sort_keys=True))
+
+
+def _assert_no_nan_corrected(df_orig: pd.DataFrame, df_corr: pd.DataFrame, method_name: str) -> None:
+    req = ["Position X_corr", "Position Y_corr", "Position Z_corr"]
+    if not set(req).issubset(df_corr.columns):
+        return
+    valid_in = np.all(
+        np.isfinite(df_orig[["Position X", "Position Y", "Position Z"]].to_numpy(float)),
+        axis=1,
+    )
+    xyzc = df_corr[req].to_numpy(float)
+    bad = valid_in & (~np.all(np.isfinite(xyzc), axis=1))
+    if np.any(bad):
+        raise ValueError(f"{method_name}: corrected coordinates contain NaN/Inf on {int(np.sum(bad))} valid rows.")
+
+
+def _save_pred_drift_sanity(df_orig: pd.DataFrame, df_corr: pd.DataFrame, out_prefix: Path, method_name: str) -> None:
+    req = ["Position X_corr", "Position Y_corr", "Position Z_corr"]
+    if not set(req).issubset(df_corr.columns):
+        return
+    mm = df_orig[["Time", "Position X", "Position Y", "Position Z"]].copy()
+    mm["dx"] = mm["Position X"].to_numpy(float) - df_corr["Position X_corr"].to_numpy(float)
+    mm["dy"] = mm["Position Y"].to_numpy(float) - df_corr["Position Y_corr"].to_numpy(float)
+    mm["dz"] = mm["Position Z"].to_numpy(float) - df_corr["Position Z_corr"].to_numpy(float)
+    mm["dmag"] = np.sqrt(mm["dx"].to_numpy(float) ** 2 + mm["dy"].to_numpy(float) ** 2 + mm["dz"].to_numpy(float) ** 2)
+    tab = (
+        mm.groupby("Time", as_index=False)
+        .agg(
+            pred_drift_median=("dmag", "median"),
+            pred_drift_p95=("dmag", lambda x: float(np.percentile(np.asarray(x, dtype=float), 95))),
+        )
+        .sort_values("Time")
+        .reset_index(drop=True)
+    )
+    tab.to_csv(str(out_prefix) + f"_pred_drift_sanity_{method_name}.csv", index=False)
+
+
+def _collect_output_manifest(out_root: Path) -> list[str]:
+    files = [p for p in out_root.rglob("*") if p.is_file()]
+    rel = [str(p.relative_to(out_root)) for p in files]
+    return sorted(rel)
+
+
+def _write_manifest(manifest_path: Path, entries: list[str]) -> None:
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_path.open("w", encoding="utf-8") as f:
+        for x in sorted(entries):
+            f.write(str(x) + "\n")
+
+
+def _read_manifest(manifest_path: Path) -> list[str]:
+    with manifest_path.open("r", encoding="utf-8") as f:
+        lines = [ln.strip() for ln in f.readlines()]
+    return sorted([ln for ln in lines if ln])
+
+
+def _validate_manifest(out_root: Path, manifest_path: Path) -> None:
+    expected = set(_read_manifest(manifest_path))
+    produced = set(_collect_output_manifest(out_root))
+    missing = sorted(expected - produced)
+    if missing:
+        preview = ", ".join(missing[:12])
+        raise RuntimeError(f"Regression manifest mismatch: {len(missing)} expected artifacts missing. First: {preview}")
 
 
 def _prepare_stationary_subset(
@@ -167,6 +320,14 @@ def _run_rbf(
         df_corr.to_csv(str(out_prefix) + "_positions_corrected_rbf.csv", index=False)
         tf_table.to_csv(str(out_prefix) + "_rbf_fit_table.csv", index=False)
         make_rbf_diagnostic_plots(tf_table, out_prefix)
+        if {"diag_type", "center_nn_median", "center_nn_p90"}.issubset(tf_table.columns):
+            tt = tf_table[tf_table["diag_type"] == "timepoint"].copy()
+            if tt.shape[0] > 0:
+                cmed = pd.to_numeric(tt["center_nn_median"], errors="coerce").to_numpy(float)
+                cp90 = pd.to_numeric(tt["center_nn_p90"], errors="coerce").to_numpy(float)
+                finite_cov = np.isfinite(cmed) & np.isfinite(cp90)
+                if not np.any(finite_cov):
+                    raise RuntimeError("RBF coverage diagnostics invalid: no finite center distance values.")
         if bool(getattr(args, "rbf_compare_space_modes", 0)):
             tf_by_mode: dict[str, pd.DataFrame] = {str(args.rbf_space_input_mode): tf_table}
             for mode in ["row_position", "ref_position", "track_anchor"]:
@@ -286,6 +447,9 @@ def _run_st_rbf(
         m_centers=args.st_m_centers,
         ell_space=args.st_ell_space,
         ell_time=args.st_ell_time,
+        ell_x=args.st_ell_x,
+        ell_y=args.st_ell_y,
+        ell_z=args.st_ell_z,
         lam=args.st_lam if args.st_lam is not None else args.lam,
         robust_keep_fraction=args.st_robust_keep_fraction,
         robust_iters=args.st_robust_iters,
@@ -297,8 +461,10 @@ def _run_st_rbf(
         robust_mode=args.st_robust_mode,
         track_trim_iters=args.st_track_trim_iters,
         rbf_linear_terms=bool(args.rbf_linear_terms),
+        st_linear_interactions=bool(args.st_linear_interactions),
         weight_abort_threshold=args.weight_abort_threshold,
         per_axis_scaling=bool(args.st_per_axis_scaling),
+        refine_tol=args.st_refine_tol,
     )
     df_corr = apply_spacetime_correction(df, model)
     if save_outputs:
@@ -345,6 +511,9 @@ def _run_st_rbf_moe(
             m_centers=args.st_m_centers,
             ell_space=args.st_ell_space,
             ell_time=args.st_ell_time,
+            ell_x=args.st_ell_x,
+            ell_y=args.st_ell_y,
+            ell_z=args.st_ell_z,
             lam=args.st_lam if args.st_lam is not None else args.lam,
             robust_keep_fraction=args.st_robust_keep_fraction,
             robust_iters=args.st_robust_iters,
@@ -354,8 +523,12 @@ def _run_st_rbf_moe(
             robust_mode=args.st_robust_mode,
             track_trim_iters=args.st_track_trim_iters,
             rbf_linear_terms=bool(args.rbf_linear_terms),
+            st_linear_interactions=bool(args.st_linear_interactions),
             weight_abort_threshold=args.weight_abort_threshold,
             per_axis_scaling=bool(args.st_per_axis_scaling),
+            refine_tol=args.st_refine_tol,
+            drift_cap_factor=float(args.st_moe_drift_cap_factor),
+            group_coupling_alpha=float(args.st_moe_group_coupling_alpha),
         )
         df_corr = apply_spacetime_rbf_moe_correction(df, model)
         name = f"st_rbf_moe_k{int(k)}"
@@ -480,6 +653,7 @@ def _run_batch_for_folder(
     out_dir: Path,
     args: argparse.Namespace,
     methods: list[str],
+    regime_label: str | None = None,
 ) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     files = list_imaris_xls_files(imaris_dir)
@@ -495,6 +669,7 @@ def _run_batch_for_folder(
 
         corr_by_method: dict[str, pd.DataFrame] = {}
         for method in methods:
+            _print_run_config(method, args, f, groundtruth_df=groundtruth_df, regime_label=regime_label)
             use_stationary = (
                 stationary_ids
                 if (bool(args.use_stationary_subset) or bool(getattr(args, "use_stationary_only", 0)))
@@ -503,6 +678,9 @@ def _run_batch_for_folder(
             )
             corr = _run_method(method, df, out_prefix, args, fit_track_ids=use_stationary)
             corr_by_method.update(corr)
+            for mname, dfc in corr.items():
+                _assert_no_nan_corrected(df, dfc, mname)
+                _save_pred_drift_sanity(df, dfc, out_prefix, mname)
             if use_stationary is not None:
                 _maybe_save_stationary_impact(df, out_prefix, args, method, corr, groundtruth_df=groundtruth_df)
 
@@ -537,7 +715,11 @@ def run_single(args: argparse.Namespace) -> int:
         else None
     )
 
+    _print_run_config(args.method, args, in_path, groundtruth_df=groundtruth_df, regime_label=None)
     corr_dict = _run_method(args.method, df, out_prefix, args, fit_track_ids=use_stationary)
+    for mname, dfc in corr_dict.items():
+        _assert_no_nan_corrected(df, dfc, mname)
+        _save_pred_drift_sanity(df, dfc, out_prefix, mname)
     if use_stationary is not None:
         _maybe_save_stationary_impact(df, out_prefix, args, args.method, corr_dict, groundtruth_df=groundtruth_df)
 
@@ -562,6 +744,36 @@ def run_batch(args: argparse.Namespace) -> int:
 
 def run_synthetic_benchmark(args: argparse.Namespace) -> int:
     synthetic_dir = Path(args.synthetic_dir)
+    if not (bool(getattr(args, "reuse_existing", 0)) and list_imaris_xls_files(synthetic_dir)):
+        generate_synthetic_imaris_folder(
+            out_dir=synthetic_dir,
+            n_files=args.synthetic_n_files,
+            n_tracks=args.synthetic_n_tracks,
+            n_times=args.synthetic_n_times,
+            stationary_fraction=args.synthetic_stationary_fraction,
+            migrating_fraction=args.synthetic_migrating_fraction,
+            seed=args.synthetic_seed,
+            temporal_smoothness=args.synthetic_temporal_smoothness,
+            local_mode=args.synthetic_local_mode,
+            piecewise_regions=args.synthetic_piecewise_regions,
+            piecewise_transition_um=args.synthetic_piecewise_transition_um,
+            local_lengthscale_um=args.synthetic_local_lengthscale_um,
+            local_drift_scale_um=args.synthetic_local_drift_scale_um,
+            n_rbf_centers=args.synthetic_n_rbf_centers,
+            measurement_noise_um=args.synthetic_measurement_noise_um,
+        )
+    else:
+        print(f"Reusing existing synthetic dataset in {synthetic_dir}")
+
+    out_dir = Path(args.out) if args.out is not None else synthetic_dir / "driftcorr_results"
+    methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    print(f"Synthetic IMARIS folder generated: {synthetic_dir}")
+    return _run_batch_for_folder(synthetic_dir, out_dir, args, methods)
+
+
+def run_synthetic_generate(args: argparse.Namespace) -> int:
+    """Generate synthetic IMARIS data only (no correction run)."""
+    synthetic_dir = Path(args.synthetic_dir)
     generate_synthetic_imaris_folder(
         out_dir=synthetic_dir,
         n_files=args.synthetic_n_files,
@@ -579,11 +791,8 @@ def run_synthetic_benchmark(args: argparse.Namespace) -> int:
         n_rbf_centers=args.synthetic_n_rbf_centers,
         measurement_noise_um=args.synthetic_measurement_noise_um,
     )
-
-    out_dir = Path(args.out) if args.out is not None else synthetic_dir / "driftcorr_results"
-    methods = [m.strip() for m in args.methods.split(",") if m.strip()]
-    print(f"Synthetic IMARIS folder generated: {synthetic_dir}")
-    return _run_batch_for_folder(synthetic_dir, out_dir, args, methods)
+    print(f"Synthetic dataset generated: {synthetic_dir}")
+    return 0
 
 
 def _regime_presets() -> dict[str, dict[str, object]]:
@@ -625,29 +834,33 @@ def run_synthetic_regime_benchmark(args: argparse.Namespace) -> int:
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     seed_values = [int(args.synthetic_seed + i) for i in range(max(1, int(args.synthetic_n_seeds)))]
     rows_runs: list[dict[str, object]] = []
+    rows_time: list[dict[str, object]] = []
 
     for regime_name, regime_cfg in _regime_presets().items():
         for seed in seed_values:
             reg_dir = synthetic_root / f"{regime_name}_seed_{seed:03d}"
-            generate_synthetic_imaris_folder(
-                out_dir=reg_dir,
-                n_files=1,
-                n_tracks=args.synthetic_n_tracks,
-                n_times=args.synthetic_n_times,
-                stationary_fraction=args.synthetic_stationary_fraction,
-                migrating_fraction=args.synthetic_migrating_fraction,
-                seed=seed,
-                temporal_smoothness=args.synthetic_temporal_smoothness,
-                local_mode=str(regime_cfg["local_mode"]),
-                piecewise_regions=int(regime_cfg["piecewise_regions"]),
-                piecewise_transition_um=float(regime_cfg["piecewise_transition_um"]),
-                local_lengthscale_um=float(regime_cfg["local_lengthscale_um"]),
-                local_drift_scale_um=float(regime_cfg["local_drift_scale_um"]),
-                n_rbf_centers=args.synthetic_n_rbf_centers,
-                measurement_noise_um=float(regime_cfg["measurement_noise_um"]),
-            )
+            if not (bool(getattr(args, "reuse_existing", 0)) and list_imaris_xls_files(reg_dir)):
+                generate_synthetic_imaris_folder(
+                    out_dir=reg_dir,
+                    n_files=1,
+                    n_tracks=args.synthetic_n_tracks,
+                    n_times=args.synthetic_n_times,
+                    stationary_fraction=args.synthetic_stationary_fraction,
+                    migrating_fraction=args.synthetic_migrating_fraction,
+                    seed=seed,
+                    temporal_smoothness=args.synthetic_temporal_smoothness,
+                    local_mode=str(regime_cfg["local_mode"]),
+                    piecewise_regions=int(regime_cfg["piecewise_regions"]),
+                    piecewise_transition_um=float(regime_cfg["piecewise_transition_um"]),
+                    local_lengthscale_um=float(regime_cfg["local_lengthscale_um"]),
+                    local_drift_scale_um=float(regime_cfg["local_drift_scale_um"]),
+                    n_rbf_centers=args.synthetic_n_rbf_centers,
+                    measurement_noise_um=float(regime_cfg["measurement_noise_um"]),
+                )
+            else:
+                print(f"Reusing existing dataset: {reg_dir}")
             out_dir_run = out_root / f"{regime_name}_seed_{seed:03d}"
-            _run_batch_for_folder(reg_dir, out_dir_run, args, methods)
+            _run_batch_for_folder(reg_dir, out_dir_run, args, methods, regime_label=regime_name)
 
             files = list_imaris_xls_files(reg_dir)
             if not files:
@@ -661,6 +874,22 @@ def run_synthetic_regime_benchmark(args: argparse.Namespace) -> int:
             gts["regime"] = regime_name
             gts["seed"] = int(seed)
             rows_runs.extend(gts.to_dict(orient="records"))
+            for method_name in gts["method"].astype(str).tolist():
+                p_time = out_prefix.with_name(out_prefix.name + f"_gt_rms_over_time_{method_name}.csv")
+                if not p_time.exists():
+                    continue
+                tt = pd.read_csv(p_time)
+                if {"Time", "rms_error"}.issubset(tt.columns):
+                    for row in tt.to_dict(orient="records"):
+                        rows_time.append(
+                            {
+                                "regime": regime_name,
+                                "seed": int(seed),
+                                "method": str(method_name),
+                                "Time": float(row["Time"]),
+                                "rms_error": float(row["rms_error"]),
+                            }
+                        )
             print(f"Regime run done: regime={regime_name} seed={seed} -> {out_prefix.parent}")
 
     if not rows_runs:
@@ -669,6 +898,25 @@ def run_synthetic_regime_benchmark(args: argparse.Namespace) -> int:
     runs_df = pd.DataFrame(rows_runs)
     out_runs = out_root / "synthetic_regime_runs.csv"
     runs_df.to_csv(out_runs, index=False)
+
+    # One long CSV per regime: method, seed, metric_name, metric_value
+    metric_cols = [c for c in runs_df.columns if c not in {"regime", "seed", "method"}]
+    long_rows: list[dict[str, object]] = []
+    for _, r in runs_df.iterrows():
+        for mc in metric_cols:
+            long_rows.append(
+                {
+                    "regime": str(r["regime"]),
+                    "method": str(r["method"]),
+                    "seed": int(r["seed"]),
+                    "metric_name": str(mc),
+                    "metric_value": float(r[mc]) if np.isfinite(pd.to_numeric(r[mc], errors="coerce")) else np.nan,
+                }
+            )
+    long_df = pd.DataFrame(long_rows)
+    for regime_name in sorted(long_df["regime"].unique()):
+        tab = long_df[long_df["regime"] == regime_name].copy()
+        tab.to_csv(out_root / f"{regime_name}_seed_metrics_long.csv", index=False)
 
     metrics = [c for c in ["overall_rms_error", "overall_rms_error_stationary", "overall_rms_error_migrating"] if c in runs_df.columns]
     agg_rows: list[dict[str, object]] = []
@@ -687,7 +935,141 @@ def run_synthetic_regime_benchmark(args: argparse.Namespace) -> int:
     agg_df = pd.DataFrame(agg_rows).sort_values(["regime", "method"]).reset_index(drop=True)
     out_agg = out_root / "synthetic_regime_summary.csv"
     agg_df.to_csv(out_agg, index=False)
+
+    # Mean/std band over seeds for RMS over time.
+    if rows_time:
+        tdf = pd.DataFrame(rows_time)
+        tdf.to_csv(out_root / "synthetic_regime_rms_over_time_long.csv", index=False)
+        for regime_name, trg in tdf.groupby("regime"):
+            fig = plt.figure(figsize=(9, 5))
+            for method_name, mm in trg.groupby("method"):
+                cur = (
+                    mm.groupby("Time", as_index=False)
+                    .agg(mean=("rms_error", "mean"), std=("rms_error", "std"))
+                    .sort_values("Time")
+                    .reset_index(drop=True)
+                )
+                x = cur["Time"].to_numpy(float)
+                y = cur["mean"].to_numpy(float)
+                s = np.nan_to_num(cur["std"].to_numpy(float), nan=0.0)
+                plt.plot(x, y, marker="o", label=str(method_name))
+                plt.fill_between(x, y - s, y + s, alpha=0.15)
+            plt.xlabel("Time")
+            plt.ylabel("RMS error (um)")
+            plt.title(f"{regime_name}: RMS over time (mean±std across seeds)")
+            plt.ylim(bottom=0.0)
+            handles, _ = plt.gca().get_legend_handles_labels()
+            if handles:
+                plt.legend()
+            plt.tight_layout()
+            plt.savefig(out_root / f"{regime_name}_rms_over_time_mean_std.png", dpi=300)
+            plt.close(fig)
+
+        # Rank plots by final-time RMS and avg RMS.
+        rank_rows: list[dict[str, object]] = []
+        for regime_name, trg in tdf.groupby("regime"):
+            final_t = float(np.nanmax(trg["Time"].to_numpy(float)))
+            for method_name, mm in trg.groupby("method"):
+                v_final = mm[mm["Time"] == final_t]["rms_error"].to_numpy(float)
+                v_avg = mm.groupby("seed", as_index=False)["rms_error"].mean()["rms_error"].to_numpy(float)
+                rank_rows.append(
+                    {
+                        "regime": regime_name,
+                        "method": method_name,
+                        "final_rms_mean": float(np.nanmean(v_final)) if v_final.size else float("nan"),
+                        "avg_rms_mean": float(np.nanmean(v_avg)) if v_avg.size else float("nan"),
+                    }
+                )
+        rdf = pd.DataFrame(rank_rows)
+        rdf.to_csv(out_root / "synthetic_regime_rank_metrics.csv", index=False)
+        for metric_name, ylabel in [("final_rms_mean", "Final-time RMS (um)"), ("avg_rms_mean", "Average RMS (um)")]:
+            fig = plt.figure(figsize=(10, 5))
+            xlabels: list[str] = []
+            xpos: list[float] = []
+            vals: list[float] = []
+            c = 0
+            for regime_name in sorted(rdf["regime"].unique()):
+                rr = rdf[rdf["regime"] == regime_name].sort_values(metric_name)
+                for _, r in rr.iterrows():
+                    xlabels.append(f"{regime_name}\n{r['method']}")
+                    xpos.append(float(c))
+                    vals.append(float(r[metric_name]))
+                    c += 1
+            plt.bar(xpos, vals)
+            plt.xticks(xpos, xlabels, rotation=60, ha="right")
+            plt.ylabel(ylabel)
+            plt.title(f"Method ranking by {metric_name}")
+            plt.ylim(bottom=0.0)
+            plt.tight_layout()
+            plt.savefig(out_root / f"synthetic_regime_rank_{metric_name}.png", dpi=300)
+            plt.close(fig)
+
     print(f"Regime benchmark summary -> {out_agg}")
+    return 0
+
+
+def run_paper_output_regression(args: argparse.Namespace) -> int:
+    """Run one fixed synthetic benchmark and validate output artifacts against a manifest."""
+    synthetic_dir = Path(args.synthetic_dir)
+    out_dir = Path(args.out) if args.out is not None else synthetic_dir / "paper_regression_results"
+    manifest_path = Path(args.manifest)
+    cols_manifest_path = Path(args.columns_manifest)
+
+    if not (bool(getattr(args, "reuse_existing", 0)) and list_imaris_xls_files(synthetic_dir)):
+        generate_synthetic_imaris_folder(
+            out_dir=synthetic_dir,
+            n_files=int(args.synthetic_n_files),
+            n_tracks=int(args.synthetic_n_tracks),
+            n_times=int(args.synthetic_n_times),
+            stationary_fraction=float(args.synthetic_stationary_fraction),
+            migrating_fraction=float(args.synthetic_migrating_fraction),
+            seed=int(args.synthetic_seed),
+            temporal_smoothness=float(args.synthetic_temporal_smoothness),
+            local_mode=str(args.synthetic_local_mode),
+            piecewise_regions=int(args.synthetic_piecewise_regions),
+            piecewise_transition_um=float(args.synthetic_piecewise_transition_um),
+            local_lengthscale_um=float(args.synthetic_local_lengthscale_um),
+            local_drift_scale_um=float(args.synthetic_local_drift_scale_um),
+            n_rbf_centers=int(args.synthetic_n_rbf_centers),
+            measurement_noise_um=float(args.synthetic_measurement_noise_um),
+        )
+
+    methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    _run_batch_for_folder(synthetic_dir, out_dir, args, methods, regime_label="paper_regression")
+
+    manifest_entries = _collect_output_manifest(out_dir)
+    files = list_imaris_xls_files(synthetic_dir)
+    if not files:
+        raise RuntimeError("No synthetic input files found for regression harness.")
+    base = files[0].stem
+    out_prefix = out_dir / base / base
+    metrics_csv = out_prefix.with_name(out_prefix.name + "_metrics_summary.csv")
+    gt_metrics_csv = out_prefix.with_name(out_prefix.name + "_gt_metrics_summary.csv")
+    if not metrics_csv.exists() or not gt_metrics_csv.exists():
+        raise RuntimeError("Regression harness failed: key metrics CSV missing.")
+
+    cols_payload = {
+        "metrics_summary_columns": pd.read_csv(metrics_csv, nrows=1).columns.tolist(),
+        "gt_metrics_summary_columns": pd.read_csv(gt_metrics_csv, nrows=1).columns.tolist(),
+    }
+
+    if bool(getattr(args, "create_manifest", 0)):
+        _write_manifest(manifest_path, manifest_entries)
+        cols_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with cols_manifest_path.open("w", encoding="utf-8") as f:
+            json.dump(cols_payload, f, indent=2, sort_keys=True)
+        print(f"Created manifest: {manifest_path}")
+        print(f"Created metrics columns manifest: {cols_manifest_path}")
+        return 0
+
+    _validate_manifest(out_dir, manifest_path)
+    with cols_manifest_path.open("r", encoding="utf-8") as f:
+        expected_cols = json.load(f)
+    for k in ["metrics_summary_columns", "gt_metrics_summary_columns"]:
+        if list(expected_cols.get(k, [])) != list(cols_payload.get(k, [])):
+            raise RuntimeError(f"Regression harness failed: columns changed for {k}.")
+
+    print("Paper output regression passed.")
     return 0
 
 
@@ -705,7 +1087,7 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--temporal-gamma", type=float, default=1.0)
     p.add_argument("--center-mode", choices=["ref", "pooled", "kmeans_pooled"], default="ref")
     p.add_argument("--center-pooled-time-stride", type=int, default=1)
-    p.add_argument("--robust-mode", choices=["none", "sample_trim", "track_trim"], default="sample_trim")
+    p.add_argument("--robust-mode", choices=["none", "sample_trim", "track_trim", "irls_huber"], default="sample_trim")
     p.add_argument("--track-trim-iters", type=int, default=4)
     p.add_argument("--two-stage", type=int, choices=[0, 1], default=0)
     p.add_argument("--rbf-linear-terms", type=int, choices=[0, 1], default=0)
@@ -742,13 +1124,24 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--st-robust-iters", type=int, default=2)
     p.add_argument("--space-input-mode", choices=["row_position", "track_anchor", "ref_position"], default="ref_position")
     p.add_argument("--st-refine-iters", type=int, default=3)
-    p.add_argument("--st-robust-mode", choices=["none", "sample_trim", "track_trim"], default="sample_trim")
+    p.add_argument(
+        "--st-robust-mode",
+        choices=["none", "sample_trim", "track_trim", "irls_huber", "hybrid_track_irls"],
+        default="sample_trim",
+    )
     p.add_argument("--st-track-trim-iters", type=int, default=4)
     p.add_argument("--st-moe-k", type=int, default=3)
     p.add_argument("--st-moe-k-list", default="3")
     p.add_argument("--st-moe-blend-sigma-um", type=float, default=140.0)
     p.add_argument("--st-moe-cluster-mode", choices=["track_anchor", "ref_position"], default="track_anchor")
+    p.add_argument("--st-moe-drift-cap-factor", type=float, default=3.0)
+    p.add_argument("--st-moe-group-coupling-alpha", type=float, default=0.0)
     p.add_argument("--st-per-axis-scaling", type=int, choices=[0, 1], default=1)
+    p.add_argument("--st-ell-x", type=float, default=None)
+    p.add_argument("--st-ell-y", type=float, default=None)
+    p.add_argument("--st-ell-z", type=float, default=None)
+    p.add_argument("--st-linear-interactions", type=int, choices=[0, 1], default=0)
+    p.add_argument("--st-refine-tol", type=float, default=0.0)
 
     p.add_argument("--use-stationary-subset", action="store_true")
     p.add_argument("--use-stationary-only", type=int, choices=[0, 1], default=0)
@@ -774,6 +1167,7 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--synthetic-local-drift-scale-um", type=float, default=2.4)
     p.add_argument("--synthetic-n-rbf-centers", type=int, default=10)
     p.add_argument("--synthetic-measurement-noise-um", type=float, default=0.2)
+    p.add_argument("--reuse-existing", type=int, choices=[0, 1], default=0)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -801,7 +1195,7 @@ def build_parser() -> argparse.ArgumentParser:
     synth = sub.add_parser("synthetic-benchmark", help="Generate synthetic IMARIS folder and run full pipeline")
     synth.add_argument("--synthetic-dir", default="synthetic_imaris_files")
     synth.add_argument("--out", default=None, help="Default: <synthetic-dir>/driftcorr_results")
-    synth.add_argument("--methods", default="rbf,rigid,local,st_rbf,st_rbf_moe", help="Comma-separated method names")
+    synth.add_argument("--methods", default="rbf,rigid,local,st_rbf", help="Comma-separated method names")
     synth.add_argument("--synthetic-n-files", type=int, default=5)
     synth.add_argument("--synthetic-n-tracks", type=int, default=80)
     synth.add_argument("--synthetic-n-times", type=int, default=20)
@@ -809,6 +1203,16 @@ def build_parser() -> argparse.ArgumentParser:
     synth.add_argument("--synthetic-migrating-fraction", type=float, default=0.35)
     synth.add_argument("--synthetic-seed", type=int, default=42)
     synth.add_argument("--synthetic-temporal-smoothness", type=float, default=0.9)
+
+    synth_gen = sub.add_parser("synthetic-generate", help="Generate synthetic IMARIS folder only (no correction)")
+    synth_gen.add_argument("--synthetic-dir", default="synthetic_imaris_files")
+    synth_gen.add_argument("--synthetic-n-files", type=int, default=5)
+    synth_gen.add_argument("--synthetic-n-tracks", type=int, default=80)
+    synth_gen.add_argument("--synthetic-n-times", type=int, default=20)
+    synth_gen.add_argument("--synthetic-stationary-fraction", type=float, default=0.45)
+    synth_gen.add_argument("--synthetic-migrating-fraction", type=float, default=0.35)
+    synth_gen.add_argument("--synthetic-seed", type=int, default=42)
+    synth_gen.add_argument("--synthetic-temporal-smoothness", type=float, default=0.9)
 
     synth_reg = sub.add_parser(
         "synthetic-regime-benchmark",
@@ -825,7 +1229,22 @@ def build_parser() -> argparse.ArgumentParser:
     synth_reg.add_argument("--synthetic-temporal-smoothness", type=float, default=0.9)
     synth_reg.set_defaults(st_moe_k_list="2,3,5")
 
-    for p in (run, run_all, synth, synth_reg):
+    regression = sub.add_parser("paper-regression", help="Run synthetic output regression harness against manifest")
+    regression.add_argument("--synthetic-dir", default="Synthetic IMARIS files paper_regression")
+    regression.add_argument("--out", default=None, help="Default: <synthetic-dir>/paper_regression_results")
+    regression.add_argument("--methods", default="rbf,rigid,local,st_rbf", help="Comma-separated method names")
+    regression.add_argument("--manifest", default="paper_outputs_manifest.txt")
+    regression.add_argument("--columns-manifest", default="paper_metrics_columns.json")
+    regression.add_argument("--create-manifest", type=int, choices=[0, 1], default=0)
+    regression.add_argument("--synthetic-n-files", type=int, default=1)
+    regression.add_argument("--synthetic-n-tracks", type=int, default=60)
+    regression.add_argument("--synthetic-n-times", type=int, default=16)
+    regression.add_argument("--synthetic-stationary-fraction", type=float, default=0.45)
+    regression.add_argument("--synthetic-migrating-fraction", type=float, default=0.35)
+    regression.add_argument("--synthetic-seed", type=int, default=42)
+    regression.add_argument("--synthetic-temporal-smoothness", type=float, default=0.9)
+
+    for p in (run, run_all, synth, synth_gen, synth_reg, regression):
         _add_common_method_options(p)
 
     return parser
@@ -840,8 +1259,12 @@ def main(argv: list[str] | None = None) -> int:
         return run_batch(args)
     if args.command == "synthetic-benchmark":
         return run_synthetic_benchmark(args)
+    if args.command == "synthetic-generate":
+        return run_synthetic_generate(args)
     if args.command == "synthetic-regime-benchmark":
         return run_synthetic_regime_benchmark(args)
+    if args.command == "paper-regression":
+        return run_paper_output_regression(args)
     parser.error(f"Unknown command: {args.command}")
     return 2
 

@@ -302,3 +302,128 @@ def scalarize_metrics(metrics: dict[str, Any]) -> dict[str, float | int | str | 
         if np.isscalar(v) or isinstance(v, (str, bool)):
             out[k] = v
     return out
+
+
+def _rms_ci_from_squared_errors(e2: np.ndarray, z: float = 1.96) -> tuple[float, float, float]:
+    """Approximate RMS confidence interval from per-sample squared errors."""
+    v = np.asarray(e2, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        return float("nan"), float("nan"), float("nan")
+    mu = float(np.mean(v))
+    if v.size == 1:
+        rms = float(np.sqrt(max(mu, 0.0)))
+        return rms, rms, rms
+    se = float(np.std(v, ddof=1) / np.sqrt(v.size))
+    lo = max(mu - z * se, 0.0)
+    hi = max(mu + z * se, 0.0)
+    return float(np.sqrt(mu)), float(np.sqrt(lo)), float(np.sqrt(hi))
+
+
+def per_time_groundtruth_metrics(
+    df_corr: pd.DataFrame,
+    df_groundtruth: pd.DataFrame,
+    drift_field_groundtruth: pd.DataFrame | None = None,
+    near_stationary_threshold_um: float = 2.0,
+    ci_z: float = 1.96,
+) -> pd.DataFrame:
+    """Compute per-time synthetic metrics with simple confidence intervals across tracks.
+
+    Metrics per time and group (`all`, `stationary`, `migrating`):
+    - RMS corrected-vs-groundtruth position error with CI.
+    - Drift bias magnitude: ||median(pred_drift)-median(true_drift)|| (if drift GT provided).
+    - Drift variance ratio: var(pred_drift)/var(true_drift) (if drift GT provided).
+    - Fraction near-stationary after correction using corrected displacement to per-track anchor.
+    """
+    dc = ensure_numeric_tracks(df_corr, pos_cols=("Position X_corr", "Position Y_corr", "Position Z_corr"))
+    dg = ensure_numeric_tracks(df_groundtruth, pos_cols=("Position X", "Position Y", "Position Z"))
+
+    mc = dc[["TrackID", "Time", "Position X", "Position Y", "Position Z", "Position X_corr", "Position Y_corr", "Position Z_corr"]].copy()
+    mg = dg[["TrackID", "Time", "Position X", "Position Y", "Position Z"]].copy()
+    mg = mg.rename(columns={"Position X": "X_gt", "Position Y": "Y_gt", "Position Z": "Z_gt"})
+    mm = mc.merge(mg, on=["TrackID", "Time"], how="inner")
+    if "CellType" in dg.columns:
+        mm = mm.merge(dg[["TrackID", "CellType"]].drop_duplicates("TrackID"), on="TrackID", how="left")
+
+    mm["err2"] = (
+        (mm["Position X_corr"].to_numpy(float) - mm["X_gt"].to_numpy(float)) ** 2
+        + (mm["Position Y_corr"].to_numpy(float) - mm["Y_gt"].to_numpy(float)) ** 2
+        + (mm["Position Z_corr"].to_numpy(float) - mm["Z_gt"].to_numpy(float)) ** 2
+    )
+    mm["pred_dx"] = mm["Position X"].to_numpy(float) - mm["Position X_corr"].to_numpy(float)
+    mm["pred_dy"] = mm["Position Y"].to_numpy(float) - mm["Position Y_corr"].to_numpy(float)
+    mm["pred_dz"] = mm["Position Z"].to_numpy(float) - mm["Position Z_corr"].to_numpy(float)
+
+    # Corrected displacement-to-anchor magnitude per row.
+    anc = (
+        dc.sort_values(["TrackID", "Time"])
+        .groupby("TrackID", as_index=False)[["Position X_corr", "Position Y_corr", "Position Z_corr"]]
+        .first()
+        .rename(columns={"Position X_corr": "X0", "Position Y_corr": "Y0", "Position Z_corr": "Z0"})
+    )
+    mm = mm.merge(anc, on="TrackID", how="left")
+    mm["corr_disp_mag"] = np.sqrt(
+        (mm["Position X_corr"].to_numpy(float) - mm["X0"].to_numpy(float)) ** 2
+        + (mm["Position Y_corr"].to_numpy(float) - mm["Y0"].to_numpy(float)) ** 2
+        + (mm["Position Z_corr"].to_numpy(float) - mm["Z0"].to_numpy(float)) ** 2
+    )
+
+    ddr: pd.DataFrame | None = None
+    if drift_field_groundtruth is not None and {"drift_x_total", "drift_y_total", "drift_z_total"}.issubset(drift_field_groundtruth.columns):
+        ddr = drift_field_groundtruth[["TrackID", "Time", "drift_x_total", "drift_y_total", "drift_z_total"]].copy()
+        mm = mm.merge(ddr, on=["TrackID", "Time"], how="left")
+
+    groups: list[tuple[str, pd.DataFrame]] = [("all", mm)]
+    if "CellType" in mm.columns:
+        groups.append(("stationary", mm[mm["CellType"] == "stationary"].copy()))
+        groups.append(("migrating", mm[mm["CellType"] == "migrating"].copy()))
+
+    rows: list[dict[str, float | str | int]] = []
+    for gname, gg in groups:
+        if gg.shape[0] == 0:
+            continue
+        for tt, gt in gg.groupby("Time", as_index=False):
+            e2 = gt["err2"].to_numpy(float)
+            rms, rms_lo, rms_hi = _rms_ci_from_squared_errors(e2, z=float(ci_z))
+            row: dict[str, float | str | int] = {
+                "Time": float(tt),
+                "group": str(gname),
+                "n_tracks": int(gt["TrackID"].nunique()),
+                "rms_error": float(rms),
+                "rms_error_ci_low": float(rms_lo),
+                "rms_error_ci_high": float(rms_hi),
+                "near_stationary_fraction": float(
+                    np.mean(gt["corr_disp_mag"].to_numpy(float) <= float(near_stationary_threshold_um))
+                )
+                if gt.shape[0]
+                else float("nan"),
+            }
+            if ddr is not None and {"drift_x_total", "drift_y_total", "drift_z_total"}.issubset(gt.columns):
+                pred_med = np.array(
+                    [
+                        np.nanmedian(gt["pred_dx"].to_numpy(float)),
+                        np.nanmedian(gt["pred_dy"].to_numpy(float)),
+                        np.nanmedian(gt["pred_dz"].to_numpy(float)),
+                    ],
+                    dtype=float,
+                )
+                true_med = np.array(
+                    [
+                        np.nanmedian(gt["drift_x_total"].to_numpy(float)),
+                        np.nanmedian(gt["drift_y_total"].to_numpy(float)),
+                        np.nanmedian(gt["drift_z_total"].to_numpy(float)),
+                    ],
+                    dtype=float,
+                )
+                row["drift_bias_norm"] = float(np.linalg.norm(pred_med - true_med))
+                pred_var = np.nanvar(gt[["pred_dx", "pred_dy", "pred_dz"]].to_numpy(float), axis=0)
+                true_var = np.nanvar(gt[["drift_x_total", "drift_y_total", "drift_z_total"]].to_numpy(float), axis=0)
+                num = float(np.nansum(pred_var))
+                den = float(np.nansum(true_var))
+                row["drift_var_ratio"] = float(num / den) if den > 1e-12 else float("nan")
+            rows.append(row)
+
+    out = pd.DataFrame(rows)
+    if out.shape[0]:
+        out = out.sort_values(["group", "Time"]).reset_index(drop=True)
+    return out

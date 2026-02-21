@@ -669,7 +669,7 @@ if RUN_SYNTHETIC_GENERATE_ONLY:
     env.update({"PYTHONPATH": str(PROJECT_ROOT)})
     subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=env)
 
-# %% HOW TO RUN PAPER OUTPUT REGRESSION HARNESS (manifest check)
+# %% HOW TO RUN PAPER OUTPUT REGRESSION HARNESS (just checks whether outputs plots still match expected)
 RUN_PAPER_OUTPUT_REGRESSION = False
 if RUN_PAPER_OUTPUT_REGRESSION:
     import subprocess

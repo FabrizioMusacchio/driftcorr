@@ -40,7 +40,11 @@ from .evaluate import run_all_methods_and_compare, save_evaluation_outputs
 from .io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris_position_xls
 from .metrics import msd_per_track, pivot_tracks
 from .method_local_communities import run_local_drift_correction_for_file
-from .method_rbf_ref import correct_positions_rbf_to_reference, make_rbf_diagnostic_plots
+from .method_rbf_ref import (
+    correct_positions_rbf_to_reference,
+    make_rbf_diagnostic_plots,
+    plot_rbf_residuals_by_space_input_mode,
+)
 from .method_rigid_step import (
     apply_piecewise_rigid_correction_to_tracks,
     apply_rigid_correction_to_tracks,
@@ -50,9 +54,15 @@ from .method_rigid_step import (
 from .method_spacetime_rbf import apply_correction as apply_spacetime_correction
 from .method_spacetime_rbf import fit_spacetime_rbf_model
 from .method_spacetime_rbf import make_spacetime_diagnostic_plots
+from .method_spacetime_rbf_moe import (
+    apply_spacetime_rbf_moe_correction,
+    fit_spacetime_rbf_moe_model,
+    make_st_moe_diagnostic_plots,
+)
 from .stationary import evaluate_stationary_selection_impact, find_stationary_tracks, plot_stationary_spatial_distribution
 from .synthetic_experiments import (
     generate_synthetic_imaris_folder,
+    load_drift_field_for_imaris_file,
     load_groundtruth_for_imaris_file,
     save_groundtruth_evaluation_outputs,
 )
@@ -157,6 +167,35 @@ def _run_rbf(
         df_corr.to_csv(str(out_prefix) + "_positions_corrected_rbf.csv", index=False)
         tf_table.to_csv(str(out_prefix) + "_rbf_fit_table.csv", index=False)
         make_rbf_diagnostic_plots(tf_table, out_prefix)
+        if bool(getattr(args, "rbf_compare_space_modes", 0)):
+            tf_by_mode: dict[str, pd.DataFrame] = {str(args.rbf_space_input_mode): tf_table}
+            for mode in ["row_position", "ref_position", "track_anchor"]:
+                if mode == str(args.rbf_space_input_mode):
+                    continue
+                _, tf_mode, _, _, _ = correct_positions_rbf_to_reference(
+                    df,
+                    reference_time=args.reference_time,
+                    m=args.m_centers,
+                    keep_fraction=args.keep_fraction,
+                    lam=args.lam,
+                    sigma=args.sigma,
+                    min_pairs=args.min_pairs,
+                    seed=args.seed,
+                    fit_track_ids=fit_ids,
+                    temporal_gamma=args.temporal_gamma,
+                    center_mode=args.center_mode,
+                    pooled_time_stride=args.center_pooled_time_stride,
+                    robust_mode=args.robust_mode,
+                    track_trim_iters=args.track_trim_iters,
+                    two_stage=bool(args.two_stage),
+                    space_input_mode=mode,
+                    rbf_linear_terms=bool(args.rbf_linear_terms),
+                    row_position_iters=args.row_position_iters,
+                    row_position_tol=args.row_position_tol,
+                    weight_abort_threshold=args.weight_abort_threshold,
+                )
+                tf_by_mode[mode] = tf_mode
+            plot_rbf_residuals_by_space_input_mode(tf_by_mode, str(out_prefix) + "_rbf_residuals_by_space_input_mode.png")
     return {"rbf": df_corr}
 
 
@@ -259,6 +298,7 @@ def _run_st_rbf(
         track_trim_iters=args.st_track_trim_iters,
         rbf_linear_terms=bool(args.rbf_linear_terms),
         weight_abort_threshold=args.weight_abort_threshold,
+        per_axis_scaling=bool(args.st_per_axis_scaling),
     )
     df_corr = apply_spacetime_correction(df, model)
     if save_outputs:
@@ -266,6 +306,65 @@ def _run_st_rbf(
         df_corr.to_csv(str(out_prefix) + "_positions_corrected_st_rbf.csv", index=False)
         make_spacetime_diagnostic_plots(model, out_prefix)
     return {"st_rbf": df_corr}
+
+
+def _run_st_rbf_moe(
+    df: pd.DataFrame,
+    out_prefix: Path,
+    args: argparse.Namespace,
+    fit_track_ids: set[float] | None = None,
+    save_outputs: bool = True,
+) -> dict[str, pd.DataFrame]:
+    fit_ids = None if fit_track_ids is None else list(sorted(fit_track_ids))
+    k_values: list[int] = []
+    raw = str(getattr(args, "st_moe_k_list", "") or "").strip()
+    if raw:
+        for tok in raw.split(","):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                kv = int(tok)
+            except ValueError:
+                continue
+            if kv > 0 and kv not in k_values:
+                k_values.append(kv)
+    if not k_values:
+        k_values = [int(args.st_moe_k)]
+
+    out: dict[str, pd.DataFrame] = {}
+    for i, k in enumerate(k_values):
+        model, expert_table = fit_spacetime_rbf_moe_model(
+            df,
+            n_experts=int(k),
+            blend_sigma_um=args.st_moe_blend_sigma_um,
+            cluster_mode=args.st_moe_cluster_mode,
+            seed=int(args.seed + i * 13),
+            reference_time=args.reference_time,
+            fit_track_ids=fit_ids,
+            m_centers=args.st_m_centers,
+            ell_space=args.st_ell_space,
+            ell_time=args.st_ell_time,
+            lam=args.st_lam if args.st_lam is not None else args.lam,
+            robust_keep_fraction=args.st_robust_keep_fraction,
+            robust_iters=args.st_robust_iters,
+            space_input_mode=args.space_input_mode,
+            n_refine=args.st_refine_iters,
+            two_stage=bool(args.two_stage),
+            robust_mode=args.st_robust_mode,
+            track_trim_iters=args.st_track_trim_iters,
+            rbf_linear_terms=bool(args.rbf_linear_terms),
+            weight_abort_threshold=args.weight_abort_threshold,
+            per_axis_scaling=bool(args.st_per_axis_scaling),
+        )
+        df_corr = apply_spacetime_rbf_moe_correction(df, model)
+        name = f"st_rbf_moe_k{int(k)}"
+        out[name] = df_corr
+        if save_outputs:
+            expert_table.to_csv(str(out_prefix) + f"_{name}_experts.csv", index=False)
+            df_corr.to_csv(str(out_prefix) + f"_positions_corrected_{name}.csv", index=False)
+            make_st_moe_diagnostic_plots(expert_table, str(out_prefix) + f"_{name}")
+    return out
 
 
 def _run_method(
@@ -284,6 +383,8 @@ def _run_method(
         return _run_local(df, out_prefix, args)
     if method == "st_rbf":
         return _run_st_rbf(df, out_prefix, args, fit_track_ids=fit_track_ids, save_outputs=save_outputs)
+    if method == "st_rbf_moe":
+        return _run_st_rbf_moe(df, out_prefix, args, fit_track_ids=fit_track_ids, save_outputs=save_outputs)
     raise ValueError(f"Unknown method: {method}")
 
 
@@ -370,7 +471,8 @@ def _maybe_groundtruth_eval(
     gt = groundtruth_df if groundtruth_df is not None else load_groundtruth_for_imaris_file(imaris_file)
     if gt is None:
         return
-    save_groundtruth_evaluation_outputs(out_prefix, gt, corrected_by_method)
+    drift_gt = load_drift_field_for_imaris_file(imaris_file)
+    save_groundtruth_evaluation_outputs(out_prefix, gt, corrected_by_method, drift_field_groundtruth=drift_gt)
 
 
 def _run_batch_for_folder(
@@ -393,7 +495,12 @@ def _run_batch_for_folder(
 
         corr_by_method: dict[str, pd.DataFrame] = {}
         for method in methods:
-            use_stationary = stationary_ids if (bool(args.use_stationary_subset) or bool(getattr(args, "use_stationary_only", 0))) and method in {"rbf", "st_rbf"} else None
+            use_stationary = (
+                stationary_ids
+                if (bool(args.use_stationary_subset) or bool(getattr(args, "use_stationary_only", 0)))
+                and method in {"rbf", "st_rbf", "st_rbf_moe"}
+                else None
+            )
             corr = _run_method(method, df, out_prefix, args, fit_track_ids=use_stationary)
             corr_by_method.update(corr)
             if use_stationary is not None:
@@ -423,7 +530,12 @@ def run_single(args: argparse.Namespace) -> int:
     out_prefix = _result_prefix_for_input_file(out_dir, in_path)
 
     _, stationary_ids = _prepare_stationary_subset(df, out_prefix, args)
-    use_stationary = stationary_ids if (bool(args.use_stationary_subset) or bool(getattr(args, "use_stationary_only", 0))) and args.method in {"rbf", "st_rbf"} else None
+    use_stationary = (
+        stationary_ids
+        if (bool(args.use_stationary_subset) or bool(getattr(args, "use_stationary_only", 0)))
+        and args.method in {"rbf", "st_rbf", "st_rbf_moe"}
+        else None
+    )
 
     corr_dict = _run_method(args.method, df, out_prefix, args, fit_track_ids=use_stationary)
     if use_stationary is not None:
@@ -459,12 +571,124 @@ def run_synthetic_benchmark(args: argparse.Namespace) -> int:
         migrating_fraction=args.synthetic_migrating_fraction,
         seed=args.synthetic_seed,
         temporal_smoothness=args.synthetic_temporal_smoothness,
+        local_mode=args.synthetic_local_mode,
+        piecewise_regions=args.synthetic_piecewise_regions,
+        piecewise_transition_um=args.synthetic_piecewise_transition_um,
+        local_lengthscale_um=args.synthetic_local_lengthscale_um,
+        local_drift_scale_um=args.synthetic_local_drift_scale_um,
+        n_rbf_centers=args.synthetic_n_rbf_centers,
+        measurement_noise_um=args.synthetic_measurement_noise_um,
     )
 
     out_dir = Path(args.out) if args.out is not None else synthetic_dir / "driftcorr_results"
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     print(f"Synthetic IMARIS folder generated: {synthetic_dir}")
     return _run_batch_for_folder(synthetic_dir, out_dir, args, methods)
+
+
+def _regime_presets() -> dict[str, dict[str, object]]:
+    """Fixed synthetic regimes to compare where each correction family should excel."""
+    return {
+        "smooth_spacetime": {
+            "local_mode": "smooth",
+            "piecewise_regions": 1,
+            "piecewise_transition_um": 120.0,
+            "local_lengthscale_um": 280.0,
+            "local_drift_scale_um": 2.1,
+            "measurement_noise_um": 0.08,
+        },
+        "piecewise_smooth": {
+            "local_mode": "piecewise_smooth",
+            "piecewise_regions": 3,
+            "piecewise_transition_um": 130.0,
+            "local_lengthscale_um": 220.0,
+            "local_drift_scale_um": 2.4,
+            "measurement_noise_um": 0.12,
+        },
+        "piecewise_abrupt": {
+            "local_mode": "piecewise_abrupt",
+            "piecewise_regions": 4,
+            "piecewise_transition_um": 6.0,
+            "local_lengthscale_um": 180.0,
+            "local_drift_scale_um": 2.6,
+            "measurement_noise_um": 0.15,
+        },
+    }
+
+
+def run_synthetic_regime_benchmark(args: argparse.Namespace) -> int:
+    """Run fixed 3-regime synthetic suite over multiple seeds and aggregate RMS summaries."""
+    synthetic_root = Path(args.synthetic_dir)
+    out_root = Path(args.out) if args.out is not None else synthetic_root / "driftcorr_results_regimes"
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    methods = [m.strip() for m in args.methods.split(",") if m.strip()]
+    seed_values = [int(args.synthetic_seed + i) for i in range(max(1, int(args.synthetic_n_seeds)))]
+    rows_runs: list[dict[str, object]] = []
+
+    for regime_name, regime_cfg in _regime_presets().items():
+        for seed in seed_values:
+            reg_dir = synthetic_root / f"{regime_name}_seed_{seed:03d}"
+            generate_synthetic_imaris_folder(
+                out_dir=reg_dir,
+                n_files=1,
+                n_tracks=args.synthetic_n_tracks,
+                n_times=args.synthetic_n_times,
+                stationary_fraction=args.synthetic_stationary_fraction,
+                migrating_fraction=args.synthetic_migrating_fraction,
+                seed=seed,
+                temporal_smoothness=args.synthetic_temporal_smoothness,
+                local_mode=str(regime_cfg["local_mode"]),
+                piecewise_regions=int(regime_cfg["piecewise_regions"]),
+                piecewise_transition_um=float(regime_cfg["piecewise_transition_um"]),
+                local_lengthscale_um=float(regime_cfg["local_lengthscale_um"]),
+                local_drift_scale_um=float(regime_cfg["local_drift_scale_um"]),
+                n_rbf_centers=args.synthetic_n_rbf_centers,
+                measurement_noise_um=float(regime_cfg["measurement_noise_um"]),
+            )
+            out_dir_run = out_root / f"{regime_name}_seed_{seed:03d}"
+            _run_batch_for_folder(reg_dir, out_dir_run, args, methods)
+
+            files = list_imaris_xls_files(reg_dir)
+            if not files:
+                continue
+            f = files[0]
+            out_prefix = _result_prefix_for_input_file(out_dir_run, f)
+            gt_summary_path = out_prefix.with_name(out_prefix.name + "_gt_metrics_summary.csv")
+            if not gt_summary_path.exists():
+                continue
+            gts = pd.read_csv(gt_summary_path)
+            gts["regime"] = regime_name
+            gts["seed"] = int(seed)
+            rows_runs.extend(gts.to_dict(orient="records"))
+            print(f"Regime run done: regime={regime_name} seed={seed} -> {out_prefix.parent}")
+
+    if not rows_runs:
+        raise RuntimeError("No regime benchmark rows were produced.")
+
+    runs_df = pd.DataFrame(rows_runs)
+    out_runs = out_root / "synthetic_regime_runs.csv"
+    runs_df.to_csv(out_runs, index=False)
+
+    metrics = [c for c in ["overall_rms_error", "overall_rms_error_stationary", "overall_rms_error_migrating"] if c in runs_df.columns]
+    agg_rows: list[dict[str, object]] = []
+    for (regime, method), grp in runs_df.groupby(["regime", "method"], dropna=False):
+        row: dict[str, object] = {
+            "regime": regime,
+            "method": method,
+            "n_runs": int(grp.shape[0]),
+        }
+        for m in metrics:
+            vv = pd.to_numeric(grp[m], errors="coerce").to_numpy(float)
+            row[f"{m}_mean"] = float(np.nanmean(vv)) if vv.size else float("nan")
+            row[f"{m}_std"] = float(np.nanstd(vv, ddof=0)) if vv.size else float("nan")
+        agg_rows.append(row)
+
+    agg_df = pd.DataFrame(agg_rows).sort_values(["regime", "method"]).reset_index(drop=True)
+    out_agg = out_root / "synthetic_regime_summary.csv"
+    agg_df.to_csv(out_agg, index=False)
+    print(f"Regime benchmark summary -> {out_agg}")
+    return 0
 
 
 def _add_common_method_options(p: argparse.ArgumentParser) -> None:
@@ -486,6 +710,7 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--two-stage", type=int, choices=[0, 1], default=0)
     p.add_argument("--rbf-linear-terms", type=int, choices=[0, 1], default=0)
     p.add_argument("--rbf-space-input-mode", choices=["row_position", "track_anchor", "ref_position"], default="track_anchor")
+    p.add_argument("--rbf-compare-space-modes", type=int, choices=[0, 1], default=0)
     p.add_argument("--row-position-iters", type=int, default=3)
     p.add_argument("--row-position-tol", type=float, default=1e-3)
     p.add_argument("--weight-abort-threshold", type=float, default=1e4)
@@ -519,6 +744,11 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--st-refine-iters", type=int, default=3)
     p.add_argument("--st-robust-mode", choices=["none", "sample_trim", "track_trim"], default="sample_trim")
     p.add_argument("--st-track-trim-iters", type=int, default=4)
+    p.add_argument("--st-moe-k", type=int, default=3)
+    p.add_argument("--st-moe-k-list", default="3")
+    p.add_argument("--st-moe-blend-sigma-um", type=float, default=140.0)
+    p.add_argument("--st-moe-cluster-mode", choices=["track_anchor", "ref_position"], default="track_anchor")
+    p.add_argument("--st-per-axis-scaling", type=int, choices=[0, 1], default=1)
 
     p.add_argument("--use-stationary-subset", action="store_true")
     p.add_argument("--use-stationary-only", type=int, choices=[0, 1], default=0)
@@ -536,6 +766,14 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--stationary-use-corr-outlier", type=int, choices=[0, 1], default=1)
 
     p.add_argument("--skip-visual-plots", action="store_true")
+    p.add_argument("--synthetic-n-seeds", type=int, default=5)
+    p.add_argument("--synthetic-local-mode", choices=["smooth", "piecewise_smooth", "piecewise_abrupt"], default="smooth")
+    p.add_argument("--synthetic-piecewise-regions", type=int, default=3)
+    p.add_argument("--synthetic-piecewise-transition-um", type=float, default=90.0)
+    p.add_argument("--synthetic-local-lengthscale-um", type=float, default=220.0)
+    p.add_argument("--synthetic-local-drift-scale-um", type=float, default=2.4)
+    p.add_argument("--synthetic-n-rbf-centers", type=int, default=10)
+    p.add_argument("--synthetic-measurement-noise-um", type=float, default=0.2)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -543,7 +781,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="Run one correction method on one IMARIS XLS file")
-    run.add_argument("--method", choices=["rbf", "rigid", "local", "st_rbf"], required=True)
+    run.add_argument("--method", choices=["rbf", "rigid", "local", "st_rbf", "st_rbf_moe"], required=True)
     run.add_argument("--imaris-xls", required=True)
     run.add_argument(
         "--out",
@@ -563,7 +801,7 @@ def build_parser() -> argparse.ArgumentParser:
     synth = sub.add_parser("synthetic-benchmark", help="Generate synthetic IMARIS folder and run full pipeline")
     synth.add_argument("--synthetic-dir", default="synthetic_imaris_files")
     synth.add_argument("--out", default=None, help="Default: <synthetic-dir>/driftcorr_results")
-    synth.add_argument("--methods", default="rbf,rigid,local,st_rbf", help="Comma-separated method names")
+    synth.add_argument("--methods", default="rbf,rigid,local,st_rbf,st_rbf_moe", help="Comma-separated method names")
     synth.add_argument("--synthetic-n-files", type=int, default=5)
     synth.add_argument("--synthetic-n-tracks", type=int, default=80)
     synth.add_argument("--synthetic-n-times", type=int, default=20)
@@ -572,7 +810,22 @@ def build_parser() -> argparse.ArgumentParser:
     synth.add_argument("--synthetic-seed", type=int, default=42)
     synth.add_argument("--synthetic-temporal-smoothness", type=float, default=0.9)
 
-    for p in (run, run_all, synth):
+    synth_reg = sub.add_parser(
+        "synthetic-regime-benchmark",
+        help="Run synthetic regimes (smooth/piecewise_smooth/piecewise_abrupt) across seeds",
+    )
+    synth_reg.add_argument("--synthetic-dir", default="synthetic_regime_suite")
+    synth_reg.add_argument("--out", default=None, help="Default: <synthetic-dir>/driftcorr_results_regimes")
+    synth_reg.add_argument("--methods", default="rbf,rigid,local,st_rbf,st_rbf_moe", help="Comma-separated method names")
+    synth_reg.add_argument("--synthetic-n-tracks", type=int, default=80)
+    synth_reg.add_argument("--synthetic-n-times", type=int, default=20)
+    synth_reg.add_argument("--synthetic-stationary-fraction", type=float, default=0.45)
+    synth_reg.add_argument("--synthetic-migrating-fraction", type=float, default=0.35)
+    synth_reg.add_argument("--synthetic-seed", type=int, default=42)
+    synth_reg.add_argument("--synthetic-temporal-smoothness", type=float, default=0.9)
+    synth_reg.set_defaults(st_moe_k_list="2,3,5")
+
+    for p in (run, run_all, synth, synth_reg):
         _add_common_method_options(p)
 
     return parser
@@ -587,6 +840,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_batch(args)
     if args.command == "synthetic-benchmark":
         return run_synthetic_benchmark(args)
+    if args.command == "synthetic-regime-benchmark":
+        return run_synthetic_regime_benchmark(args)
     parser.error(f"Unknown command: {args.command}")
     return 2
 

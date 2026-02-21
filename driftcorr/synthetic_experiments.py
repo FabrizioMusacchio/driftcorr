@@ -91,6 +91,9 @@ def generate_controlled_drift_dataset(
     n_rbf_centers: int = 10,
     temporal_smoothness: float = 0.9,
     measurement_noise_um: float = 0.2,
+    local_mode: str = "smooth",
+    piecewise_regions: int = 3,
+    piecewise_transition_um: float = 90.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Generate 3D tracks with known drift and known no-drift groundtruth.
 
@@ -181,6 +184,23 @@ def generate_controlled_drift_dataset(
     ).reshape(t_count, n_rbf_centers, 3)
     wt *= float(local_drift_scale_um)
 
+    piecewise_regions = max(1, int(piecewise_regions))
+    region_centers = np.column_stack(
+        [
+            rng.uniform(x_rng[0], x_rng[1], size=piecewise_regions),
+            rng.uniform(y_rng[0], y_rng[1], size=piecewise_regions),
+            rng.uniform(z_rng[0], z_rng[1], size=piecewise_regions),
+        ]
+    )
+    region_w = _smooth_random_series(
+        rng,
+        t=t_count,
+        dim=3 * piecewise_regions,
+        scale=1.0,
+        temporal_smoothness=temporal_smoothness,
+    ).reshape(t_count, piecewise_regions, 3)
+    region_w *= float(local_drift_scale_um) * 1.2
+
     z_trend = _smooth_random_series(rng, t=t_count, dim=1, scale=1.0, temporal_smoothness=temporal_smoothness)[:, 0]
     z_trend *= 1.2
 
@@ -199,6 +219,20 @@ def generate_controlled_drift_dataset(
         z_norm = ((p_t[:, 2] - z_mid) / z_half)[:, None]
         z_component = z_norm * np.array([z_trend[ti], -0.35 * z_trend[ti], 0.15 * z_trend[ti]])[None, :]
         local = local + z_component
+
+        if str(local_mode) in {"piecewise_smooth", "piecewise_abrupt"}:
+            d2r = np.sum((p_t[:, None, :] - region_centers[None, :, :]) ** 2, axis=2)
+            if str(local_mode) == "piecewise_abrupt":
+                idx = np.argmin(d2r, axis=1)
+                wr = np.zeros_like(d2r)
+                wr[np.arange(d2r.shape[0]), idx] = 1.0
+            else:
+                sig = max(float(piecewise_transition_um), 1e-6)
+                wr = np.exp(-d2r / (2.0 * sig * sig))
+                wsum = np.sum(wr, axis=1, keepdims=True)
+                wsum[wsum <= 1e-12] = 1.0
+                wr = wr / wsum
+            local = local + wr @ region_w[ti]
 
         drift_global_all[:, ti, :] = global_drift[ti][None, :]
         drift_local_all[:, ti, :] = local
@@ -292,6 +326,14 @@ def generate_synthetic_imaris_folder(
     migrating_fraction: float = 0.35,
     seed: int = 0,
     temporal_smoothness: float = 0.9,
+    local_mode: str = "smooth",
+    piecewise_regions: int = 3,
+    piecewise_transition_um: float = 90.0,
+    global_drift_scale_xyz: tuple[float, float, float] = (2.8, 2.2, 1.1),
+    local_lengthscale_um: float = 220.0,
+    local_drift_scale_um: float = 2.4,
+    n_rbf_centers: int = 10,
+    measurement_noise_um: float = 0.2,
 ) -> dict[str, Any]:
     """Create a synthetic IMARIS folder plus ground-truth sidecar files."""
     out_dir = Path(out_dir)
@@ -309,6 +351,14 @@ def generate_synthetic_imaris_folder(
             migrating_fraction=migrating_fraction,
             seed=file_seed,
             temporal_smoothness=temporal_smoothness,
+            local_mode=local_mode,
+            piecewise_regions=piecewise_regions,
+            piecewise_transition_um=piecewise_transition_um,
+            global_drift_scale_xyz=global_drift_scale_xyz,
+            local_lengthscale_um=local_lengthscale_um,
+            local_drift_scale_um=local_drift_scale_um,
+            n_rbf_centers=n_rbf_centers,
+            measurement_noise_um=measurement_noise_um,
         )
 
         base = f"synthetic_drift_{i + 1:03d}"
@@ -325,6 +375,16 @@ def generate_synthetic_imaris_folder(
             "stationary_fraction": float(stationary_fraction),
             "migrating_fraction": float(migrating_fraction),
             "temporal_smoothness": float(temporal_smoothness),
+            "local_mode": str(local_mode),
+            "piecewise_regions": int(piecewise_regions),
+            "piecewise_transition_um": float(piecewise_transition_um),
+            "global_drift_scale_x": float(global_drift_scale_xyz[0]),
+            "global_drift_scale_y": float(global_drift_scale_xyz[1]),
+            "global_drift_scale_z": float(global_drift_scale_xyz[2]),
+            "local_lengthscale_um": float(local_lengthscale_um),
+            "local_drift_scale_um": float(local_drift_scale_um),
+            "n_rbf_centers": int(n_rbf_centers),
+            "measurement_noise_um": float(measurement_noise_um),
         }
         pd.DataFrame([meta]).to_csv(gt_dir / f"{base}_meta.csv", index=False)
         written_files.append(xlsx_path)
@@ -339,6 +399,15 @@ def load_groundtruth_for_imaris_file(imaris_file: str | Path) -> pd.DataFrame | 
     if not gt_path.exists():
         return None
     return pd.read_csv(gt_path)
+
+
+def load_drift_field_for_imaris_file(imaris_file: str | Path) -> pd.DataFrame | None:
+    """Load matching drift-field groundtruth CSV for one IMARIS file if available."""
+    p = Path(imaris_file)
+    drift_path = p.parent / "_groundtruth" / f"{p.stem}_drift_field_groundtruth.csv"
+    if not drift_path.exists():
+        return None
+    return pd.read_csv(drift_path)
 
 
 def evaluate_corrected_vs_groundtruth(
@@ -402,6 +471,13 @@ def evaluate_corrected_vs_groundtruth(
         "p90_track_rms_error": float(per_track["rms_error"].quantile(0.90)) if per_track.shape[0] else float("nan"),
         "mean_time_rms_error": float(per_time["rms_error"].mean()) if per_time.shape[0] else float("nan"),
     }
+    if "CellType" in merged.columns:
+        for ct in ("stationary", "migrating"):
+            mm = merged[merged["CellType"] == ct]
+            if mm.shape[0] > 0:
+                summary[f"overall_rms_error_{ct}"] = float(np.sqrt(np.mean(mm["err_norm"].to_numpy(float) ** 2)))
+            else:
+                summary[f"overall_rms_error_{ct}"] = float("nan")
     return summary, merged, per_track, per_time
 
 
@@ -409,6 +485,7 @@ def save_groundtruth_evaluation_outputs(
     base_out_prefix: str | Path,
     groundtruth_df: pd.DataFrame,
     corrected_by_method: dict[str, pd.DataFrame],
+    drift_field_groundtruth: pd.DataFrame | None = None,
 ) -> dict[str, Path]:
     """Save groundtruth-based method comparison metrics and plots."""
     base_out_prefix = Path(base_out_prefix)
@@ -419,6 +496,7 @@ def save_groundtruth_evaluation_outputs(
     per_method_time: dict[str, pd.DataFrame] = {}
     per_method_time_stationary: dict[str, pd.DataFrame] = {}
     per_method_time_migrating: dict[str, pd.DataFrame] = {}
+    per_method_drift_bias: dict[str, pd.DataFrame] = {}
 
     for method, df_corr in corrected_by_method.items():
         summary, merged, per_track, per_time = evaluate_corrected_vs_groundtruth(df_corr, groundtruth_df)
@@ -447,6 +525,36 @@ def save_groundtruth_evaluation_outputs(
                 store[method] = tab
                 tab.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_rms_{suffix}_over_time_{method}.csv"), index=False)
 
+        if drift_field_groundtruth is not None and {"drift_x_total", "drift_y_total", "drift_z_total"}.issubset(drift_field_groundtruth.columns):
+            pred = df_corr[["TrackID", "Time", "Position X", "Position Y", "Position Z", "Position X_corr", "Position Y_corr", "Position Z_corr"]].copy()
+            pred["pred_dx"] = pred["Position X"].to_numpy(float) - pred["Position X_corr"].to_numpy(float)
+            pred["pred_dy"] = pred["Position Y"].to_numpy(float) - pred["Position Y_corr"].to_numpy(float)
+            pred["pred_dz"] = pred["Position Z"].to_numpy(float) - pred["Position Z_corr"].to_numpy(float)
+            tru = drift_field_groundtruth[["TrackID", "Time", "drift_x_total", "drift_y_total", "drift_z_total"]].copy()
+            mm = pred.merge(tru, on=["TrackID", "Time"], how="inner")
+            if mm.shape[0] > 0:
+                bt = (
+                    mm.groupby("Time", as_index=False)
+                    .agg(
+                        pred_dx_median=("pred_dx", "median"),
+                        pred_dy_median=("pred_dy", "median"),
+                        pred_dz_median=("pred_dz", "median"),
+                        true_dx_median=("drift_x_total", "median"),
+                        true_dy_median=("drift_y_total", "median"),
+                        true_dz_median=("drift_z_total", "median"),
+                    )
+                    .sort_values("Time")
+                    .reset_index(drop=True)
+                )
+                bias = np.sqrt(
+                    (bt["pred_dx_median"].to_numpy(float) - bt["true_dx_median"].to_numpy(float)) ** 2
+                    + (bt["pred_dy_median"].to_numpy(float) - bt["true_dy_median"].to_numpy(float)) ** 2
+                    + (bt["pred_dz_median"].to_numpy(float) - bt["true_dz_median"].to_numpy(float)) ** 2
+                )
+                bt["drift_bias_norm"] = bias
+                bt.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_drift_bias_over_time_{method}.csv"), index=False)
+                per_method_drift_bias[method] = bt
+
     summary_df = pd.DataFrame(rows_summary).sort_values("method").reset_index(drop=True)
     out_summary = base_out_prefix.with_name(base_out_prefix.name + "_gt_metrics_summary.csv")
     summary_df.to_csv(out_summary, index=False)
@@ -455,6 +563,7 @@ def save_groundtruth_evaluation_outputs(
     out_time = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_over_time.png")
     out_time_stationary = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_stationary_over_time.png")
     out_time_migrating = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_migrating_over_time.png")
+    out_drift_bias = base_out_prefix.with_name(base_out_prefix.name + "_gt_drift_bias_over_time.png")
 
     fig = plt.figure(figsize=(9, 5))
     for method, tab in per_method_track.items():
@@ -518,6 +627,22 @@ def save_groundtruth_evaluation_outputs(
         plt.savefig(out_time_migrating, dpi=300)
         plt.close(fig)
 
+    if per_method_drift_bias:
+        fig = plt.figure(figsize=(9, 5))
+        for method, tab in per_method_drift_bias.items():
+            if tab.shape[0]:
+                plt.plot(tab["Time"].to_numpy(float), tab["drift_bias_norm"].to_numpy(float), marker="o", label=method)
+        plt.xlabel("Time")
+        plt.ylabel("||median(pred_drift)-median(true_drift)|| (um)")
+        plt.title("Groundtruth drift bias over time")
+        plt.ylim(bottom=0.0)
+        handles, _ = plt.gca().get_legend_handles_labels()
+        if handles:
+            plt.legend()
+        plt.tight_layout()
+        plt.savefig(out_drift_bias, dpi=300)
+        plt.close(fig)
+
     out: dict[str, Path] = {
         "gt_metrics_summary": out_summary,
         "gt_rms_per_track_hist": out_hist,
@@ -527,4 +652,6 @@ def save_groundtruth_evaluation_outputs(
         out["gt_rms_stationary_over_time"] = out_time_stationary
     if per_method_time_migrating:
         out["gt_rms_migrating_over_time"] = out_time_migrating
+    if per_method_drift_bias:
+        out["gt_drift_bias_over_time"] = out_drift_bias
     return out

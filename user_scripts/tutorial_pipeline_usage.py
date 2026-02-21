@@ -12,6 +12,7 @@ date: Feb 2026
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sys
 
 import pandas as pd
@@ -26,9 +27,11 @@ try:
     from driftcorr.method_rigid_step import apply_rigid_correction_to_tracks, build_step_transforms
     from driftcorr.method_spacetime_rbf import apply_correction as apply_spacetime_correction
     from driftcorr.method_spacetime_rbf import fit_spacetime_rbf_model
+    from driftcorr.method_spacetime_rbf_moe import apply_spacetime_rbf_moe_correction, fit_spacetime_rbf_moe_model
     from driftcorr.stationary import find_stationary_tracks
     from driftcorr.synthetic_experiments import (
         generate_synthetic_imaris_folder,
+        load_drift_field_for_imaris_file,
         load_groundtruth_for_imaris_file,
         save_groundtruth_evaluation_outputs,
     )
@@ -46,9 +49,11 @@ except ModuleNotFoundError as exc:
         from driftcorr.method_rigid_step import apply_rigid_correction_to_tracks, build_step_transforms
         from driftcorr.method_spacetime_rbf import apply_correction as apply_spacetime_correction
         from driftcorr.method_spacetime_rbf import fit_spacetime_rbf_model
+        from driftcorr.method_spacetime_rbf_moe import apply_spacetime_rbf_moe_correction, fit_spacetime_rbf_moe_model
         from driftcorr.stationary import find_stationary_tracks
         from driftcorr.synthetic_experiments import (
             generate_synthetic_imaris_folder,
+            load_drift_field_for_imaris_file,
             load_groundtruth_for_imaris_file,
             save_groundtruth_evaluation_outputs,
         )
@@ -101,6 +106,11 @@ OPTIONS = {
     "st_refine_iters": 3,
     "st_robust_mode": "sample_trim",
     "st_track_trim_iters": 4,
+    "st_per_axis_scaling": 1,
+    "st_moe_k": 3,
+    "st_moe_k_list": [2, 3, 5],
+    "st_moe_blend_sigma_um": 140.0,
+    "st_moe_cluster_mode": "track_anchor",
 }
 
 # %% FUNCTIONS
@@ -200,11 +210,46 @@ def run_methods_for_dataframe(
             track_trim_iters=opts["st_track_trim_iters"],
             rbf_linear_terms=bool(opts["rbf_linear_terms"]),
             weight_abort_threshold=opts["weight_abort_threshold"],
+            per_axis_scaling=bool(opts["st_per_axis_scaling"]),
         )
         df_st = apply_spacetime_correction(df, st_model)
         pd.DataFrame([st_info]).to_csv(str(out_prefix) + "_st_rbf_fit_info.csv", index=False)
         df_st.to_csv(str(out_prefix) + "_positions_corrected_st_rbf.csv", index=False)
         corr_by_method["st_rbf"] = df_st
+
+    if "st_rbf_moe" in methods:
+        k_list = opts.get("st_moe_k_list", [opts.get("st_moe_k", 3)])
+        if not isinstance(k_list, list):
+            k_list = [int(k_list)]
+        for i, k in enumerate([int(v) for v in k_list if int(v) > 0]):
+            moe_model, expert_table = fit_spacetime_rbf_moe_model(
+                df,
+                n_experts=int(k),
+                blend_sigma_um=opts["st_moe_blend_sigma_um"],
+                cluster_mode=opts["st_moe_cluster_mode"],
+                seed=int(opts["seed"] + i * 13),
+                reference_time=opts["reference_time"],
+                fit_track_ids=stationary_ids,
+                m_centers=opts["st_m_centers"],
+                ell_space=opts["st_ell_space"],
+                ell_time=opts["st_ell_time"],
+                lam=opts.get("st_lam", opts["lam"]),
+                robust_keep_fraction=opts["st_robust_keep_fraction"],
+                robust_iters=opts["st_robust_iters"],
+                space_input_mode=opts["space_input_mode"],
+                n_refine=opts["st_refine_iters"],
+                two_stage=bool(opts["two_stage"]),
+                robust_mode=opts["st_robust_mode"],
+                track_trim_iters=opts["st_track_trim_iters"],
+                rbf_linear_terms=bool(opts["rbf_linear_terms"]),
+                weight_abort_threshold=opts["weight_abort_threshold"],
+                per_axis_scaling=bool(opts["st_per_axis_scaling"]),
+            )
+            df_moe = apply_spacetime_rbf_moe_correction(df, moe_model)
+            name = f"st_rbf_moe_k{int(k)}"
+            expert_table.to_csv(str(out_prefix) + f"_{name}_experts.csv", index=False)
+            df_moe.to_csv(str(out_prefix) + f"_positions_corrected_{name}.csv", index=False)
+            corr_by_method[name] = df_moe
 
     return corr_by_method
 
@@ -220,11 +265,12 @@ def postprocess_outputs(
     save_evaluation_outputs(out_prefix, summary_df, details)
 
     gt = load_groundtruth_for_imaris_file(imaris_file)
+    drift_gt = load_drift_field_for_imaris_file(imaris_file)
     for method_name, df_corr in corr_by_method.items():
         save_visual_inspection_plots(df_orig, df_corr, out_prefix, method_name, df_groundtruth=gt)
 
     if gt is not None:
-        save_groundtruth_evaluation_outputs(out_prefix, gt, corr_by_method)
+        save_groundtruth_evaluation_outputs(out_prefix, gt, corr_by_method, drift_field_groundtruth=drift_gt)
 
 
 # %% HOW TO RUN A SINGLE FILE
@@ -273,7 +319,7 @@ if RUN_SYNTHETIC:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files tutorial run 2"
     synthetic = generate_synthetic_imaris_folder(
         out_dir=synthetic_root,
-        n_files=5,
+        n_files=2,
         n_tracks=80,
         n_times=20,
         stationary_fraction=0.45,
@@ -302,7 +348,7 @@ if RUN_SYNTHETIC_JOB_A_EXAMPLE:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobA"
     synthetic = generate_synthetic_imaris_folder(
         out_dir=synthetic_root,
-        n_files=5,
+        n_files=2,
         n_tracks=80,
         n_times=20,
         stationary_fraction=0.45,
@@ -325,7 +371,7 @@ if RUN_SYNTHETIC_JOB_B_EXAMPLE:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobB"
     synthetic = generate_synthetic_imaris_folder(
         out_dir=synthetic_root,
-        n_files=5,
+        n_files=2,
         n_tracks=80,
         n_times=20,
         stationary_fraction=0.45,
@@ -421,7 +467,16 @@ if RUN_SYNTHETIC_JOB_E_EXAMPLE:
 RUN_SYNTHETIC_TASK1_RBF_ANCHOR = False
 if RUN_SYNTHETIC_TASK1_RBF_ANCHOR:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files task1_rbf_anchor"
-    generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=80, n_times=20, seed=42)
+    #generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=80, n_times=20, seed=42)
+    synthetic = generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=5,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9)
     opts = dict(OPTIONS)
     opts["rbf_space_input_mode"] = "track_anchor"
     opts["space_input_mode"] = "ref_position"
@@ -437,7 +492,15 @@ if RUN_SYNTHETIC_TASK1_RBF_ANCHOR:
 RUN_SYNTHETIC_TASK23_ST_REFINEMENT = False
 if RUN_SYNTHETIC_TASK23_ST_REFINEMENT:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files task23_st_refine"
-    generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=80, n_times=20, seed=42)
+    synthetic = generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=5,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9)
     opts = dict(OPTIONS)
     opts["rbf_space_input_mode"] = "track_anchor"
     opts["space_input_mode"] = "ref_position"
@@ -454,7 +517,15 @@ if RUN_SYNTHETIC_TASK23_ST_REFINEMENT:
 RUN_SYNTHETIC_TASK4_ST_TRACK_TRIM = False
 if RUN_SYNTHETIC_TASK4_ST_TRACK_TRIM:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files task4_st_tracktrim"
-    generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=80, n_times=20, seed=42)
+    synthetic = generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=5,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9)
     opts = dict(OPTIONS)
     opts["st_robust_mode"] = "track_trim"
     opts["st_track_trim_iters"] = 4
@@ -469,7 +540,15 @@ if RUN_SYNTHETIC_TASK4_ST_TRACK_TRIM:
 RUN_SYNTHETIC_TASK5_LINEAR_TERMS = False
 if RUN_SYNTHETIC_TASK5_LINEAR_TERMS:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files task5_linear_terms"
-    generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=80, n_times=20, seed=42)
+    synthetic = generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=5,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9)
     opts = dict(OPTIONS)
     opts["rbf_linear_terms"] = 1
     opts["two_stage"] = 1
@@ -483,7 +562,15 @@ if RUN_SYNTHETIC_TASK5_LINEAR_TERMS:
 RUN_SYNTHETIC_TASK6_RBF_FIXED_POINT = False
 if RUN_SYNTHETIC_TASK6_RBF_FIXED_POINT:
     synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files task6_rbf_fixed_point"
-    generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=80, n_times=20, seed=42)
+    synthetic = generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=5,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9)
     opts = dict(OPTIONS)
     opts["rbf_space_input_mode"] = "row_position"
     opts["space_input_mode"] = "ref_position"
@@ -494,5 +581,85 @@ if RUN_SYNTHETIC_TASK6_RBF_FIXED_POINT:
         out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
         corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts)
         postprocess_outputs(df_syn, file_path, out_prefix, corr)
+
+# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: ST-RBF MoE comparison (K=2,3,5)
+RUN_SYNTHETIC_ST_MOE = False
+if RUN_SYNTHETIC_ST_MOE:
+    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files st_moe"
+    generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=2,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9,
+        local_mode="piecewise_smooth",
+    )
+    opts = dict(OPTIONS)
+    opts["st_moe_k_list"] = [2, 3, 5]
+    methods = ["rigid", "local", "st_rbf", "st_rbf_moe"]
+    for file_path in list_imaris_xls_files(synthetic_root):
+        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
+        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=methods, opts=opts)
+        postprocess_outputs(df_syn, file_path, out_prefix, corr)
+
+# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: Regime suite (3 regimes x 5 seeds)
+RUN_SYNTHETIC_REGIME_SUITE = False
+if RUN_SYNTHETIC_REGIME_SUITE:
+    # Equivalent CLI:
+    # driftcorr synthetic-regime-benchmark --synthetic-dir "synthetic_regime_suite" \
+    #   --methods "rbf,rigid,local,st_rbf,st_rbf_moe" --synthetic-n-seeds 5 --st-moe-k-list "2,3,5"
+    # This cell calls the CLI command from Python for convenience.
+    import subprocess
+    cmd = [
+        sys.executable,
+        "-m",
+        "driftcorr",
+        "synthetic-regime-benchmark",
+        "--synthetic-dir",
+        str(PROJECT_ROOT / "synthetic_regime_suite"),
+        "--methods",
+        "rbf,rigid,local,st_rbf,st_rbf_moe",
+        "--synthetic-n-seeds",
+        "5",
+        "--st-moe-k-list",
+        "2,3,5",
+    ]
+    env = dict(os.environ)
+    env.update({"PYTHONPATH": str(PROJECT_ROOT)})
+    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=env)
+
+# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: ST-RBF per-axis scaling A/B comparison
+RUN_SYNTHETIC_ST_SCALING_AB = False
+if RUN_SYNTHETIC_ST_SCALING_AB:
+    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files st_scaling_ab"
+    generate_synthetic_imaris_folder(
+        out_dir=synthetic_root,
+        n_files=1,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9,
+        local_mode="smooth",
+    )
+    file_path = list_imaris_xls_files(synthetic_root)[0]
+    df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+
+    opts_on = dict(OPTIONS)
+    opts_on["st_per_axis_scaling"] = 1
+    out_prefix_on = synthetic_root / "driftcorr_results" / "scaling_on" / file_path.stem
+    corr_on = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix_on, methods=["st_rbf"], opts=opts_on)
+    postprocess_outputs(df_syn, file_path, out_prefix_on, corr_on)
+
+    opts_off = dict(OPTIONS)
+    opts_off["st_per_axis_scaling"] = 0
+    out_prefix_off = synthetic_root / "driftcorr_results" / "scaling_off" / file_path.stem
+    corr_off = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix_off, methods=["st_rbf"], opts=opts_off)
+    postprocess_outputs(df_syn, file_path, out_prefix_off, corr_off)
 
 # %% END

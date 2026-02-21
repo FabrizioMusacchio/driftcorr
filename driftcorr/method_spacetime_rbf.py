@@ -3,10 +3,15 @@
 This method fits a smooth drift function over both spatial coordinates and time.
 The implementation includes:
 - configurable spatial input mode (`row_position`, `track_anchor`, `ref_position`),
-- normalized inputs (space robustly scaled, time in [0,1]),
+- normalized inputs (per-axis robust spatial scaling, time in [0,1]),
 - kernel bias augmentation (`K_aug = [K, 1]`),
 - optional two-stage decomposition (global translation + residual RBF),
 - iterative refinement with sequential correction stages.
+
+Lengthscale interpretation:
+- `ell_space` and `ell_time` are in normalized units.
+- Space is normalized per axis as `(x-cx)/sx`, `(y-cy)/sy`, `(z-cz)/sz`.
+- Time is normalized as `(t-t_min)/(t_max-t_min)`.
 
 Author
 -------
@@ -42,7 +47,7 @@ class SpaceTimeStageModel:
     two_stage: bool
     rbf_linear_terms: bool
     spatial_center: np.ndarray
-    spatial_scale: float
+    spatial_scale: np.ndarray
     time_min: float
     time_max: float
     global_time_values: np.ndarray
@@ -59,6 +64,7 @@ class SpaceTimeRBFModel:
     reference_time: float
     space_input_mode: str
     n_refine: int
+    stage_infos: list[dict[str, float | int | str | bool]]
 
 
 def _kernel_spacetime(
@@ -126,33 +132,37 @@ def _condition_proxy(k_aug: np.ndarray, lam: float, lam_bias: float = 0.0) -> fl
         return float("inf")
 
 
-def _robust_spatial_scale(x: np.ndarray) -> float:
+def _robust_spatial_scale(x: np.ndarray) -> np.ndarray:
     c = np.nanmedian(x, axis=0)
-    r = np.linalg.norm(x - c[None, :], axis=1)
-    s = float(np.nanmedian(r))
-    if not np.isfinite(s) or s <= 1e-9:
-        mins = np.nanmin(x, axis=0)
-        maxs = np.nanmax(x, axis=0)
-        s = float(np.linalg.norm(maxs - mins) / 3.0)
-    if not np.isfinite(s) or s <= 1e-9:
-        s = 1.0
-    return s
+    mad = 1.4826 * np.nanmedian(np.abs(x - c[None, :]), axis=0)
+    mins = np.nanmin(x, axis=0)
+    maxs = np.nanmax(x, axis=0)
+    ext = (maxs - mins) / 4.0
+    s = np.where(np.isfinite(mad) & (mad > 1e-9), mad, ext)
+    s = np.where(np.isfinite(s) & (s > 1e-9), s, 1.0)
+    return s.astype(float)
 
 
 def _normalize_inputs(
     spatial: np.ndarray,
     t: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, float, float, float]:
+    per_axis_scaling: bool = True,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float]:
     c = np.nanmedian(spatial, axis=0)
     s = _robust_spatial_scale(spatial)
+    if not bool(per_axis_scaling):
+        sval = float(np.nanmedian(s))
+        if not np.isfinite(sval) or sval <= 1e-9:
+            sval = 1.0
+        s = np.array([sval, sval, sval], dtype=float)
 
     tmin = float(np.nanmin(t))
     tmax = float(np.nanmax(t))
     tr = max(tmax - tmin, 1e-9)
 
-    xn = (spatial - c[None, :]) / s
+    xn = (spatial - c[None, :]) / s[None, :]
     tn = (t - tmin) / tr
-    return xn, tn, c, float(s), tmin, tmax
+    return xn, tn, c, s, tmin, tmax
 
 
 def _spatial_inputs_for_rows(df: pd.DataFrame, reference_time: float, mode: str) -> np.ndarray:
@@ -244,6 +254,7 @@ def _build_fit_table(
     reference_time: float,
     fit_track_ids: np.ndarray | None,
     space_input_mode: str,
+    spatial_source_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     d = ensure_numeric_tracks(df)
     if fit_track_ids is not None:
@@ -256,8 +267,13 @@ def _build_fit_table(
     if mdf.shape[0] == 0:
         return mdf
 
-    sp_all = _spatial_inputs_for_rows(d, reference_time=reference_time, mode=space_input_mode)
-    d_sp = d.copy()
+    source = d if spatial_source_df is None else ensure_numeric_tracks(spatial_source_df)
+    if fit_track_ids is not None:
+        ids = set(np.asarray(fit_track_ids, dtype=float).tolist())
+        source = source[source["TrackID"].astype(float).isin(ids)].copy()
+
+    sp_all = _spatial_inputs_for_rows(source, reference_time=reference_time, mode=space_input_mode)
+    d_sp = source.copy()
     d_sp["_sx"] = sp_all[:, 0]
     d_sp["_sy"] = sp_all[:, 1]
     d_sp["_sz"] = sp_all[:, 2]
@@ -361,8 +377,16 @@ def _fit_stage(
     global_time_values: np.ndarray | None = None,
     global_drift_values: np.ndarray | None = None,
     rbf_linear_terms: bool = False,
+    spatial_source_df: pd.DataFrame | None = None,
+    per_axis_scaling: bool = True,
 ) -> tuple[SpaceTimeStageModel, dict[str, float | int | str | bool]]:
-    mdf = _build_fit_table(df, reference_time=reference_time, fit_track_ids=fit_track_ids, space_input_mode=space_input_mode)
+    mdf = _build_fit_table(
+        df,
+        reference_time=reference_time,
+        fit_track_ids=fit_track_ids,
+        space_input_mode=space_input_mode,
+        spatial_source_df=spatial_source_df,
+    )
     if mdf.shape[0] < max(20, int(m_centers)):
         raise ValueError("Too few training samples for space-time RBF fit.")
 
@@ -388,7 +412,9 @@ def _fit_stage(
         g_drift = np.zeros((g_time.size, 3), dtype=float)
         d_target = d_total
 
-    xn, tn, center_spatial, scale_spatial, tmin, tmax = _normalize_inputs(spatial_raw, t_raw)
+    xn, tn, center_spatial, scale_spatial, tmin, tmax = _normalize_inputs(
+        spatial_raw, t_raw, per_axis_scaling=per_axis_scaling
+    )
     u = np.column_stack([xn, tn])
 
     centers = _choose_centers(u, m=int(m_centers), seed=seed)
@@ -413,6 +439,8 @@ def _fit_stage(
 
     cond_proxy = _condition_proxy(k_aug, lam=lam, lam_bias=0.0)
     ill_conditioned = bool(np.isfinite(cond_proxy) and cond_proxy > 1e12)
+    if ill_conditioned:
+        print(f"[WARN] ST-RBF kernel system may be ill-conditioned (cond~{cond_proxy:.3g}).")
     weight_max_abs = float(np.nanmax(np.abs(weights_aug))) if weights_aug.size else float("nan")
     weights_all_finite = bool(np.all(np.isfinite(weights_aug)))
 
@@ -422,17 +450,17 @@ def _fit_stage(
         mt = t_raw == float(tt)
         if not np.any(mt):
             continue
-        ut = u[mt]
         st = spatial_raw[mt]
-
-        d2 = np.sum((ut[:, None, :3] - centers[None, :, :3]) ** 2, axis=2)
-        nn = np.sqrt(np.min(d2, axis=1)) * float(scale_spatial)
+        centers_raw = centers[:, :3] * scale_spatial[None, :] + center_spatial[None, :]
+        d2 = np.sum((st[:, None, :] - centers_raw[None, :, :]) ** 2, axis=2)
+        nn = np.sqrt(np.min(d2, axis=1))
 
         mag = np.linalg.norm(pred_total[mt], axis=1)
         rows_t.append(
             {
                 "Time": float(tt),
                 "center_nn_median": float(np.median(nn)) if nn.size else float("nan"),
+                "center_nn_p90": float(np.percentile(nn, 90)) if nn.size else float("nan"),
                 "pred_drift_median": float(np.median(mag)) if mag.size else float("nan"),
                 "res_median": float(np.median(res_total[mt])) if np.any(mt) else float("nan"),
             }
@@ -453,7 +481,7 @@ def _fit_stage(
         two_stage=bool(two_stage and global_time_values is not None and global_drift_values is not None and np.asarray(global_time_values).size > 0),
         rbf_linear_terms=bool(rbf_linear_terms),
         spatial_center=center_spatial,
-        spatial_scale=float(scale_spatial),
+        spatial_scale=np.asarray(scale_spatial, dtype=float),
         time_min=float(tmin),
         time_max=float(tmax),
         global_time_values=g_time,
@@ -482,6 +510,10 @@ def _fit_stage(
         "weight_max_abs": float(weight_max_abs),
         "weights_all_finite": bool(weights_all_finite),
         "inlier_fraction": float(np.mean(inlier_mask)) if inlier_mask.size else float("nan"),
+        "spatial_scale_x": float(scale_spatial[0]),
+        "spatial_scale_y": float(scale_spatial[1]),
+        "spatial_scale_z": float(scale_spatial[2]),
+        "per_axis_scaling": bool(per_axis_scaling),
     }
     return stage, info
 
@@ -495,14 +527,31 @@ def _interp_global_drift(times: np.ndarray, g_time: np.ndarray, g_drift: np.ndar
     return out
 
 
-def _predict_stage_drift(stage: SpaceTimeStageModel, df_current: pd.DataFrame) -> np.ndarray:
+def _predict_stage_drift(
+    stage: SpaceTimeStageModel,
+    df_current: pd.DataFrame,
+    spatial_source_df: pd.DataFrame | None = None,
+) -> np.ndarray:
     d = ensure_numeric_tracks(df_current)
-
-    spatial = _spatial_inputs_for_rows(d, reference_time=stage.reference_time, mode=stage.space_input_mode)
+    source = d
+    if spatial_source_df is not None and str(stage.space_input_mode) != "row_position":
+        source = ensure_numeric_tracks(spatial_source_df)
+    spatial = _spatial_inputs_for_rows(source, reference_time=stage.reference_time, mode=stage.space_input_mode)
+    if source is not d:
+        key = source[["TrackID", "Time"]].copy()
+        key["_sx"] = spatial[:, 0]
+        key["_sy"] = spatial[:, 1]
+        key["_sz"] = spatial[:, 2]
+        dkey = d[["TrackID", "Time"]].merge(key, on=["TrackID", "Time"], how="left")
+        arr = dkey[["_sx", "_sy", "_sz"]].to_numpy(float)
+        miss = ~np.all(np.isfinite(arr), axis=1)
+        if np.any(miss):
+            arr[miss] = d.loc[miss, ["Position X", "Position Y", "Position Z"]].to_numpy(float)
+        spatial = arr
     t_raw = d["Time"].to_numpy(float)
 
     tr = max(stage.time_max - stage.time_min, 1e-9)
-    xn = (spatial - stage.spatial_center[None, :]) / max(stage.spatial_scale, 1e-9)
+    xn = (spatial - stage.spatial_center[None, :]) / np.maximum(stage.spatial_scale[None, :], 1e-9)
     tn = (t_raw - stage.time_min) / tr
     u = np.column_stack([xn, tn])
 
@@ -535,6 +584,7 @@ def fit_spacetime_rbf_model(
     track_trim_iters: int = 4,
     rbf_linear_terms: bool = False,
     weight_abort_threshold: float = 1e4,
+    per_axis_scaling: bool = True,
 ) -> tuple[SpaceTimeRBFModel, dict[str, float | int | str | bool]]:
     """Fit space-time RBF drift model with optional refinement stages."""
     d0 = ensure_numeric_tracks(df)
@@ -548,6 +598,7 @@ def fit_spacetime_rbf_model(
 
     current = d0.copy()
     n_ref = max(1, int(n_refine))
+    spatial_source_df = None if str(space_input_mode) == "row_position" else d0.copy()
     if fit_track_ids is not None:
         ids = set(np.asarray(fit_track_ids, dtype=float).tolist())
         dfit = d0[d0["TrackID"].astype(float).isin(ids)].copy()
@@ -578,11 +629,29 @@ def fit_spacetime_rbf_model(
             global_time_values = np.array([], dtype=float)
             global_drift_values = np.zeros((0, 3), dtype=float)
     else:
-        global_time_values = np.array([], dtype=float)
-        global_drift_values = np.zeros((0, 3), dtype=float)
+            global_time_values = np.array([], dtype=float)
+            global_drift_values = np.zeros((0, 3), dtype=float)
 
     for i in range(n_ref):
         stage_two_stage = bool(two_stage and i == 0 and global_time_values.size > 0)
+        fit_tab_before = _build_fit_table(
+            current,
+            reference_time=reference_time,
+            fit_track_ids=fit_track_ids,
+            space_input_mode=space_input_mode,
+            spatial_source_df=spatial_source_df,
+        )
+        if fit_tab_before.shape[0] > 0:
+            d_total_before = np.column_stack(
+                [
+                    fit_tab_before["Position X"].to_numpy(float) - fit_tab_before["X_ref"].to_numpy(float),
+                    fit_tab_before["Position Y"].to_numpy(float) - fit_tab_before["Y_ref"].to_numpy(float),
+                    fit_tab_before["Position Z"].to_numpy(float) - fit_tab_before["Z_ref"].to_numpy(float),
+                ]
+            )
+        else:
+            d_total_before = np.zeros((0, 3), dtype=float)
+
         stage, info = _fit_stage(
             df=current,
             reference_time=reference_time,
@@ -601,9 +670,47 @@ def fit_spacetime_rbf_model(
             global_time_values=global_time_values if stage_two_stage else None,
             global_drift_values=global_drift_values if stage_two_stage else None,
             rbf_linear_terms=rbf_linear_terms,
+            spatial_source_df=spatial_source_df,
+            per_axis_scaling=per_axis_scaling,
         )
         info = dict(info)
         info["refine_iter"] = int(i + 1)
+
+        drift_fit_pred = _predict_stage_drift(stage, current, spatial_source_df=spatial_source_df)
+        if fit_tab_before.shape[0] > 0:
+            key = current[["TrackID", "Time"]].copy()
+            key["dxp"] = drift_fit_pred[:, 0]
+            key["dyp"] = drift_fit_pred[:, 1]
+            key["dzp"] = drift_fit_pred[:, 2]
+            mm = fit_tab_before[["TrackID", "Time"]].merge(key, on=["TrackID", "Time"], how="left")
+            pred_fit_total = mm[["dxp", "dyp", "dzp"]].to_numpy(float)
+            pred_fit_total = np.nan_to_num(pred_fit_total, nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            pred_fit_total = np.zeros((0, 3), dtype=float)
+
+        if stage_two_stage and fit_tab_before.shape[0] > 0:
+            tt = fit_tab_before["Time"].to_numpy(float)
+            gfit = _interp_global_drift(tt, global_time_values, global_drift_values)
+            d_target_before = d_total_before - gfit
+            pred_fit_res = pred_fit_total - gfit
+        else:
+            d_target_before = d_total_before
+            pred_fit_res = pred_fit_total
+
+        if d_total_before.size:
+            info["train_total_rms_before"] = float(np.sqrt(np.mean(np.sum(d_total_before * d_total_before, axis=1))))
+            info["train_total_rms_after"] = float(
+                np.sqrt(np.mean(np.sum((d_total_before - pred_fit_total) ** 2, axis=1)))
+            )
+            info["train_residual_rms_before"] = float(np.sqrt(np.mean(np.sum(d_target_before * d_target_before, axis=1))))
+            info["train_residual_rms_after"] = float(
+                np.sqrt(np.mean(np.sum((d_target_before - pred_fit_res) ** 2, axis=1)))
+            )
+        else:
+            info["train_total_rms_before"] = float("nan")
+            info["train_total_rms_after"] = float("nan")
+            info["train_residual_rms_before"] = float("nan")
+            info["train_residual_rms_after"] = float("nan")
 
         wmax = float(info.get("weight_max_abs", np.nan))
         wf = bool(info.get("weights_all_finite", True))
@@ -618,18 +725,23 @@ def fit_spacetime_rbf_model(
         stage_infos.append(info)
 
         if i < n_ref - 1:
-            drift_pred = _predict_stage_drift(stage, current)
+            drift_pred = _predict_stage_drift(stage, current, spatial_source_df=spatial_source_df)
             xyz = current[["Position X", "Position Y", "Position Z"]].to_numpy(float)
             xyz_corr = xyz - drift_pred
-            current.loc[:, "Position X"] = xyz_corr[:, 0]
-            current.loc[:, "Position Y"] = xyz_corr[:, 1]
-            current.loc[:, "Position Z"] = xyz_corr[:, 2]
+            if str(space_input_mode) == "row_position":
+                mask_upd = np.ones((current.shape[0],), dtype=bool)
+            else:
+                mask_upd = current["Time"].to_numpy(float) != float(reference_time)
+            current.loc[mask_upd, "Position X"] = xyz_corr[mask_upd, 0]
+            current.loc[mask_upd, "Position Y"] = xyz_corr[mask_upd, 1]
+            current.loc[mask_upd, "Position Z"] = xyz_corr[mask_upd, 2]
 
     model = SpaceTimeRBFModel(
         stages=stages,
         reference_time=float(reference_time),
         space_input_mode=str(space_input_mode),
         n_refine=int(n_ref),
+        stage_infos=stage_infos,
     )
 
     if stage_infos:
@@ -667,6 +779,7 @@ def fit_spacetime_rbf_model(
         "two_stage": bool(two_stage),
         "n_refine": int(n_ref),
         "rbf_linear_terms": bool(rbf_linear_terms),
+        "per_axis_scaling": bool(per_axis_scaling),
         "cond_proxy_max": float(np.max([float(ii["cond_proxy"]) for ii in stage_infos])) if stage_infos else float("nan"),
         "ill_conditioned_any": bool(np.any([bool(ii["ill_conditioned"]) for ii in stage_infos])) if stage_infos else False,
         "weight_max_abs_max": float(np.max([float(ii["weight_max_abs"]) for ii in stage_infos])) if stage_infos else float("nan"),
@@ -690,7 +803,7 @@ def predict_spacetime_drift(model: SpaceTimeRBFModel, u: np.ndarray) -> np.ndarr
     t_raw = u[:, 3]
 
     tr = max(stage.time_max - stage.time_min, 1e-9)
-    xn = (spatial - stage.spatial_center[None, :]) / max(stage.spatial_scale, 1e-9)
+    xn = (spatial - stage.spatial_center[None, :]) / np.maximum(stage.spatial_scale[None, :], 1e-9)
     tn = (t_raw - stage.time_min) / tr
     uu = np.column_stack([xn, tn])
 
@@ -709,13 +822,18 @@ def apply_correction(df: pd.DataFrame, model: SpaceTimeRBFModel) -> pd.DataFrame
 
     current = d.copy()
     xyz_current = current[["Position X", "Position Y", "Position Z"]].to_numpy(float)
+    spatial_source_df = None if str(model.space_input_mode) == "row_position" else d.copy()
 
     for stage in model.stages:
-        drift_pred = _predict_stage_drift(stage, current)
+        drift_pred = _predict_stage_drift(stage, current, spatial_source_df=spatial_source_df)
         xyz_current = xyz_current - drift_pred
-        current.loc[:, "Position X"] = xyz_current[:, 0]
-        current.loc[:, "Position Y"] = xyz_current[:, 1]
-        current.loc[:, "Position Z"] = xyz_current[:, 2]
+        if str(stage.space_input_mode) == "row_position":
+            mask_upd = np.ones((current.shape[0],), dtype=bool)
+        else:
+            mask_upd = current["Time"].to_numpy(float) != float(stage.reference_time)
+        current.loc[mask_upd, "Position X"] = xyz_current[mask_upd, 0]
+        current.loc[mask_upd, "Position Y"] = xyz_current[mask_upd, 1]
+        current.loc[mask_upd, "Position Z"] = xyz_current[mask_upd, 2]
 
     out = d.copy()
     out["Position X_corr"] = xyz_current[:, 0]
@@ -747,6 +865,16 @@ def make_spacetime_diagnostic_plots(model: SpaceTimeRBFModel, out_prefix: str | 
             plt.savefig(out_prefix + f"_st_rbf_center_coverage{suf}.png", dpi=300)
             plt.close(fig)
 
+        if "center_nn_p90" in tab.columns:
+            fig = plt.figure()
+            plt.plot(tab["Time"].to_numpy(float), tab["center_nn_p90"].to_numpy(float), marker="o")
+            plt.xlabel("Time")
+            plt.ylabel("P90 nearest-center distance (um)")
+            plt.title("ST-RBF center coverage P90 over time")
+            plt.tight_layout()
+            plt.savefig(out_prefix + f"_st_rbf_center_coverage_p90{suf}.png", dpi=300)
+            plt.close(fig)
+
         if "pred_drift_median" in tab.columns:
             fig = plt.figure()
             plt.plot(tab["Time"].to_numpy(float), tab["pred_drift_median"].to_numpy(float), marker="o")
@@ -756,3 +884,19 @@ def make_spacetime_diagnostic_plots(model: SpaceTimeRBFModel, out_prefix: str | 
             plt.tight_layout()
             plt.savefig(out_prefix + f"_st_rbf_pred_drift_median{suf}.png", dpi=300)
             plt.close(fig)
+
+    if model.stage_infos:
+        idx = np.arange(1, len(model.stage_infos) + 1, dtype=float)
+        before = np.array([float(ii.get("train_residual_rms_before", np.nan)) for ii in model.stage_infos], dtype=float)
+        after = np.array([float(ii.get("train_residual_rms_after", np.nan)) for ii in model.stage_infos], dtype=float)
+        fig = plt.figure(figsize=(7, 5))
+        plt.plot(idx, before, marker="o", label="before")
+        plt.plot(idx, after, marker="o", label="after")
+        plt.xlabel("Refinement stage")
+        plt.ylabel("Training residual RMS (um)")
+        plt.title("ST-RBF residual RMS by refinement stage")
+        plt.xticks(idx, [str(int(i)) for i in idx])
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(str(out_prefix) + "_st_rbf_refinement_residual_rms.png", dpi=300)
+        plt.close(fig)

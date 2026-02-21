@@ -310,6 +310,14 @@ def _nearest_center_median_distance(x: np.ndarray, centers: np.ndarray) -> float
     return float(np.median(dmin))
 
 
+def _nearest_center_p90_distance(x: np.ndarray, centers: np.ndarray) -> float:
+    if x.shape[0] == 0 or centers.shape[0] == 0:
+        return float("nan")
+    d2 = np.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=2)
+    dmin = np.sqrt(np.min(d2, axis=1))
+    return float(np.percentile(dmin, 90))
+
+
 def robust_fit_rbf_field(
     x: np.ndarray,
     t: np.ndarray,
@@ -485,6 +493,7 @@ def fit_temporal_rbf_fields_to_reference(
     track_space_table: pd.DataFrame | None = None,
     space_input_mode: str = "track_anchor",
     rbf_linear_terms: bool = False,
+    robust_mode: str = "none",
 ) -> tuple[dict[float, RBFField], dict[float, dict[str, float | int | bool | str]]]:
     """Fit all non-reference timepoint RBF fields jointly with temporal smoothness."""
     rows_by_time: dict[float, dict[str, float | int | bool | str]] = {}
@@ -580,7 +589,7 @@ def fit_temporal_rbf_fields_to_reference(
             lam=float(lam),
             global_stage1=stage1[i],
             center_mode=str(center_mode),
-            robust_mode="sample_trim",
+            robust_mode=str(robust_mode),
             space_input_mode=str(space_input_mode),
             rbf_linear_terms=bool(rbf_linear_terms),
         )
@@ -606,12 +615,26 @@ def fit_temporal_rbf_fields_to_reference(
             "lam": float(lam),
             "M": int(m_count),
             "center_mode": str(center_mode),
-            "robust_mode": "sample_trim",
+            "robust_mode": str(robust_mode),
             "temporal_gamma": float(temporal_gamma),
             "temporal_res_median": float(np.median(res)),
             "temporal_smoothness_prev": float(smoothness_prev.get(i, np.nan)),
             "center_nn_median": _nearest_center_median_distance(x_blocks[i], centers),
+            "center_nn_p90": _nearest_center_p90_distance(x_blocks[i], centers),
             "pred_drift_median": float(np.median(np.linalg.norm(d_pred_total, axis=1))),
+            "pred_dx_median": float(np.median(d_pred_total[:, 0])) if d_pred_total.size else float("nan"),
+            "pred_dy_median": float(np.median(d_pred_total[:, 1])) if d_pred_total.size else float("nan"),
+            "pred_dz_median": float(np.median(d_pred_total[:, 2])) if d_pred_total.size else float("nan"),
+            "true_dx_median": float(np.median(d_target_total[:, 0])) if d_target_total.size else float("nan"),
+            "true_dy_median": float(np.median(d_target_total[:, 1])) if d_target_total.size else float("nan"),
+            "true_dz_median": float(np.median(d_target_total[:, 2])) if d_target_total.size else float("nan"),
+            "drift_bias_norm": float(
+                np.linalg.norm(
+                    np.median(d_pred_total, axis=0) - np.median(d_target_total, axis=0)
+                )
+            )
+            if d_target_total.size
+            else float("nan"),
             "global_stage1_mag": float(np.linalg.norm(stage1[i])),
             "two_stage": bool(two_stage),
             "space_input_mode": str(space_input_mode),
@@ -715,7 +738,15 @@ def estimate_rbf_field_to_reference(
         "center_mode": str(center_mode),
         "robust_mode": str(robust_mode),
         "center_nn_median": _nearest_center_median_distance(x_in, field.centers),
+        "center_nn_p90": _nearest_center_p90_distance(x_in, field.centers),
         "pred_drift_median": float(np.median(np.linalg.norm(d_pred, axis=1))),
+        "pred_dx_median": float(np.median(d_pred[:, 0])) if d_pred.size else float("nan"),
+        "pred_dy_median": float(np.median(d_pred[:, 1])) if d_pred.size else float("nan"),
+        "pred_dz_median": float(np.median(d_pred[:, 2])) if d_pred.size else float("nan"),
+        "true_dx_median": float(np.median(d_total[:, 0])) if d_total.size else float("nan"),
+        "true_dy_median": float(np.median(d_total[:, 1])) if d_total.size else float("nan"),
+        "true_dz_median": float(np.median(d_total[:, 2])) if d_total.size else float("nan"),
+        "drift_bias_norm": float(np.linalg.norm(np.median(d_pred, axis=0) - np.median(d_total, axis=0))) if d_total.size else float("nan"),
         "global_stage1_mag": float(np.linalg.norm(g)),
         "two_stage": bool(two_stage),
         "space_input_mode": str(space_input_mode),
@@ -812,7 +843,22 @@ def _fit_fields_once(
                 ),
                 centers,
             ),
+            "center_nn_p90": _nearest_center_p90_distance(
+                _input_positions_for_rows(
+                    df[df["Time"] == float(reference_time)],
+                    track_space_table=track_space_table,
+                    space_input_mode=space_input_mode,
+                ),
+                centers,
+            ),
             "pred_drift_median": 0.0,
+            "pred_dx_median": 0.0,
+            "pred_dy_median": 0.0,
+            "pred_dz_median": 0.0,
+            "true_dx_median": 0.0,
+            "true_dy_median": 0.0,
+            "true_dz_median": 0.0,
+            "drift_bias_norm": 0.0,
             "global_stage1_mag": 0.0,
             "two_stage": bool(two_stage),
             "space_input_mode": str(space_input_mode),
@@ -840,6 +886,7 @@ def _fit_fields_once(
             track_space_table=track_space_table,
             space_input_mode=space_input_mode,
             rbf_linear_terms=rbf_linear_terms,
+            robust_mode=robust_mode,
         )
         for t in times:
             t = float(t)
@@ -1029,6 +1076,7 @@ def correct_positions_rbf_to_reference(
                 tab["selected_track"] = keep_mask
                 tab["diag_type"] = "track_trim_track"
                 tab["track_trim_iter"] = int(it + 1)
+                tab = tab.merge(track_space_table, on="TrackID", how="left")
                 for row in tab.to_dict(orient="records"):
                     track_diag_rows.append(row)
 
@@ -1041,6 +1089,17 @@ def correct_positions_rbf_to_reference(
                 selected = selected_new
 
             used_track_ids = np.array(sorted(prev_set if prev_set is not None else set(base_ids.tolist())), dtype=float)
+            keep_count = int(used_track_ids.size)
+            base_count = int(base_ids.size)
+            track_diag_rows.append(
+                {
+                    "diag_type": "track_trim_summary",
+                    "track_trim_iter": int(n_iters),
+                    "track_keep_count": int(keep_count),
+                    "track_total_count": int(base_count),
+                    "track_keep_fraction": float(keep_count / max(base_count, 1)),
+                }
+            )
 
     fields_by_time, tf_rows = _fit_fields_once(
         df=d,
@@ -1211,6 +1270,16 @@ def make_rbf_diagnostic_plots(tf_table: pd.DataFrame, out_prefix: str | Path) ->
         plt.savefig(out_prefix + "_rbf_center_coverage.png", dpi=300)
         plt.close(fig)
 
+    if "center_nn_p90" in ttab.columns:
+        fig = plt.figure()
+        plt.plot(ttab.loc[ok, "t1"], ttab.loc[ok, "center_nn_p90"], marker="o")
+        plt.xlabel("Time (t)")
+        plt.ylabel("P90 nearest-center distance (um)")
+        plt.title("RBF center coverage P90 over time")
+        plt.tight_layout()
+        plt.savefig(out_prefix + "_rbf_center_coverage_p90.png", dpi=300)
+        plt.close(fig)
+
     if "pred_drift_median" in ttab.columns:
         fig = plt.figure()
         plt.plot(ttab.loc[ok, "t1"], ttab.loc[ok, "pred_drift_median"], marker="o")
@@ -1219,6 +1288,16 @@ def make_rbf_diagnostic_plots(tf_table: pd.DataFrame, out_prefix: str | Path) ->
         plt.title("RBF predicted drift magnitude over time")
         plt.tight_layout()
         plt.savefig(out_prefix + "_rbf_pred_drift_median.png", dpi=300)
+        plt.close(fig)
+
+    if "drift_bias_norm" in ttab.columns:
+        fig = plt.figure()
+        plt.plot(ttab.loc[ok, "t1"], ttab.loc[ok, "drift_bias_norm"], marker="o")
+        plt.xlabel("Time (t)")
+        plt.ylabel("||median(d_hat)-median(d_true)|| (um)")
+        plt.title("RBF drift bias over time")
+        plt.tight_layout()
+        plt.savefig(out_prefix + "_rbf_drift_bias.png", dpi=300)
         plt.close(fig)
 
     if "weight_max_abs" in ttab.columns:
@@ -1267,3 +1346,54 @@ def make_rbf_diagnostic_plots(tf_table: pd.DataFrame, out_prefix: str | Path) ->
 
                 sel_ids = sel[["TrackID"]].drop_duplicates().sort_values("TrackID")
                 sel_ids.to_csv(out_prefix + "_rbf_track_trim_selected_trackids.csv", index=False)
+
+                if {"Input X", "Input Y", "Input Z"}.issubset(tracks.columns):
+                    fig = plt.figure(figsize=(6, 5))
+                    if rem.shape[0] > 0:
+                        plt.scatter(rem["Input X"].to_numpy(float), rem["Input Y"].to_numpy(float), s=8, alpha=0.3, label="removed")
+                    if sel.shape[0] > 0:
+                        plt.scatter(sel["Input X"].to_numpy(float), sel["Input Y"].to_numpy(float), s=10, alpha=0.8, label="kept")
+                    plt.xlabel("Input X")
+                    plt.ylabel("Input Y")
+                    plt.title("RBF track-trim spatial distribution (XY)")
+                    handles, _ = plt.gca().get_legend_handles_labels()
+                    if handles:
+                        plt.legend()
+                    plt.tight_layout()
+                    plt.savefig(out_prefix + "_rbf_track_trim_spatial_xy.png", dpi=300)
+                    plt.close(fig)
+
+
+def plot_rbf_residuals_by_space_input_mode(
+    tf_tables: dict[str, pd.DataFrame],
+    out_path: str | Path,
+) -> None:
+    """Plot residual median over time for multiple RBF space-input modes."""
+    if not tf_tables:
+        return
+    fig = plt.figure(figsize=(8, 5))
+    any_plotted = False
+    for mode, tf in tf_tables.items():
+        if tf is None or tf.shape[0] == 0:
+            continue
+        tab = tf.copy()
+        if "diag_type" in tab.columns:
+            tab = tab[tab["diag_type"] == "timepoint"].copy()
+        if tab.shape[0] == 0 or "res_median" not in tab.columns or "t" not in tab.columns:
+            continue
+        ok = tab["ok"] == True if "ok" in tab.columns else np.ones((tab.shape[0],), dtype=bool)
+        tab = tab[ok].sort_values("t")
+        if tab.shape[0] == 0:
+            continue
+        plt.plot(tab["t"].to_numpy(float), tab["res_median"].to_numpy(float), marker="o", label=str(mode))
+        any_plotted = True
+    if not any_plotted:
+        plt.close(fig)
+        return
+    plt.xlabel("Time")
+    plt.ylabel("Residual median (um)")
+    plt.title("RBF residual median over time by space_input_mode")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300)
+    plt.close(fig)

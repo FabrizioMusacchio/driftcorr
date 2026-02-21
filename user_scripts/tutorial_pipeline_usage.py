@@ -723,4 +723,259 @@ if RUN_SYNTHETIC_ST_SCALING_AB:
     corr_off = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix_off, methods=["st_rbf"], opts=opts_off)
     postprocess_outputs(df_syn, file_path, out_prefix_off, corr_off)
 
+# %% ## Synthetic benchmark: reproducible dataset + new option A/B tests (helpers)
+SYNTH_REPRO_ROOT = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark"
+SYNTH_REPRO_RESULTS = SYNTH_REPRO_ROOT / "driftcorr_results"
+
+
+def _tutorial_cli_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env.update({"PYTHONPATH": str(PROJECT_ROOT)})
+    return env
+
+
+def _ensure_repro_dataset_exists() -> Path:
+    """API-first equivalent of --reuse-existing: generate once, then reuse."""
+    if list_imaris_xls_files(SYNTH_REPRO_ROOT):
+        return SYNTH_REPRO_ROOT
+    generate_synthetic_imaris_folder(
+        out_dir=SYNTH_REPRO_ROOT,
+        n_files=5,
+        n_tracks=80,
+        n_times=20,
+        stationary_fraction=0.45,
+        migrating_fraction=0.35,
+        seed=42,
+        temporal_smoothness=0.9,
+        local_mode="smooth",
+    )
+    return SYNTH_REPRO_ROOT
+
+
+# %% Synthetic benchmark: Cell 1 / generate dataset once (CLI synthetic-generate)
+RUN_SYNTH_NEW_CELL1_GENERATE_ONCE = False
+if RUN_SYNTH_NEW_CELL1_GENERATE_ONCE:
+    import subprocess
+
+    # CLI currently uses --synthetic-dir and --synthetic-* args.
+    cmd = [
+        sys.executable,
+        "-m",
+        "driftcorr",
+        "synthetic-generate",
+        "--synthetic-dir",
+        str(SYNTH_REPRO_ROOT),
+        "--synthetic-seed",
+        "42",
+        "--synthetic-n-files",
+        "5",
+        "--synthetic-n-tracks",
+        "80",
+        "--synthetic-n-times",
+        "20",
+        "--synthetic-stationary-fraction",
+        "0.45",
+        "--synthetic-migrating-fraction",
+        "0.35",
+        "--synthetic-temporal-smoothness",
+        "0.9",
+        "--synthetic-local-mode",
+        "smooth",
+    ]
+    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=_tutorial_cli_env())
+    print(f"Generated synthetic dataset at: {SYNTH_REPRO_ROOT}")
+
+
+# %% Synthetic benchmark: Cell 2 / baseline run on SAME dataset (rbf, rigid, local, st_rbf, st_rbf_moe)
+RUN_SYNTH_NEW_CELL2_BASELINE_API = False
+if RUN_SYNTH_NEW_CELL2_BASELINE_API:
+    _ensure_repro_dataset_exists()
+
+    baseline_methods = ["rbf", "rigid", "local", "st_rbf", "st_rbf_moe"]
+    baseline_opts = dict(OPTIONS)
+    baseline_opts["st_moe_k_list"] = [2, 3, 5]
+
+    for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
+        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+        out_prefix = SYNTH_REPRO_RESULTS / "baseline_suite" / file_path.stem / file_path.stem
+        corr = run_methods_for_dataframe(
+            df=df_syn,
+            out_prefix=out_prefix,
+            methods=baseline_methods,
+            opts=baseline_opts,
+            use_stationary_subset=False,
+        )
+        postprocess_outputs(df_syn, file_path, out_prefix, corr)
+
+
+# %% Synthetic benchmark: Cell 2b / CLI synthetic-regime-benchmark on fixed data (--reuse-existing)
+RUN_SYNTH_NEW_CELL2B_BASELINE_REGIME_CLI = False
+if RUN_SYNTH_NEW_CELL2B_BASELINE_REGIME_CLI:
+    import subprocess
+
+    _ensure_repro_dataset_exists()
+    cmd = [
+        sys.executable,
+        "-m",
+        "driftcorr",
+        "synthetic-regime-benchmark",
+        "--synthetic-dir",
+        str(SYNTH_REPRO_ROOT),
+        "--out",
+        str(SYNTH_REPRO_RESULTS / "baseline_suite"),
+        "--reuse-existing",
+        "1",
+        "--methods",
+        "rbf,rigid,local,st_rbf,st_rbf_moe",
+        "--synthetic-n-seeds",
+        "1",
+        "--st-moe-k-list",
+        "2,3,5",
+    ]
+    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=_tutorial_cli_env())
+
+
+# %% Synthetic benchmark: Cell 3 / RBF robust-mode A/B (sample_trim vs irls_huber)
+RUN_SYNTH_NEW_CELL3_RBF_ROBUST_AB = False
+if RUN_SYNTH_NEW_CELL3_RBF_ROBUST_AB:
+    _ensure_repro_dataset_exists()
+    for robust_mode, out_tag in [("sample_trim", "rbf_ab_sampletrim"), ("irls_huber", "rbf_ab_irls")]:
+        opts_rbf = dict(OPTIONS)
+        opts_rbf["robust_mode"] = robust_mode
+        for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
+            df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+            out_prefix = SYNTH_REPRO_RESULTS / out_tag / file_path.stem / file_path.stem
+            corr = run_methods_for_dataframe(
+                df=df_syn,
+                out_prefix=out_prefix,
+                methods=["rbf"],
+                opts=opts_rbf,
+                use_stationary_subset=False,
+            )
+            postprocess_outputs(df_syn, file_path, out_prefix, corr)
+
+
+# %% Synthetic benchmark: Cell 4 / ST-RBF robust-mode A/B/C
+RUN_SYNTH_NEW_CELL4_ST_ROBUST_ABC = False
+if RUN_SYNTH_NEW_CELL4_ST_ROBUST_ABC:
+    _ensure_repro_dataset_exists()
+    robust_runs = [
+        ("sample_trim", "st_rbf_ab_sampletrim"),
+        ("irls_huber", "st_rbf_ab_irls"),
+        ("hybrid_track_irls", "st_rbf_ab_hybrid_track_irls"),
+    ]
+    for robust_mode, out_tag in robust_runs:
+        opts_st = dict(OPTIONS)
+        opts_st["st_robust_mode"] = robust_mode
+        for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
+            df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+            out_prefix = SYNTH_REPRO_RESULTS / out_tag / file_path.stem / file_path.stem
+            corr = run_methods_for_dataframe(
+                df=df_syn,
+                out_prefix=out_prefix,
+                methods=["st_rbf"],
+                opts=opts_st,
+                use_stationary_subset=False,
+            )
+            postprocess_outputs(df_syn, file_path, out_prefix, corr)
+
+
+# %% Synthetic benchmark: Cell 5 / ST-RBF expressivity A/B (anisotropic on/off, linear interactions on/off)
+RUN_SYNTH_NEW_CELL5_ST_EXPRESSIVITY_AB = False
+if RUN_SYNTH_NEW_CELL5_ST_EXPRESSIVITY_AB:
+    _ensure_repro_dataset_exists()
+
+    runs = [
+        (
+            "st_rbf_anisotropic_off",
+            {
+                "st_ell_space": 2.0,
+                "st_ell_time": 0.8,
+                "st_ell_x": None,
+                "st_ell_y": None,
+                "st_ell_z": None,
+                "st_linear_interactions": 0,
+                "rbf_linear_terms": 0,
+            },
+        ),
+        (
+            "st_rbf_anisotropic_on",
+            {
+                "st_ell_space": 2.0,
+                "st_ell_time": 0.8,
+                "st_ell_x": 1.6,
+                "st_ell_y": 2.3,
+                "st_ell_z": 1.2,
+                "st_linear_interactions": 0,
+                "rbf_linear_terms": 0,
+            },
+        ),
+        (
+            "st_rbf_linear_interactions_off",
+            {
+                "st_ell_space": 2.0,
+                "st_ell_time": 0.8,
+                "st_ell_x": None,
+                "st_ell_y": None,
+                "st_ell_z": None,
+                "st_linear_interactions": 0,
+                "rbf_linear_terms": 0,
+            },
+        ),
+        (
+            "st_rbf_linear_interactions_on",
+            {
+                "st_ell_space": 2.0,
+                "st_ell_time": 0.8,
+                "st_ell_x": None,
+                "st_ell_y": None,
+                "st_ell_z": None,
+                "st_linear_interactions": 1,
+                "rbf_linear_terms": 1,
+            },
+        ),
+    ]
+
+    for out_tag, cfg in runs:
+        opts_st = dict(OPTIONS)
+        opts_st.update(cfg)
+        for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
+            df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+            out_prefix = SYNTH_REPRO_RESULTS / out_tag / file_path.stem / file_path.stem
+            corr = run_methods_for_dataframe(
+                df=df_syn,
+                out_prefix=out_prefix,
+                methods=["st_rbf"],
+                opts=opts_st,
+                use_stationary_subset=False,
+            )
+            postprocess_outputs(df_syn, file_path, out_prefix, corr)
+
+
+# %% Synthetic benchmark: Cell 6 (optional) / paper-regression CLI check on SAME dataset (reuse-existing)
+RUN_SYNTH_NEW_CELL6_PAPER_REGRESSION = False
+if RUN_SYNTH_NEW_CELL6_PAPER_REGRESSION:
+    import subprocess
+
+    _ensure_repro_dataset_exists()
+    cmd = [
+        sys.executable,
+        "-m",
+        "driftcorr",
+        "paper-regression",
+        "--synthetic-dir",
+        str(SYNTH_REPRO_ROOT),
+        "--out",
+        str(SYNTH_REPRO_RESULTS / "paper_regression"),
+        "--manifest",
+        str(PROJECT_ROOT / "paper_outputs_manifest.txt"),
+        "--columns-manifest",
+        str(PROJECT_ROOT / "paper_metrics_columns.json"),
+        "--methods",
+        "rbf,rigid,local,st_rbf",
+        "--reuse-existing",
+        "1",
+    ]
+    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=_tutorial_cli_env())
+
 # %% END

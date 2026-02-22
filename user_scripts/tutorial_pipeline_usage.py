@@ -12,7 +12,6 @@ date: Feb 2026
 from __future__ import annotations
 
 from pathlib import Path
-import os
 import sys
 
 import pandas as pd
@@ -21,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 try:
     from driftcorr.evaluate import run_all_methods_and_compare, save_evaluation_outputs
+    from driftcorr.benchmarks import paper_regression, synthetic_generate, synthetic_regime_benchmark
     from driftcorr.io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris_position_xls
     from driftcorr.method_local_communities import run_local_drift_correction_for_file
     from driftcorr.method_rbf_ref import correct_positions_rbf_to_reference, make_rbf_diagnostic_plots
@@ -43,6 +43,7 @@ except ModuleNotFoundError as exc:
         sys.path.insert(0, root_str)
     try:
         from driftcorr.evaluate import run_all_methods_and_compare, save_evaluation_outputs
+        from driftcorr.benchmarks import paper_regression, synthetic_generate, synthetic_regime_benchmark
         from driftcorr.io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris_position_xls
         from driftcorr.method_local_communities import run_local_drift_correction_for_file
         from driftcorr.method_rbf_ref import correct_positions_rbf_to_reference, make_rbf_diagnostic_plots
@@ -626,72 +627,32 @@ if RUN_SYNTHETIC_ST_MOE:
 # %% HOW TO GENERATE AND RUN SYNTHETIC DATA: Regime suite (3 regimes x 5 seeds)
 RUN_SYNTHETIC_REGIME_SUITE = False
 if RUN_SYNTHETIC_REGIME_SUITE:
-    # Equivalent CLI:
-    # driftcorr synthetic-regime-benchmark --synthetic-dir "synthetic_regime_suite" \
-    #   --methods "rbf,rigid,local,st_rbf,st_rbf_moe" --synthetic-n-seeds 5 --st-moe-k-list "2,3,5"
-    # This cell calls the CLI command from Python for convenience.
-    import subprocess
-    cmd = [
-        sys.executable,
-        "-m",
-        "driftcorr",
-        "synthetic-regime-benchmark",
-        "--synthetic-dir",
-        str(PROJECT_ROOT / "synthetic_regime_suite"),
-        "--methods",
-        "rbf,rigid,local,st_rbf,st_rbf_moe",
-        "--synthetic-n-seeds",
-        "5",
-        "--st-moe-k-list",
-        "2,3,5",
-    ]
-    env = dict(os.environ)
-    env.update({"PYTHONPATH": str(PROJECT_ROOT)})
-    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=env)
+    synthetic_regime_benchmark(
+        synthetic_dir=str(PROJECT_ROOT / "synthetic_regime_suite"),
+        methods="rbf,rigid,local,st_rbf,st_rbf_moe",
+        synthetic_n_seeds=5,
+        st_moe_k_list="2,3,5",
+    )
 
-# %% HOW TO GENERATE SYNTHETIC DATA ONLY (CLI synthetic-generate)
+# %% HOW TO GENERATE SYNTHETIC DATA ONLY (Python API synthetic_generate)
 RUN_SYNTHETIC_GENERATE_ONLY = False
 if RUN_SYNTHETIC_GENERATE_ONLY:
-    import subprocess
-    cmd = [
-        sys.executable,
-        "-m",
-        "driftcorr",
-        "synthetic-generate",
-        "--synthetic-dir",
-        str(PROJECT_ROOT / "Synthetic IMARIS files generated_only"),
-        "--synthetic-seed",
-        "123",
-        "--synthetic-n-files",
-        "2",
-    ]
-    env = dict(os.environ)
-    env.update({"PYTHONPATH": str(PROJECT_ROOT)})
-    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=env)
+    synthetic_generate(
+        synthetic_dir=str(PROJECT_ROOT / "Synthetic IMARIS files generated_only"),
+        synthetic_seed=123,
+        synthetic_n_files=2,
+    )
 
 # %% HOW TO RUN PAPER OUTPUT REGRESSION HARNESS (just checks whether outputs plots still match expected)
 RUN_PAPER_OUTPUT_REGRESSION = False
 if RUN_PAPER_OUTPUT_REGRESSION:
-    import subprocess
-    cmd = [
-        sys.executable,
-        "-m",
-        "driftcorr",
-        "paper-regression",
-        "--synthetic-dir",
-        str(PROJECT_ROOT / "Synthetic IMARIS files paper_regression"),
-        "--manifest",
-        str(PROJECT_ROOT / "paper_outputs_manifest.txt"),
-        "--columns-manifest",
-        str(PROJECT_ROOT / "paper_metrics_columns.json"),
-        "--methods",
-        "rbf,rigid,local,st_rbf",
-        "--reuse-existing",
-        "1",
-    ]
-    env = dict(os.environ)
-    env.update({"PYTHONPATH": str(PROJECT_ROOT)})
-    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=env)
+    paper_regression(
+        synthetic_dir=str(PROJECT_ROOT / "Synthetic IMARIS files paper_regression"),
+        manifest=str(PROJECT_ROOT / "paper_outputs_manifest.txt"),
+        columns_manifest=str(PROJECT_ROOT / "paper_metrics_columns.json"),
+        methods="rbf,rigid,local,st_rbf",
+        reuse_existing=1,
+    )
 
 # %% HOW TO GENERATE AND RUN SYNTHETIC DATA: ST-RBF per-axis scaling A/B comparison
 RUN_SYNTHETIC_ST_SCALING_AB = False
@@ -728,12 +689,6 @@ SYNTH_REPRO_ROOT = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible 
 SYNTH_REPRO_RESULTS = SYNTH_REPRO_ROOT / "driftcorr_results"
 
 
-def _tutorial_cli_env() -> dict[str, str]:
-    env = dict(os.environ)
-    env.update({"PYTHONPATH": str(PROJECT_ROOT)})
-    return env
-
-
 def _ensure_repro_dataset_exists() -> Path:
     """API-first equivalent of --reuse-existing: generate once, then reuse."""
     if list_imaris_xls_files(SYNTH_REPRO_ROOT):
@@ -752,37 +707,20 @@ def _ensure_repro_dataset_exists() -> Path:
     return SYNTH_REPRO_ROOT
 
 
-# %% Synthetic benchmark: Cell 1 / generate dataset once (CLI synthetic-generate)
+# %% Synthetic benchmark: Cell 1 / generate dataset once (Python API)
 RUN_SYNTH_NEW_CELL1_GENERATE_ONCE = False
 if RUN_SYNTH_NEW_CELL1_GENERATE_ONCE:
-    import subprocess
-
-    # CLI currently uses --synthetic-dir and --synthetic-* args.
-    cmd = [
-        sys.executable,
-        "-m",
-        "driftcorr",
-        "synthetic-generate",
-        "--synthetic-dir",
-        str(SYNTH_REPRO_ROOT),
-        "--synthetic-seed",
-        "42",
-        "--synthetic-n-files",
-        "5",
-        "--synthetic-n-tracks",
-        "80",
-        "--synthetic-n-times",
-        "20",
-        "--synthetic-stationary-fraction",
-        "0.45",
-        "--synthetic-migrating-fraction",
-        "0.35",
-        "--synthetic-temporal-smoothness",
-        "0.9",
-        "--synthetic-local-mode",
-        "smooth",
-    ]
-    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=_tutorial_cli_env())
+    synthetic_generate(
+        synthetic_dir=str(SYNTH_REPRO_ROOT),
+        synthetic_seed=42,
+        synthetic_n_files=5,
+        synthetic_n_tracks=80,
+        synthetic_n_times=20,
+        synthetic_stationary_fraction=0.45,
+        synthetic_migrating_fraction=0.35,
+        synthetic_temporal_smoothness=0.9,
+        synthetic_local_mode="smooth",
+    )
     print(f"Generated synthetic dataset at: {SYNTH_REPRO_ROOT}")
 
 
@@ -808,31 +746,18 @@ if RUN_SYNTH_NEW_CELL2_BASELINE_API:
         postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
 
-# %% Synthetic benchmark: Cell 2b / CLI synthetic-regime-benchmark on fixed data (--reuse-existing)
-RUN_SYNTH_NEW_CELL2B_BASELINE_REGIME_CLI = False
-if RUN_SYNTH_NEW_CELL2B_BASELINE_REGIME_CLI:
-    import subprocess
-
+# %% Synthetic benchmark: Cell 2b / regime benchmark on fixed data (Python API, reuse_existing)
+RUN_SYNTH_NEW_CELL2B_BASELINE_REGIME_API = False
+if RUN_SYNTH_NEW_CELL2B_BASELINE_REGIME_API:
     _ensure_repro_dataset_exists()
-    cmd = [
-        sys.executable,
-        "-m",
-        "driftcorr",
-        "synthetic-regime-benchmark",
-        "--synthetic-dir",
-        str(SYNTH_REPRO_ROOT),
-        "--out",
-        str(SYNTH_REPRO_RESULTS / "baseline_suite"),
-        "--reuse-existing",
-        "1",
-        "--methods",
-        "rbf,rigid,local,st_rbf,st_rbf_moe",
-        "--synthetic-n-seeds",
-        "1",
-        "--st-moe-k-list",
-        "2,3,5",
-    ]
-    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=_tutorial_cli_env())
+    synthetic_regime_benchmark(
+        synthetic_dir=str(SYNTH_REPRO_ROOT),
+        out=str(SYNTH_REPRO_RESULTS / "baseline_suite"),
+        reuse_existing=1,
+        methods="rbf,rigid,local,st_rbf,st_rbf_moe",
+        synthetic_n_seeds=1,
+        st_moe_k_list="2,3,5",
+    )
 
 
 # %% Synthetic benchmark: Cell 3 / RBF robust-mode A/B (sample_trim vs irls_huber)
@@ -952,30 +877,44 @@ if RUN_SYNTH_NEW_CELL5_ST_EXPRESSIVITY_AB:
             postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
 
-# %% Synthetic benchmark: Cell 6 (optional) / paper-regression CLI check on SAME dataset (reuse-existing)
+# %% Synthetic benchmark: Cell 6 (optional) / paper-regression check on SAME dataset (Python API)
 RUN_SYNTH_NEW_CELL6_PAPER_REGRESSION = False
 if RUN_SYNTH_NEW_CELL6_PAPER_REGRESSION:
-    import subprocess
-
     _ensure_repro_dataset_exists()
-    cmd = [
-        sys.executable,
-        "-m",
-        "driftcorr",
-        "paper-regression",
-        "--synthetic-dir",
-        str(SYNTH_REPRO_ROOT),
-        "--out",
-        str(SYNTH_REPRO_RESULTS / "paper_regression"),
-        "--manifest",
-        str(PROJECT_ROOT / "paper_outputs_manifest.txt"),
-        "--columns-manifest",
-        str(PROJECT_ROOT / "paper_metrics_columns.json"),
-        "--methods",
-        "rbf,rigid,local,st_rbf",
-        "--reuse-existing",
-        "1",
-    ]
-    subprocess.run(cmd, check=True, cwd=str(PROJECT_ROOT), env=_tutorial_cli_env())
+    paper_regression(
+        synthetic_dir=str(SYNTH_REPRO_ROOT),
+        out=str(SYNTH_REPRO_RESULTS / "paper_regression"),
+        manifest=str(PROJECT_ROOT / "paper_outputs_manifest.txt"),
+        columns_manifest=str(PROJECT_ROOT / "paper_metrics_columns.json"),
+        methods="rbf,rigid,local,st_rbf",
+        reuse_existing=1,
+    )
+# %% ADDITIONAL BENCHMARKS (Python API)
+RUN_ADDITIONAL_BENCHMARKS = False
+if RUN_ADDITIONAL_BENCHMARKS:
+    synthetic_dir = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark 2"
+    out_root = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark" / "driftcorr_results"
+
+    # 1) Baseline regime benchmark (20 seeds), reusing an existing synthetic dataset.
+    synthetic_regime_benchmark(
+        synthetic_dir=str(synthetic_dir),
+        out=str(out_root / "regimes_20seeds"),
+        reuse_existing=1,
+        methods="rbf,rigid,local,st_rbf",
+        synthetic_n_seeds=20,
+    )
+
+    # 2) Parameter sweep: 3 spatial scales x 3 temporal scales.
+    for es in [1.0, 2.0, 4.0]:
+        for et in [0.4, 0.8, 1.6]:
+            synthetic_regime_benchmark(
+                synthetic_dir=str(synthetic_dir),
+                out=str(out_root / f"st_rbf_grid_es{es}_et{et}"),
+                reuse_existing=1,
+                methods="st_rbf",
+                synthetic_n_seeds=10,
+                st_ell_space=float(es),
+                st_ell_time=float(et),
+            )
 
 # %% END

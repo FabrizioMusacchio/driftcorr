@@ -40,8 +40,15 @@ except ModuleNotFoundError as exc:
 
 ES_VALUES = [1.0, 2.0, 4.0]
 ET_VALUES = [0.4, 0.8, 1.6]
+STATIONARY_AB_CANDIDATES = [
+    {"name": "fast", "ell_space": 4.0, "ell_time": 0.4},
+    {"name": "smooth", "ell_space": 1.0, "ell_time": 1.6},
+]
 
 GRID_DIR_PATTERN = re.compile(r"^st_rbf_grid_es(?P<es>[-+]?\d*\.?\d+)_et(?P<et>[-+]?\d*\.?\d+)$")
+STATIONARY_AB_DIR_PATTERN = re.compile(
+    r"^st_rbf_stationary_ab_es(?P<es>[-+]?\d*\.?\d+)_et(?P<et>[-+]?\d*\.?\d+)_subset(?P<subset>[01])$"
+)
 # %% FUNCTIONS
 def _list_imaris_xls_files(folder: Path) -> list[Path]:
     """Return IMARIS xls/xlsx files in folder (non-recursive), sorted."""
@@ -339,10 +346,192 @@ def _aggregate_grid(out_root: Path) -> pd.DataFrame:
     return out
 
 
+def _run_stationary_ab_tests(synthetic_dir: Path, out_root: Path) -> None:
+    """Run ST-RBF stationary subset A/B tests on fixed candidate ell settings."""
+    for cand in STATIONARY_AB_CANDIDATES:
+        es = float(cand["ell_space"])
+        et = float(cand["ell_time"])
+        for use_subset in [0, 1]:
+            out_dir = out_root / f"st_rbf_stationary_ab_es{es}_et{et}_subset{use_subset}"
+            print(
+                "[INFO] Running stationary A/B config: "
+                f"ell_space={es}, ell_time={et}, use_stationary_subset={use_subset}"
+            )
+            synthetic_regime_benchmark(
+                synthetic_dir=str(synthetic_dir),
+                out=str(out_dir),
+                reuse_existing=1,
+                methods="st_rbf",
+                synthetic_n_seeds=10,
+                st_ell_space=es,
+                st_ell_time=et,
+                use_stationary_subset=bool(use_subset),
+            )
+
+
+def _aggregate_stationary_ab(out_root: Path) -> pd.DataFrame:
+    """Aggregate stationary A/B experiment outputs into one summary table."""
+    rows: list[dict[str, float | str | int]] = []
+    ab_dirs = sorted([p for p in out_root.iterdir() if p.is_dir() and p.name.startswith("st_rbf_stationary_ab_es")])
+    if not ab_dirs:
+        raise FileNotFoundError(
+            f"No stationary A/B folders found in {out_root} "
+            "(expected names like st_rbf_stationary_ab_es*_et*_subset*)."
+        )
+
+    for run_dir in ab_dirs:
+        m = STATIONARY_AB_DIR_PATTERN.match(run_dir.name)
+        if m is None:
+            print(f"[WARN] Skipping unexpected stationary A/B folder name: {run_dir.name}")
+            continue
+        ell_space = float(m.group("es"))
+        ell_time = float(m.group("et"))
+        use_subset = int(m.group("subset"))
+
+        try:
+            regime_to_csv = _find_metric_csvs_for_grid(run_dir)
+        except Exception as exc:
+            print(f"[WARN] Could not locate metrics for stationary A/B run {run_dir}: {exc}")
+            continue
+
+        for regime, csv_path in regime_to_csv.items():
+            try:
+                metrics = _load_and_standardize_metrics(csv_path)
+            except Exception as exc:
+                print(f"[WARN] Failed to load/standardize metrics from {csv_path}: {exc}")
+                continue
+
+            subset = metrics[
+                (metrics["method"].astype(str) == "st_rbf")
+                & (metrics["regime"].astype(str) == str(regime))
+            ].copy()
+            if subset.empty:
+                continue
+
+            need_bias = ~np.isfinite(pd.to_numeric(subset["drift_bias_abs"], errors="coerce").to_numpy(float))
+            if bool(np.any(need_bias)):
+                for idx in subset.index[need_bias]:
+                    seed_val = pd.to_numeric(subset.loc[idx, "seed"], errors="coerce")
+                    if not np.isfinite(seed_val):
+                        continue
+                    subset.loc[idx, "drift_bias_abs"] = _drift_bias_from_per_seed_files(
+                        grid_dir=run_dir,
+                        regime=str(regime),
+                        seed=int(seed_val),
+                        method="st_rbf",
+                    )
+
+            n_seeds = int(pd.to_numeric(subset["seed"], errors="coerce").dropna().nunique())
+            mean_rms_all, std_rms_all = _safe_mean_std(subset["rms_all"].to_numpy(float))
+            mean_rms_stationary, std_rms_stationary = _safe_mean_std(subset["rms_stationary"].to_numpy(float))
+            mean_rms_migrating, std_rms_migrating = _safe_mean_std(subset["rms_migrating"].to_numpy(float))
+            mean_drift_bias_abs, std_drift_bias_abs = _safe_mean_std(subset["drift_bias_abs"].to_numpy(float))
+
+            rows.append(
+                {
+                    "regime": str(regime),
+                    "ell_space": ell_space,
+                    "ell_time": ell_time,
+                    "use_stationary_subset": use_subset,
+                    "n_seeds_found": n_seeds,
+                    "mean_rms_all": mean_rms_all,
+                    "std_rms_all": std_rms_all,
+                    "mean_rms_stationary": mean_rms_stationary,
+                    "std_rms_stationary": std_rms_stationary,
+                    "mean_rms_migrating": mean_rms_migrating,
+                    "std_rms_migrating": std_rms_migrating,
+                    "mean_drift_bias_abs": mean_drift_bias_abs,
+                    "std_drift_bias_abs": std_drift_bias_abs,
+                }
+            )
+
+    if not rows:
+        raise RuntimeError("No stationary A/B results could be aggregated.")
+
+    out = pd.DataFrame(rows)
+    out = out.drop_duplicates(subset=["regime", "ell_space", "ell_time", "use_stationary_subset"], keep="last")
+    required_cols = [
+        "regime",
+        "ell_space",
+        "ell_time",
+        "use_stationary_subset",
+        "n_seeds_found",
+        "mean_rms_all",
+        "std_rms_all",
+        "mean_rms_stationary",
+        "std_rms_stationary",
+        "mean_rms_migrating",
+        "std_rms_migrating",
+        "mean_drift_bias_abs",
+        "std_drift_bias_abs",
+    ]
+    out = out[required_cols].sort_values(["regime", "ell_space", "ell_time", "use_stationary_subset"]).reset_index(drop=True)
+    return out
+
+
+def _write_stationary_ab_report(summary: pd.DataFrame, out_md_path: Path) -> None:
+    """Write a short markdown ranking report for stationary A/B configurations."""
+    lines: list[str] = []
+    lines.append("# ST-RBF Stationary Subset A/B Report")
+    lines.append("")
+    lines.append(f"- timestamp: {datetime.now().isoformat(timespec='seconds')}")
+    lines.append(f"- rows: {int(summary.shape[0])}")
+    lines.append("")
+
+    for regime in sorted(summary["regime"].astype(str).unique().tolist()):
+        cur = summary[summary["regime"].astype(str) == regime].copy()
+        if cur.empty:
+            continue
+        lines.append(f"## Regime: {regime}")
+        lines.append("")
+
+        cur["cfg"] = (
+            "es="
+            + cur["ell_space"].map(lambda v: f"{float(v):.1f}")
+            + ", et="
+            + cur["ell_time"].map(lambda v: f"{float(v):.1f}")
+            + ", subset="
+            + cur["use_stationary_subset"].astype(int).astype(str)
+        )
+
+        rms_rank = cur.assign(_sort=cur["mean_rms_all"].where(np.isfinite(cur["mean_rms_all"]), np.inf)).sort_values("_sort")
+        bias_rank = cur.assign(
+            _sort=cur["mean_drift_bias_abs"].where(np.isfinite(cur["mean_drift_bias_abs"]), np.inf)
+        ).sort_values("_sort")
+
+        lines.append("### Rank by mean_rms_all (lower is better)")
+        lines.append("")
+        lines.append("| rank | config | n_seeds_found | mean_rms_all | std_rms_all |")
+        lines.append("|---:|---|---:|---:|---:|")
+        for i, (_, r) in enumerate(rms_rank.iterrows(), start=1):
+            lines.append(
+                f"| {i} | {r['cfg']} | {int(r['n_seeds_found'])} | "
+                f"{float(r['mean_rms_all']):.6f} | {float(r['std_rms_all']):.6f} |"
+            )
+        lines.append("")
+
+        lines.append("### Rank by mean_drift_bias_abs (lower is better)")
+        lines.append("")
+        lines.append("| rank | config | n_seeds_found | mean_drift_bias_abs | std_drift_bias_abs |")
+        lines.append("|---:|---|---:|---:|---:|")
+        for i, (_, r) in enumerate(bias_rank.iterrows(), start=1):
+            mean_bias = float(r["mean_drift_bias_abs"]) if np.isfinite(r["mean_drift_bias_abs"]) else float("nan")
+            std_bias = float(r["std_drift_bias_abs"]) if np.isfinite(r["std_drift_bias_abs"]) else float("nan")
+            lines.append(
+                f"| {i} | {r['cfg']} | {int(r['n_seeds_found'])} | "
+                f"{mean_bias:.6f} | {std_bias:.6f} |"
+            )
+        lines.append("")
+
+    out_md_path.parent.mkdir(parents=True, exist_ok=True)
+    out_md_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+
 # %% ADDITIONAL BENCHMARKS (Python API)
 RUN_CREATE_SYNTHETIC_DATASET = False
 RUN_PARAMETER_SWEEP = False
-RUN_AGGREGATION = True
+RUN_AGGREGATION = False
+RUN_STATIONARY_AB_TESTS = True
 
 synthetic_dir = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark 2"
 out_root = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark 2" / "driftcorr_results"
@@ -465,6 +654,17 @@ if RUN_AGGREGATION:
 
     print(f"[OK] Wrote aggregated CSV: {aggregated_csv_path}")
     print(f"[OK] Wrote aggregation README: {readme_path}")
+
+if RUN_STATIONARY_AB_TESTS:
+    _ensure_synthetic_dataset_exists(synthetic_dir)
+    _run_stationary_ab_tests(synthetic_dir=synthetic_dir, out_root=out_root)
+    stationary_ab_summary = _aggregate_stationary_ab(out_root=out_root)
+    stationary_ab_csv_path = out_root / "st_rbf_stationary_ab_summary.csv"
+    stationary_ab_summary.to_csv(stationary_ab_csv_path, index=False)
+    stationary_ab_report_path = out_root / "st_rbf_stationary_ab_report.md"
+    _write_stationary_ab_report(stationary_ab_summary, stationary_ab_report_path)
+    print(f"[OK] Wrote stationary A/B summary CSV: {stationary_ab_csv_path}")
+    print(f"[OK] Wrote stationary A/B markdown report: {stationary_ab_report_path}")
 
 print("[INFO] Additional benchmarks and aggregation complete.")
 # %% END

@@ -17,6 +17,7 @@ from pathlib import Path
 import re
 import sys
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -47,8 +48,11 @@ STATIONARY_AB_CANDIDATES = [
 
 GRID_DIR_PATTERN = re.compile(r"^st_rbf_grid_es(?P<es>[-+]?\d*\.?\d+)_et(?P<et>[-+]?\d*\.?\d+)$")
 STATIONARY_AB_DIR_PATTERN = re.compile(
-    r"^st_rbf_stationary_ab_es(?P<es>[-+]?\d*\.?\d+)_et(?P<et>[-+]?\d*\.?\d+)_subset(?P<subset>[01])$"
-)
+    r"^st_rbf_stationary_ab_es(?P<es>[-+]?\d*\.?\d+)_et(?P<et>[-+]?\d*\.?\d+)_subset(?P<subset>[01])$")
+
+# define paths for synthetic dataset and grid outputs (will be created if missing):
+synthetic_dir = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark 2"
+out_root = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark 2" / "driftcorr_results"
 # %% FUNCTIONS
 def _list_imaris_xls_files(folder: Path) -> list[Path]:
     """Return IMARIS xls/xlsx files in folder (non-recursive), sorted."""
@@ -527,14 +531,192 @@ def _write_stationary_ab_report(summary: pd.DataFrame, out_md_path: Path) -> Non
     out_md_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
+def _plot_heatmap(
+    df: pd.DataFrame,
+    value_col: str,
+    title: str,
+    out_path: Path,
+    highlight: tuple[float, float] = (4.0, 0.4),
+) -> bool:
+    """Plot a heatmap with x=ell_time, y=ell_space from an aggregated dataframe."""
+    required = {"ell_space", "ell_time", value_col}
+    if not required.issubset(df.columns):
+        print(f"[WARN] Heatmap skipped ({out_path.name}): missing columns {sorted(required - set(df.columns))}")
+        return False
+
+    cur = df[["ell_space", "ell_time", value_col]].copy()
+    cur["ell_space"] = pd.to_numeric(cur["ell_space"], errors="coerce")
+    cur["ell_time"] = pd.to_numeric(cur["ell_time"], errors="coerce")
+    cur[value_col] = pd.to_numeric(cur[value_col], errors="coerce")
+    cur = cur.dropna(subset=["ell_space", "ell_time"])
+    if cur.empty:
+        print(f"[WARN] Heatmap skipped ({out_path.name}): no valid rows.")
+        return False
+
+    y_vals = sorted(cur["ell_space"].unique().tolist())
+    x_vals = sorted(cur["ell_time"].unique().tolist())
+    if not y_vals or not x_vals:
+        print(f"[WARN] Heatmap skipped ({out_path.name}): empty axis values.")
+        return False
+
+    mat = np.full((len(y_vals), len(x_vals)), np.nan, dtype=float)
+    agg = cur.groupby(["ell_space", "ell_time"], as_index=False)[value_col].mean()
+    x_lookup = {float(v): i for i, v in enumerate(x_vals)}
+    y_lookup = {float(v): i for i, v in enumerate(y_vals)}
+    for _, r in agg.iterrows():
+        xv = float(r["ell_time"])
+        yv = float(r["ell_space"])
+        if xv in x_lookup and yv in y_lookup:
+            mat[y_lookup[yv], x_lookup[xv]] = float(r[value_col])
+
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad(color="#f0f0f0")
+
+    fig, ax = plt.subplots(figsize=(6.2, 4.8))
+    im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(value_col)
+
+    ax.set_xticks(np.arange(len(x_vals)))
+    ax.set_xticklabels([f"{v:.2g}" for v in x_vals])
+    ax.set_yticks(np.arange(len(y_vals)))
+    ax.set_yticklabels([f"{v:.2g}" for v in y_vals])
+    ax.set_xlabel("ell_time")
+    ax.set_ylabel("ell_space")
+    ax.set_title(title)
+
+    hs, ht = highlight
+    ix = next((i for i, x in enumerate(x_vals) if np.isclose(float(x), float(ht))), None)
+    iy = next((i for i, y in enumerate(y_vals) if np.isclose(float(y), float(hs))), None)
+    if ix is not None and iy is not None:
+        ax.scatter([ix], [iy], s=130, marker="o", facecolors="none", edgecolors="red", linewidths=1.8, zorder=5)
+        ax.scatter([ix], [iy], s=20, color="red", zorder=6)
+
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
+def _plot_stationary_ab(
+    df: pd.DataFrame,
+    regime: str | None,
+    out_path: Path,
+    highlight: tuple[float, float] = (4.0, 0.4),
+) -> bool:
+    """Plot stationary subset A/B comparisons for one regime or across all regimes."""
+    req = {"regime", "ell_space", "ell_time", "use_stationary_subset", "mean_rms_all", "std_rms_all"}
+    if not req.issubset(df.columns):
+        print(f"[WARN] Stationary A/B plot skipped ({out_path.name}): missing columns {sorted(req - set(df.columns))}")
+        return False
+
+    cur = df.copy()
+    for c in ["ell_space", "ell_time", "use_stationary_subset", "mean_rms_all", "std_rms_all"]:
+        cur[c] = pd.to_numeric(cur[c], errors="coerce")
+    cur = cur.dropna(subset=["use_stationary_subset"])
+    cur["use_stationary_subset"] = cur["use_stationary_subset"].astype(int)
+    cur = cur[cur["use_stationary_subset"].isin([0, 1])]
+    if cur.empty:
+        print(f"[WARN] Stationary A/B plot skipped ({out_path.name}): no valid rows.")
+        return False
+
+    if regime is not None:
+        cur = cur[cur["regime"].astype(str) == str(regime)].copy()
+        if cur.empty:
+            print(f"[WARN] Stationary A/B plot skipped ({out_path.name}): regime '{regime}' not found.")
+            return False
+        cur["cfg"] = cur.apply(lambda r: f"es={float(r['ell_space']):.1f}, et={float(r['ell_time']):.1f}", axis=1)
+        cfg_order = (
+            cur[["cfg", "ell_space", "ell_time"]]
+            .drop_duplicates()
+            .sort_values(["ell_space", "ell_time"])["cfg"]
+            .tolist()
+        )
+        piv_mean = cur.pivot_table(index="cfg", columns="use_stationary_subset", values="mean_rms_all", aggfunc="mean")
+        piv_std = cur.pivot_table(index="cfg", columns="use_stationary_subset", values="std_rms_all", aggfunc="mean")
+        piv_mean = piv_mean.reindex(cfg_order)
+        piv_std = piv_std.reindex(cfg_order)
+
+        x = np.arange(len(cfg_order), dtype=float)
+        w = 0.36
+        fig, ax = plt.subplots(figsize=(7.0, 4.6))
+        y0 = piv_mean.get(0, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        y1 = piv_mean.get(1, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        e0 = piv_std.get(0, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        e1 = piv_std.get(1, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        ax.bar(x - w / 2.0, y0, width=w, yerr=e0, capsize=3, label="subset=0")
+        ax.bar(x + w / 2.0, y1, width=w, yerr=e1, capsize=3, label="subset=1")
+        ax.set_xticks(x)
+        ax.set_xticklabels(cfg_order, rotation=20, ha="right")
+        ax.set_ylabel("mean_rms_all")
+        ax.set_title(f"Stationary subset A/B: {regime}")
+        ax.legend()
+        fig.tight_layout()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=300)
+        plt.close(fig)
+        return True
+
+    hs, ht = highlight
+    pick = cur[np.isclose(cur["ell_space"].to_numpy(float), hs) & np.isclose(cur["ell_time"].to_numpy(float), ht)].copy()
+    if pick.empty:
+        print("[WARN] Combined stationary A/B plot: highlight grid point missing; using regime-wise mean across all configs.")
+        pick = cur.groupby(["regime", "use_stationary_subset"], as_index=False).agg(
+            mean_rms_all=("mean_rms_all", "mean"),
+            std_rms_all=("std_rms_all", "mean"),
+        )
+
+    regimes = sorted(pick["regime"].astype(str).unique().tolist())
+    if not regimes:
+        print(f"[WARN] Stationary A/B plot skipped ({out_path.name}): no regimes available.")
+        return False
+
+    p0 = pick[pick["use_stationary_subset"] == 0].set_index("regime")
+    p1 = pick[pick["use_stationary_subset"] == 1].set_index("regime")
+    x = np.arange(len(regimes), dtype=float)
+    y0 = np.array([float(p0.loc[r, "mean_rms_all"]) if r in p0.index else np.nan for r in regimes], dtype=float)
+    y1 = np.array([float(p1.loc[r, "mean_rms_all"]) if r in p1.index else np.nan for r in regimes], dtype=float)
+    e0 = np.array([float(p0.loc[r, "std_rms_all"]) if r in p0.index else np.nan for r in regimes], dtype=float)
+    e1 = np.array([float(p1.loc[r, "std_rms_all"]) if r in p1.index else np.nan for r in regimes], dtype=float)
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.errorbar(x, y0, yerr=e0, marker="o", capsize=3, label="subset=0")
+    ax.errorbar(x, y1, yerr=e1, marker="o", capsize=3, label="subset=1")
+    ax.set_xticks(x)
+    ax.set_xticklabels(regimes, rotation=20, ha="right")
+    ax.set_ylabel("mean_rms_all")
+    ax.set_title("Stationary subset A/B across regimes")
+    ax.legend()
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
+def _write_plot_readme(out_root: Path, generated_paths: list[Path], grid_csv: Path, ab_csv: Path) -> Path:
+    """Write a short README describing plot inputs and outputs."""
+    readme_path = out_root / "st_rbf_parameter_selection_plots_README.txt"
+    lines = [
+        f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+        f"input_grid_csv: {grid_csv}",
+        f"input_stationary_ab_csv: {ab_csv}",
+        "selected_default_point: ell_space=4.0, ell_time=0.4",
+        "selected_stationary_default: use_stationary_subset=0 (off)",
+        "generated_plots:",
+    ]
+    lines.extend([f"- {p.name}" for p in sorted(generated_paths)])
+    readme_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return readme_path
+
+
 # %% ADDITIONAL BENCHMARKS (Python API)
 RUN_CREATE_SYNTHETIC_DATASET = False
 RUN_PARAMETER_SWEEP = False
 RUN_AGGREGATION = False
-RUN_STATIONARY_AB_TESTS = True
-
-synthetic_dir = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark 2"
-out_root = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark 2" / "driftcorr_results"
+RUN_STATIONARY_AB_TESTS = False
+RUN_PLOTS = False
 
 if RUN_CREATE_SYNTHETIC_DATASET:
     # 0) Ensure dataset exists or generate it once.
@@ -665,6 +847,76 @@ if RUN_STATIONARY_AB_TESTS:
     _write_stationary_ab_report(stationary_ab_summary, stationary_ab_report_path)
     print(f"[OK] Wrote stationary A/B summary CSV: {stationary_ab_csv_path}")
     print(f"[OK] Wrote stationary A/B markdown report: {stationary_ab_report_path}")
+
+if RUN_PLOTS:
+    generated: list[Path] = []
+    grid_csv = out_root / "st_rbf_grid_aggregated.csv"
+    ab_csv = out_root / "st_rbf_stationary_ab_summary.csv"
+
+    if grid_csv.exists():
+        grid = pd.read_csv(grid_csv)
+        if "regime" in grid.columns:
+            for regime in sorted(grid["regime"].dropna().astype(str).unique().tolist()):
+                reg = grid[grid["regime"].astype(str) == regime].copy()
+                p1 = out_root / f"st_rbf_grid_heatmap_mean_rms_all__regime_{regime}.png"
+                if _plot_heatmap(reg, "mean_rms_all", f"{regime}: mean_rms_all", p1, highlight=(4.0, 0.4)):
+                    generated.append(p1)
+                p2 = out_root / f"st_rbf_grid_heatmap_mean_drift_bias_abs__regime_{regime}.png"
+                if _plot_heatmap(
+                    reg,
+                    "mean_drift_bias_abs",
+                    f"{regime}: mean_drift_bias_abs",
+                    p2,
+                    highlight=(4.0, 0.4),
+                ):
+                    generated.append(p2)
+
+            g_rms = (
+                grid.groupby(["ell_space", "ell_time"], as_index=False)
+                .agg(mean_rms_all=("mean_rms_all", "mean"))
+                .copy()
+            )
+            p3 = out_root / "st_rbf_grid_heatmap_mean_rms_all__across_regimes.png"
+            if _plot_heatmap(g_rms, "mean_rms_all", "Across regimes: mean_rms_all", p3, highlight=(4.0, 0.4)):
+                generated.append(p3)
+
+            g_bias = (
+                grid.groupby(["ell_space", "ell_time"], as_index=False)
+                .agg(mean_drift_bias_abs=("mean_drift_bias_abs", "mean"))
+                .copy()
+            )
+            p4 = out_root / "st_rbf_grid_heatmap_mean_drift_bias_abs__across_regimes.png"
+            if _plot_heatmap(
+                g_bias,
+                "mean_drift_bias_abs",
+                "Across regimes: mean_drift_bias_abs",
+                p4,
+                highlight=(4.0, 0.4),
+            ):
+                generated.append(p4)
+        else:
+            print(f"[WARN] Grid plots skipped: missing 'regime' column in {grid_csv}")
+    else:
+        print(f"[WARN] Grid plots skipped: missing input CSV {grid_csv}")
+
+    if ab_csv.exists():
+        ab = pd.read_csv(ab_csv)
+        if "regime" in ab.columns:
+            for regime in sorted(ab["regime"].dropna().astype(str).unique().tolist()):
+                p = out_root / f"st_rbf_stationary_subset_ab__mean_rms_all__regime_{regime}.png"
+                if _plot_stationary_ab(ab, regime=regime, out_path=p, highlight=(4.0, 0.4)):
+                    generated.append(p)
+            p_all = out_root / "st_rbf_stationary_subset_ab__mean_rms_all__all_regimes.png"
+            if _plot_stationary_ab(ab, regime=None, out_path=p_all, highlight=(4.0, 0.4)):
+                generated.append(p_all)
+        else:
+            print(f"[WARN] Stationary A/B plots skipped: missing 'regime' column in {ab_csv}")
+    else:
+        print(f"[WARN] Stationary A/B plots skipped: missing input CSV {ab_csv}")
+
+    readme_plot = _write_plot_readme(out_root=out_root, generated_paths=generated, grid_csv=grid_csv, ab_csv=ab_csv)
+    print(f"[OK] Wrote plotting README: {readme_plot}")
+    print(f"[OK] Generated {len(generated)} plot(s) in {out_root}")
 
 print("[INFO] Additional benchmarks and aggregation complete.")
 # %% END

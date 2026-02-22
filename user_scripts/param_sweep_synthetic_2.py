@@ -193,6 +193,47 @@ def _load_and_standardize_metrics(csv_path: Path) -> pd.DataFrame:
     return standardized
 
 
+def _safe_mean_std(values: np.ndarray) -> tuple[float, float]:
+    """Return mean/std on finite values, or (nan, nan) if none are finite."""
+    vals = np.asarray(values, dtype=float).reshape(-1)
+    mask = np.isfinite(vals)
+    if not np.any(mask):
+        return float("nan"), float("nan")
+    cur = vals[mask]
+    return float(np.mean(cur)), float(np.std(cur, ddof=0))
+
+
+def _drift_bias_from_per_seed_files(grid_dir: Path, regime: str, seed: int, method: str = "st_rbf") -> float:
+    """Load per-seed drift-bias CSV(s) and return mean drift-bias magnitude.
+
+    Expected files (inside run directory):
+    - `*_gt_drift_bias_over_time_<method>.csv`
+    """
+    run_dir = grid_dir / f"{regime}_seed_{int(seed):03d}"
+    if not run_dir.exists():
+        return float("nan")
+    files = sorted(run_dir.glob(f"*/*_gt_drift_bias_over_time_{method}.csv"))
+    if not files:
+        return float("nan")
+
+    per_file_vals: list[float] = []
+    for path in files:
+        try:
+            df = pd.read_csv(path)
+        except Exception:
+            continue
+        if "drift_bias_norm" not in df.columns:
+            continue
+        m, _ = _safe_mean_std(pd.to_numeric(df["drift_bias_norm"], errors="coerce").to_numpy(float))
+        if np.isfinite(m):
+            per_file_vals.append(float(m))
+
+    if not per_file_vals:
+        return float("nan")
+    m, _ = _safe_mean_std(np.asarray(per_file_vals, dtype=float))
+    return float(m)
+
+
 def _aggregate_grid(out_root: Path) -> pd.DataFrame:
     """Aggregate all ST-RBF grid outputs into one tidy table."""
     if not out_root.exists():
@@ -239,20 +280,39 @@ def _aggregate_grid(out_root: Path) -> pd.DataFrame:
                 print(f"[WARN] No st_rbf rows for regime='{regime}' in {csv_path}")
                 continue
 
+            # Fallback: derive drift-bias scalar from per-seed per-time bias files.
+            if "drift_bias_abs" in subset.columns:
+                need_bias = ~np.isfinite(pd.to_numeric(subset["drift_bias_abs"], errors="coerce").to_numpy(float))
+                if bool(np.any(need_bias)):
+                    for idx in subset.index[need_bias]:
+                        seed_val = pd.to_numeric(subset.loc[idx, "seed"], errors="coerce")
+                        if not np.isfinite(seed_val):
+                            continue
+                        subset.loc[idx, "drift_bias_abs"] = _drift_bias_from_per_seed_files(
+                            grid_dir=grid_dir,
+                            regime=str(regime),
+                            seed=int(seed_val),
+                            method="st_rbf",
+                        )
+
             n_seeds = int(pd.to_numeric(subset["seed"], errors="coerce").dropna().nunique())
+            mean_rms_all, std_rms_all = _safe_mean_std(subset["rms_all"].to_numpy(float))
+            mean_rms_stationary, std_rms_stationary = _safe_mean_std(subset["rms_stationary"].to_numpy(float))
+            mean_rms_migrating, std_rms_migrating = _safe_mean_std(subset["rms_migrating"].to_numpy(float))
+            mean_drift_bias_abs, std_drift_bias_abs = _safe_mean_std(subset["drift_bias_abs"].to_numpy(float))
             row = {
                 "regime": str(regime),
                 "ell_space": ell_space,
                 "ell_time": ell_time,
                 "n_seeds_found": n_seeds,
-                "mean_rms_all": float(np.nanmean(subset["rms_all"].to_numpy(float))),
-                "std_rms_all": float(np.nanstd(subset["rms_all"].to_numpy(float), ddof=0)),
-                "mean_rms_stationary": float(np.nanmean(subset["rms_stationary"].to_numpy(float))),
-                "std_rms_stationary": float(np.nanstd(subset["rms_stationary"].to_numpy(float), ddof=0)),
-                "mean_rms_migrating": float(np.nanmean(subset["rms_migrating"].to_numpy(float))),
-                "std_rms_migrating": float(np.nanstd(subset["rms_migrating"].to_numpy(float), ddof=0)),
-                "mean_drift_bias_abs": float(np.nanmean(subset["drift_bias_abs"].to_numpy(float))),
-                "std_drift_bias_abs": float(np.nanstd(subset["drift_bias_abs"].to_numpy(float), ddof=0)),
+                "mean_rms_all": mean_rms_all,
+                "std_rms_all": std_rms_all,
+                "mean_rms_stationary": mean_rms_stationary,
+                "std_rms_stationary": std_rms_stationary,
+                "mean_rms_migrating": mean_rms_migrating,
+                "std_rms_migrating": std_rms_migrating,
+                "mean_drift_bias_abs": mean_drift_bias_abs,
+                "std_drift_bias_abs": std_drift_bias_abs,
             }
             rows.append(row)
 

@@ -14,6 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -667,6 +669,260 @@ def _ensure_repro_dataset_exists() -> Path:
     return SYNTH_REPRO_ROOT
 
 
+def _discover_method_timeseries_files(experiment_root: Path, method: str) -> dict[str, Path]:
+    """Find `*_gt_rms_over_time_<method>.csv` files and map them by file stem."""
+    out: dict[str, Path] = {}
+    if not experiment_root.exists():
+        return out
+
+    suffix = f"_gt_rms_over_time_{method}.csv"
+
+    # Preferred layout: <experiment_root>/<file_stem>/<file_stem>_gt_rms_over_time_<method>.csv
+    for d in sorted([p for p in experiment_root.iterdir() if p.is_dir()]):
+        cand = d / f"{d.name}{suffix}"
+        if cand.exists():
+            out[d.name] = cand
+
+    # One nested level fallback: <experiment_root>/<run_id>/<file_stem>/<file_stem>_gt_rms_over_time_<method>.csv
+    for d in sorted([p for p in experiment_root.iterdir() if p.is_dir()]):
+        for sd in sorted([p for p in d.iterdir() if p.is_dir()]):
+            cand = sd / f"{sd.name}{suffix}"
+            if cand.exists() and sd.name not in out:
+                out[sd.name] = cand
+
+    if out:
+        return out
+
+    # Recursive fallback for arbitrary layouts.
+    tmp: dict[str, Path] = {}
+    for p in experiment_root.rglob(f"*{suffix}"):
+        name = p.name
+        if not name.endswith(suffix):
+            continue
+        stem = name[: -len(suffix)]
+        prev = tmp.get(stem)
+        if prev is None or len(p.parts) < len(prev.parts):
+            tmp[stem] = p
+    return tmp
+
+
+def _load_rms_timeseries(path: Path) -> pd.DataFrame | None:
+    """Load one RMS-over-time CSV and standardize columns to `Time`, `rms_error`."""
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        print(f"[WARN] Failed to read {path}: {exc}")
+        return None
+    if df.empty:
+        return None
+
+    lower = {c.lower(): c for c in df.columns}
+    time_col = lower.get("time")
+    if time_col is None:
+        time_candidates = [c for c in df.columns if "time" in c.lower()]
+        time_col = time_candidates[0] if time_candidates else None
+    if time_col is None:
+        print(f"[WARN] No time column found in {path}")
+        return None
+
+    preferred_vals = ["rms_error", "rms", "rms error"]
+    val_col = None
+    for key in preferred_vals:
+        if key in lower:
+            val_col = lower[key]
+            break
+    if val_col is None:
+        numeric_cols = [c for c in df.columns if c != time_col and pd.api.types.is_numeric_dtype(df[c])]
+        if not numeric_cols:
+            print(f"[WARN] No RMS value column found in {path}")
+            return None
+        val_col = numeric_cols[0]
+
+    out = pd.DataFrame(
+        {
+            "Time": pd.to_numeric(df[time_col], errors="coerce"),
+            "rms_error": pd.to_numeric(df[val_col], errors="coerce"),
+        }
+    ).dropna(subset=["Time", "rms_error"])
+    if out.empty:
+        return None
+    return out.sort_values("Time").reset_index(drop=True)
+
+
+def _load_method_timeseries(experiment_root: Path, method: str) -> dict[str, pd.DataFrame]:
+    files = _discover_method_timeseries_files(experiment_root, method)
+    out: dict[str, pd.DataFrame] = {}
+    for stem, path in files.items():
+        ts = _load_rms_timeseries(path)
+        if ts is not None and not ts.empty:
+            out[stem] = ts
+    return out
+
+
+def _aggregate_timeseries(series_by_file: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    for stem, ts in series_by_file.items():
+        tmp = ts.copy()
+        tmp["file_stem"] = stem
+        rows.append(tmp[["Time", "rms_error", "file_stem"]])
+    if not rows:
+        return pd.DataFrame(columns=["Time", "mean", "std", "n"])
+    all_df = pd.concat(rows, ignore_index=True)
+    agg = (
+        all_df.groupby("Time", as_index=False)["rms_error"]
+        .agg(mean="mean", std="std", n="count")
+        .sort_values("Time")
+        .reset_index(drop=True)
+    )
+    agg["std"] = pd.to_numeric(agg["std"], errors="coerce").fillna(0.0)
+    return agg
+
+
+def _plot_timeseries_comparison(
+    label_to_series: dict[str, dict[str, pd.DataFrame]],
+    out_path: Path,
+    title: str,
+) -> bool:
+    """Plot aggregated mean±std RMS-over-time curves for multiple labels."""
+    agg_by_label: dict[str, pd.DataFrame] = {}
+    for label, m in label_to_series.items():
+        agg = _aggregate_timeseries(m)
+        if not agg.empty:
+            agg_by_label[label] = agg
+    if not agg_by_label:
+        print(f"[WARN] No timeseries data available for {out_path.name}")
+        return False
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.6))
+    for label, agg in agg_by_label.items():
+        x = agg["Time"].to_numpy(float)
+        y = agg["mean"].to_numpy(float)
+        s = agg["std"].to_numpy(float)
+        ax.plot(x, y, marker="o", linewidth=1.8, label=label)
+        ax.fill_between(x, y - s, y + s, alpha=0.15)
+    ax.set_xlabel("Time")
+    ax.set_ylabel("RMS error (um)")
+    ax.set_title(title)
+    ax.set_ylim(bottom=0.0)
+    ax.legend()
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
+def _plot_timeseries_per_file(
+    label_to_series: dict[str, dict[str, pd.DataFrame]],
+    out_dir: Path,
+    filename_prefix: str,
+) -> list[Path]:
+    """Plot per-file RMS-over-time curves for labels where data exists."""
+    generated: list[Path] = []
+    stems: set[str] = set()
+    for m in label_to_series.values():
+        stems |= set(m.keys())
+    for stem in sorted(stems):
+        present = {label: m[stem] for label, m in label_to_series.items() if stem in m}
+        if len(present) < 2:
+            continue
+        fig, ax = plt.subplots(figsize=(7.0, 4.6))
+        for label, ts in present.items():
+            ax.plot(ts["Time"].to_numpy(float), ts["rms_error"].to_numpy(float), marker="o", linewidth=1.8, label=label)
+        ax.set_xlabel("Time")
+        ax.set_ylabel("RMS error (um)")
+        ax.set_title(f"{filename_prefix}: {stem}")
+        ax.set_ylim(bottom=0.0)
+        ax.legend()
+        fig.tight_layout()
+        out_path = out_dir / f"{filename_prefix}__{stem}.png"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=300)
+        plt.close(fig)
+        generated.append(out_path)
+    return generated
+
+
+def _discover_gt_metrics_summary_files(experiment_root: Path) -> dict[str, Path]:
+    """Find `*_gt_metrics_summary.csv` files and map them by file stem."""
+    out: dict[str, Path] = {}
+    if not experiment_root.exists():
+        return out
+    suffix = "_gt_metrics_summary.csv"
+    for d in sorted([p for p in experiment_root.iterdir() if p.is_dir()]):
+        cand = d / f"{d.name}{suffix}"
+        if cand.exists():
+            out[d.name] = cand
+    for d in sorted([p for p in experiment_root.iterdir() if p.is_dir()]):
+        for sd in sorted([p for p in d.iterdir() if p.is_dir()]):
+            cand = sd / f"{sd.name}{suffix}"
+            if cand.exists() and sd.name not in out:
+                out[sd.name] = cand
+    if out:
+        return out
+    tmp: dict[str, Path] = {}
+    for p in experiment_root.rglob(f"*{suffix}"):
+        name = p.name
+        if not name.endswith(suffix):
+            continue
+        stem = name[: -len(suffix)]
+        prev = tmp.get(stem)
+        if prev is None or len(p.parts) < len(prev.parts):
+            tmp[stem] = p
+    return tmp
+
+
+def _collect_scalar_metric(experiment_root: Path, method: str, metric_col: str = "overall_rms_error") -> np.ndarray:
+    """Collect a scalar metric for one method from `*_gt_metrics_summary.csv` files."""
+    vals: list[float] = []
+    for _, path in _discover_gt_metrics_summary_files(experiment_root).items():
+        try:
+            df = pd.read_csv(path)
+        except Exception:
+            continue
+        if metric_col not in df.columns:
+            continue
+        if "method" in df.columns:
+            sub = df[df["method"].astype(str) == method]
+            if sub.empty:
+                continue
+            v = pd.to_numeric(sub.iloc[0][metric_col], errors="coerce")
+        else:
+            v = pd.to_numeric(df.iloc[0][metric_col], errors="coerce")
+        if np.isfinite(v):
+            vals.append(float(v))
+    return np.asarray(vals, dtype=float)
+
+
+def _plot_scalar_summary_bar(
+    label_to_values: dict[str, np.ndarray],
+    out_path: Path,
+    title: str,
+    y_label: str = "overall_rms_error",
+) -> bool:
+    plot_labels = [k for k, v in label_to_values.items() if np.asarray(v).size > 0]
+    if not plot_labels:
+        print(f"[WARN] Scalar summary bar skipped ({out_path.name}): no values available.")
+        return False
+
+    means = [float(np.mean(label_to_values[k])) for k in plot_labels]
+    stds = [float(np.std(label_to_values[k], ddof=0)) for k in plot_labels]
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    x = np.arange(len(plot_labels), dtype=float)
+    ax.bar(x, means, yerr=stds, capsize=4)
+    ax.set_xticks(x)
+    ax.set_xticklabels(plot_labels, rotation=20, ha="right")
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+    ax.set_ylim(bottom=0.0)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
 # %% Synthetic benchmark: Cell 1 / generate dataset once (Python API)
 RUN_SYNTH_NEW_CELL1_GENERATE_ONCE = False
 if RUN_SYNTH_NEW_CELL1_GENERATE_ONCE:
@@ -849,6 +1105,116 @@ if RUN_SYNTH_NEW_CELL6_PAPER_REGRESSION:
         methods="rbf,rigid,local,st_rbf",
         reuse_existing=1,
     )
+
+
+# %% PAPER SUMMARY PLOTS (MoE + robust modes, no rigid/local)
+RUN_PAPER_SUMMARY_PLOTS = False
+if RUN_PAPER_SUMMARY_PLOTS:
+    paper_out = SYNTH_REPRO_RESULTS / "paper_summary_plots"
+    paper_out.mkdir(parents=True, exist_ok=True)
+
+    # A) ST-RBF MoE k comparison (vs plain ST-RBF)
+    moe_root_candidates = [
+        SYNTH_REPRO_RESULTS / "baseline_suite",
+        PROJECT_ROOT / "Synthetic IMARIS files st_moe" / "driftcorr_results",
+    ]
+    moe_methods = {
+        "st_rbf": "st_rbf",
+        "st_rbf_moe_k2": "st_rbf_moe_k2",
+        "st_rbf_moe_k3": "st_rbf_moe_k3",
+        "st_rbf_moe_k5": "st_rbf_moe_k5",
+    }
+    moe_label_to_series: dict[str, dict[str, pd.DataFrame]] = {}
+    for label, method_name in moe_methods.items():
+        best_map: dict[str, pd.DataFrame] = {}
+        for root in moe_root_candidates:
+            series_map = _load_method_timeseries(root, method_name)
+            if len(series_map) > len(best_map):
+                best_map = series_map
+        if best_map:
+            moe_label_to_series[label] = best_map
+        else:
+            print(f"[WARN] Missing MoE timeseries for {label}")
+
+    _plot_timeseries_comparison(
+        moe_label_to_series,
+        paper_out / "moe_k_comparison__aggregate.png",
+        title="ST-RBF MoE k comparison (aggregate)",
+    )
+    _plot_timeseries_per_file(moe_label_to_series, paper_out, "moe_k_comparison")
+
+    moe_label_to_vals: dict[str, np.ndarray] = {}
+    for label, method_name in moe_methods.items():
+        best_vals = np.array([], dtype=float)
+        for root in moe_root_candidates:
+            vals = _collect_scalar_metric(root, method_name, metric_col="overall_rms_error")
+            if vals.size > best_vals.size:
+                best_vals = vals
+        if best_vals.size > 0:
+            moe_label_to_vals[label] = best_vals
+    _plot_scalar_summary_bar(
+        moe_label_to_vals,
+        paper_out / "moe_k_summary_bar__overall_rms.png",
+        title="ST-RBF MoE k: overall RMS summary",
+        y_label="overall_rms_error",
+    )
+
+    # B) Robust mode comparison (RBF): sample_trim vs irls_huber
+    rbf_robust_roots = {
+        "sample_trim": SYNTH_REPRO_RESULTS / "rbf_ab_sampletrim",
+        "irls_huber": SYNTH_REPRO_RESULTS / "rbf_ab_irls",
+    }
+    rbf_label_to_series = {label: _load_method_timeseries(root, "rbf") for label, root in rbf_robust_roots.items()}
+    for label, series_map in rbf_label_to_series.items():
+        if not series_map:
+            print(f"[WARN] Missing RBF robust timeseries for {label}")
+    _plot_timeseries_comparison(
+        rbf_label_to_series,
+        paper_out / "rbf_robust_mode_ab__aggregate.png",
+        title="RBF robust mode A/B (aggregate)",
+    )
+    _plot_timeseries_per_file(rbf_label_to_series, paper_out, "rbf_robust_mode_ab")
+
+    rbf_label_to_vals = {
+        label: _collect_scalar_metric(root, "rbf", metric_col="overall_rms_error")
+        for label, root in rbf_robust_roots.items()
+    }
+    _plot_scalar_summary_bar(
+        rbf_label_to_vals,
+        paper_out / "rbf_robust_summary_bar__overall_rms.png",
+        title="RBF robust mode: overall RMS summary",
+        y_label="overall_rms_error",
+    )
+
+    # C) Robust mode comparison (ST-RBF): sample_trim vs irls_huber vs hybrid_track_irls
+    st_robust_roots = {
+        "sample_trim": SYNTH_REPRO_RESULTS / "st_rbf_ab_sampletrim",
+        "irls_huber": SYNTH_REPRO_RESULTS / "st_rbf_ab_irls",
+        "hybrid_track_irls": SYNTH_REPRO_RESULTS / "st_rbf_ab_hybrid_track_irls",
+    }
+    st_label_to_series = {label: _load_method_timeseries(root, "st_rbf") for label, root in st_robust_roots.items()}
+    for label, series_map in st_label_to_series.items():
+        if not series_map:
+            print(f"[WARN] Missing ST-RBF robust timeseries for {label}")
+    _plot_timeseries_comparison(
+        st_label_to_series,
+        paper_out / "st_rbf_robust_mode_abc__aggregate.png",
+        title="ST-RBF robust mode A/B/C (aggregate)",
+    )
+    _plot_timeseries_per_file(st_label_to_series, paper_out, "st_rbf_robust_mode_abc")
+
+    st_label_to_vals = {
+        label: _collect_scalar_metric(root, "st_rbf", metric_col="overall_rms_error")
+        for label, root in st_robust_roots.items()
+    }
+    _plot_scalar_summary_bar(
+        st_label_to_vals,
+        paper_out / "st_rbf_robust_summary_bar__overall_rms.png",
+        title="ST-RBF robust mode: overall RMS summary",
+        y_label="overall_rms_error",
+    )
+
+    print(f"[OK] Paper summary plots written to: {paper_out}")
 
 
 # %% END

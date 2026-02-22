@@ -169,4 +169,4 @@ It contains these sections:
 
 Current tuned defaults (Feb 2026):
 - RBF defaults: `--m-centers 45 --lam 3e-4 --sigma 180 --temporal-gamma 0`
-- ST-RBF defaults: `--st-m-centers 70 --st-ell-space 1.2 --st-ell-time 0.3 --st-robust-keep-fraction 0.8 --st-refine-iters 2 --lam 3e-4`
+- ST-RBF defaults: `--st-m-centers 70 --st-ell-space 4.0 --st-ell-time 0.4 --st-robust-keep-fraction 0.83 --st-refine-iters 3 --st-lam 8.5e-4`

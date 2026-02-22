@@ -1118,8 +1118,8 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
 
     p.add_argument("--st-m-centers", type=int, default=70)
     p.add_argument("--st-lam", type=float, default=8.5e-4)
-    p.add_argument("--st-ell-space", type=float, default=2.0)
-    p.add_argument("--st-ell-time", type=float, default=0.8)
+    p.add_argument("--st-ell-space", type=float, default=4.0)
+    p.add_argument("--st-ell-time", type=float, default=0.4)
     p.add_argument("--st-robust-keep-fraction", type=float, default=0.83)
     p.add_argument("--st-robust-iters", type=int, default=2)
     p.add_argument("--space-input-mode", choices=["row_position", "track_anchor", "ref_position"], default="ref_position")

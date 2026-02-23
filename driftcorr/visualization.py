@@ -3,7 +3,8 @@
 This module produces method-comparison figures designed for manual review:
 - trajectory-level comparison plots (original vs corrected),
 - frame-by-frame 3D snapshots for scrolling inspection,
-- optional ground-truth panel on synthetic data (GT | Original | Corrected).
+- optional ground-truth-aware panels on synthetic data:
+  (GT | Original input | Corrected | GT-Corrected residuals).
 
 These plots complement scalar metrics by revealing local geometric artifacts,
 over-correction, or residual drift patterns that are difficult to diagnose from
@@ -308,7 +309,12 @@ def plot_tracks_over_time_panels(
     title_prefix: str = "",
     df_groundtruth: pd.DataFrame | None = None,
 ) -> Path:
-    """Plot full track trajectories over all timepoints in 2 panels (or 3 with GT)."""
+    """Plot full track trajectories over all timepoints.
+
+    Layout:
+    - with ground truth: 2x2 (GT, Original input, Corrected, GT-Corrected residuals)
+    - without ground truth: 1x2 (Original input, Corrected)
+    """
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -316,10 +322,11 @@ def plot_tracks_over_time_panels(
 
     has_gt = df_groundtruth is not None and df_groundtruth.shape[0] > 0
     if has_gt:
-        fig = plt.figure(figsize=(20, 6), constrained_layout=True)
-        ax_gt = fig.add_subplot(131, projection="3d")
-        ax1 = fig.add_subplot(132, projection="3d")
-        ax2 = fig.add_subplot(133, projection="3d")
+        fig = plt.figure(figsize=(16, 14), constrained_layout=True)
+        ax_gt = fig.add_subplot(221, projection="3d")
+        ax1 = fig.add_subplot(222, projection="3d")
+        ax2 = fig.add_subplot(223, projection="3d")
+        ax_res = fig.add_subplot(224, projection="3d")
     else:
         fig = plt.figure(figsize=(14, 6), constrained_layout=True)
         ax1 = fig.add_subplot(121, projection="3d")
@@ -342,7 +349,7 @@ def plot_tracks_over_time_panels(
     for tid in df_orig["TrackID"].unique():
         d = df_orig[df_orig["TrackID"] == tid]
         ax1.plot(d["Position X"], d["Position Y"], d["Position Z"], alpha=0.8, linewidth=1.0)
-    ax1.set_title("Original tracks (all frames)")
+    ax1.set_title("Original input tracks (all frames)")
     ax1.set_xlim(x_min, x_max)
     ax1.set_ylim(y_min, y_max)
     ax1.set_zlim(z_min, z_max)
@@ -362,6 +369,47 @@ def plot_tracks_over_time_panels(
     ax2.set_ylabel("Y")
     ax2.set_zlabel("Z")
     ax2.view_init(elev=25, azim=-60)
+
+    if has_gt:
+        assert df_groundtruth is not None
+        df_res = (
+            df_groundtruth[["TrackID", "Time", "Position X", "Position Y", "Position Z"]]
+            .merge(
+                df_corr[["TrackID", "Time", "Position X_corr", "Position Y_corr", "Position Z_corr"]],
+                on=["TrackID", "Time"],
+                how="inner",
+            )
+            .copy()
+        )
+        if df_res.shape[0] > 0:
+            df_res["Residual X"] = df_res["Position X"] - df_res["Position X_corr"]
+            df_res["Residual Y"] = df_res["Position Y"] - df_res["Position Y_corr"]
+            df_res["Residual Z"] = df_res["Position Z"] - df_res["Position Z_corr"]
+
+            for tid in df_res["TrackID"].unique():
+                d = df_res[df_res["TrackID"] == tid]
+                ax_res.plot(d["Residual X"], d["Residual Y"], d["Residual Z"], alpha=0.8, linewidth=1.0)
+
+            rmax = float(
+                np.nanmax(
+                    np.abs(
+                        df_res[["Residual X", "Residual Y", "Residual Z"]].to_numpy(float)
+                    )
+                )
+            )
+            if not np.isfinite(rmax) or rmax <= 0:
+                rmax = 1.0
+            ax_res.set_xlim(-rmax, rmax)
+            ax_res.set_ylim(-rmax, rmax)
+            ax_res.set_zlim(-rmax, rmax)
+            ax_res.set_xlabel("dX")
+            ax_res.set_ylabel("dY")
+            ax_res.set_zlabel("dZ")
+            ax_res.set_title("Ground Truth - Corrected tracks (all frames)")
+            ax_res.view_init(elev=25, azim=-60)
+        else:
+            ax_res.text2D(0.2, 0.5, "No matched GT/corrected samples", transform=ax_res.transAxes)
+            ax_res.set_title("Ground Truth - Corrected tracks (all frames)")
 
     if title_prefix:
         fig.suptitle(f"{title_prefix} | Track trajectories over all frames", fontsize=12)

@@ -312,7 +312,7 @@ def plot_tracks_over_time_panels(
     """Plot full track trajectories over all timepoints.
 
     Layout:
-    - with ground truth: 2x2 (GT, Original input, Corrected, GT-Corrected residuals)
+    - with ground truth: 2x2 (GT, Original input, Corrected, Overlay GT+Corrected)
     - without ground truth: 1x2 (Original input, Corrected)
     """
     out_path = Path(out_path)
@@ -326,16 +326,17 @@ def plot_tracks_over_time_panels(
         ax_gt = fig.add_subplot(221, projection="3d")
         ax1 = fig.add_subplot(222, projection="3d")
         ax2 = fig.add_subplot(223, projection="3d")
-        ax_res = fig.add_subplot(224, projection="3d")
+        ax_overlay = fig.add_subplot(224, projection="3d")
     else:
         fig = plt.figure(figsize=(14, 6), constrained_layout=True)
         ax1 = fig.add_subplot(121, projection="3d")
         ax2 = fig.add_subplot(122, projection="3d")
 
+    # Panel: GT
     if has_gt:
         assert df_groundtruth is not None
-        for tid in df_groundtruth["TrackID"].unique():
-            d = df_groundtruth[df_groundtruth["TrackID"] == tid]
+        for tid in df_groundtruth["TrackID"].dropna().unique():
+            d = df_groundtruth[df_groundtruth["TrackID"] == tid].sort_values("Time")
             ax_gt.plot(d["Position X"], d["Position Y"], d["Position Z"], alpha=0.8, linewidth=1.0)
         ax_gt.set_title("Ground Truth tracks (all frames)")
         ax_gt.set_xlim(x_min, x_max)
@@ -346,8 +347,9 @@ def plot_tracks_over_time_panels(
         ax_gt.set_zlabel("Z")
         ax_gt.view_init(elev=25, azim=-60)
 
-    for tid in df_orig["TrackID"].unique():
-        d = df_orig[df_orig["TrackID"] == tid]
+    # Panel: original input
+    for tid in df_orig["TrackID"].dropna().unique():
+        d = df_orig[df_orig["TrackID"] == tid].sort_values("Time")
         ax1.plot(d["Position X"], d["Position Y"], d["Position Z"], alpha=0.8, linewidth=1.0)
     ax1.set_title("Original input tracks (all frames)")
     ax1.set_xlim(x_min, x_max)
@@ -358,8 +360,9 @@ def plot_tracks_over_time_panels(
     ax1.set_zlabel("Z")
     ax1.view_init(elev=25, azim=-60)
 
-    for tid in df_corr["TrackID"].unique():
-        d = df_corr[df_corr["TrackID"] == tid]
+    # Panel: corrected
+    for tid in df_corr["TrackID"].dropna().unique():
+        d = df_corr[df_corr["TrackID"] == tid].sort_values("Time")
         ax2.plot(d["Position X_corr"], d["Position Y_corr"], d["Position Z_corr"], alpha=0.8, linewidth=1.0)
     ax2.set_title("Corrected tracks (all frames)")
     ax2.set_xlim(x_min, x_max)
@@ -370,49 +373,72 @@ def plot_tracks_over_time_panels(
     ax2.set_zlabel("Z")
     ax2.view_init(elev=25, azim=-60)
 
+    # Panel: overlay GT + corrected (no residual computation, no merge)
     if has_gt:
         assert df_groundtruth is not None
-        df_res = (
-            df_groundtruth[["TrackID", "Time", "Position X", "Position Y", "Position Z"]]
-            .merge(
-                df_corr[["TrackID", "Time", "Position X_corr", "Position Y_corr", "Position Z_corr"]],
-                on=["TrackID", "Time"],
-                how="inner",
-            )
-            .copy()
-        )
-        if df_res.shape[0] > 0:
-            df_res["Residual X"] = df_res["Position X"] - df_res["Position X_corr"]
-            df_res["Residual Y"] = df_res["Position Y"] - df_res["Position Y_corr"]
-            df_res["Residual Z"] = df_res["Position Z"] - df_res["Position Z_corr"]
 
-            for tid in df_res["TrackID"].unique():
-                d = df_res[df_res["TrackID"] == tid]
-                ax_res.plot(d["Residual X"], d["Residual Y"], d["Residual Z"], alpha=0.8, linewidth=1.0)
+        gt_ids = set(df_groundtruth["TrackID"].dropna().unique().tolist())
+        corr_ids = set(df_corr["TrackID"].dropna().unique().tolist())
+        common_track_ids = sorted(gt_ids.intersection(corr_ids))
 
-            rmax = float(
-                np.nanmax(
-                    np.abs(
-                        df_res[["Residual X", "Residual Y", "Residual Z"]].to_numpy(float)
-                    )
+        if common_track_ids:
+            cmap = plt.get_cmap("turbo")
+            n_tracks = max(len(common_track_ids), 1)
+            denom = max(n_tracks - 1, 1)
+            color_by_tid = {tid: cmap(i / denom) for i, tid in enumerate(common_track_ids)}
+
+            for tid in common_track_ids:
+                c = color_by_tid[tid]
+
+                d_gt = df_groundtruth[df_groundtruth["TrackID"] == tid].sort_values("Time")
+                d_corr = df_corr[df_corr["TrackID"] == tid].sort_values("Time")
+
+                # GT: thin/dashed
+                ax_overlay.plot(
+                    d_gt["Position X"],
+                    d_gt["Position Y"],
+                    d_gt["Position Z"],
+                    color=c,
+                    linewidth=1.0,
+                    alpha=1.0,
+                    linestyle="-",
                 )
+
+                # Corrected: thick/solid on top
+                ax_overlay.plot(
+                    d_corr["Position X_corr"],
+                    d_corr["Position Y_corr"],
+                    d_corr["Position Z_corr"],
+                    color=c,
+                    linewidth=1.0,
+                    alpha=0.5,
+                    linestyle="-",
+                )
+
+            ax_overlay.set_title("Overlay: GT and corrected tracks (all frames)")
+            ax_overlay.set_xlim(x_min, x_max)
+            ax_overlay.set_ylim(y_min, y_max)
+            ax_overlay.set_zlim(z_min, z_max)
+            ax_overlay.set_xlabel("X")
+            ax_overlay.set_ylabel("Y")
+            ax_overlay.set_zlabel("Z")
+            ax_overlay.view_init(elev=25, azim=-60)
+            ax_overlay.text2D(
+                0.02,
+                0.98,
+                "GT: thin dashed, corrected: thick solid",
+                transform=ax_overlay.transAxes,
+                va="top",
+                fontsize=8,
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.7},
             )
-            if not np.isfinite(rmax) or rmax <= 0:
-                rmax = 1.0
-            ax_res.set_xlim(-rmax, rmax)
-            ax_res.set_ylim(-rmax, rmax)
-            ax_res.set_zlim(-rmax, rmax)
-            ax_res.set_xlabel("dX")
-            ax_res.set_ylabel("dY")
-            ax_res.set_zlabel("dZ")
-            ax_res.set_title("Ground Truth - Corrected tracks (all frames)")
-            ax_res.view_init(elev=25, azim=-60)
         else:
-            ax_res.text2D(0.2, 0.5, "No matched GT/corrected samples", transform=ax_res.transAxes)
-            ax_res.set_title("Ground Truth - Corrected tracks (all frames)")
+            ax_overlay.set_title("Overlay: GT and corrected tracks (all frames)")
+            ax_overlay.text2D(0.2, 0.5, "No common GT/corrected TrackIDs", transform=ax_overlay.transAxes)
 
     if title_prefix:
         fig.suptitle(f"{title_prefix} | Track trajectories over all frames", fontsize=12)
+
     plt.savefig(out_path, dpi=220)
     plt.close(fig)
     return out_path

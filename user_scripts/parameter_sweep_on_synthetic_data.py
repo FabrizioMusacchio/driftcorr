@@ -1,7 +1,10 @@
-"""Tutorial script that demonstrates how to run driftcorr from Python.
+"""Parameter sweeps and benchmark utilities on reproducible synthetic data.
 
 This script is intentionally organized in notebook-like cells (`# %% ...`) so users can
-run it in VS Code/PyCharm cell mode or as a normal Python script.
+run it in VS Code/PyCharm cell mode or as a normal Python script. All synthetic parameter
+study outputs are centralized under one root folder:
+
+`Synthetic IMARIS files parameter sweep`
 
 Author
 -------
@@ -71,6 +74,7 @@ except ModuleNotFoundError as exc:
 # %% GLOBAL SETTINGS
 IMARIS_DIR = PROJECT_ROOT / "IMARIS xls files"
 RESULTS_ROOT = IMARIS_DIR / "driftcorr_results_from_python"
+PARAM_SWEEP_SYNTH_ROOT = PROJECT_ROOT / "Synthetic IMARIS files parameter sweep"
 
 DEFAULT_METHODS = ["rbf", "rigid", "local", "st_rbf"]
 
@@ -124,6 +128,18 @@ OPTIONS = {
     "st_moe_cluster_mode": "track_anchor",
     "st_moe_drift_cap_factor": 3.0,
 }
+
+# ST-RBF grid/stationary subset benchmark parameters.
+ES_VALUES = [1.0, 2.0, 4.0]
+ET_VALUES = [0.4, 0.8, 1.6]
+STATIONARY_AB_CANDIDATES = [
+    {"name": "fast", "ell_space": 4.0, "ell_time": 0.4},
+    {"name": "smooth", "ell_space": 1.0, "ell_time": 1.6},
+]
+GRID_DIR_PATTERN = re.compile(r"^st_rbf_grid_es(?P<es>[-+]?\d*\.?\d+)_et(?P<et>[-+]?\d*\.?\d+)$")
+STATIONARY_AB_DIR_PATTERN = re.compile(
+    r"^st_rbf_stationary_ab_es(?P<es>[-+]?\d*\.?\d+)_et(?P<et>[-+]?\d*\.?\d+)_subset(?P<subset>[01])$"
+)
 
 # %% FUNCTIONS
 def run_methods_for_dataframe(
@@ -276,7 +292,6 @@ def run_methods_for_dataframe(
 
     return corr_by_method
 
-
 def postprocess_outputs(
     df_orig: pd.DataFrame,
     imaris_file: Path,
@@ -295,369 +310,18 @@ def postprocess_outputs(
     if gt is not None:
         save_groundtruth_evaluation_outputs(out_prefix, gt, corr_by_method, drift_field_groundtruth=drift_gt)
 
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: DEFAULT SETTINGS
-RUN_SYNTHETIC = False
-if RUN_SYNTHETIC:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files tutorial run 2"
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=2,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-
-    synthetic_results = synthetic_root / "driftcorr_results"
-
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix_syn = synthetic_results / file_path.stem / file_path.stem
-
-        corr_syn = run_methods_for_dataframe(
-            df=df_syn,
-            out_prefix=out_prefix_syn,
-            methods=DEFAULT_METHODS,
-            opts=OPTIONS,
-            use_stationary_subset=False)
-        postprocess_outputs(df_syn, file_path, out_prefix_syn, corr_syn)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: RBF center-mode + bias + coverage diagnostics
-
-RUN_SYNTHETIC_JOB_A_EXAMPLE = False
-if RUN_SYNTHETIC_JOB_A_EXAMPLE:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobA"
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=2,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-    opts_a = dict(OPTIONS)
-    opts_a["center_mode"] = "kmeans_pooled"
-    opts_a["center_pooled_time_stride"] = 1
-    opts_a["two_stage"] = 1
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts_a)
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: RBF robust-mode track_trim
-RUN_SYNTHETIC_JOB_B_EXAMPLE = False
-if RUN_SYNTHETIC_JOB_B_EXAMPLE:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobB"
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=2,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-    opts_b = dict(OPTIONS)
-    opts_b["robust_mode"] = "track_trim"
-    opts_b["track_trim_iters"] = 4
-    opts_b["center_mode"] = "pooled"
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts_b)
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: stationary-only fitting for RBF/ST-RBF
-RUN_SYNTHETIC_JOB_C_EXAMPLE = False
-if RUN_SYNTHETIC_JOB_C_EXAMPLE:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobC"
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=2,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-    opts_c = dict(OPTIONS)
-    opts_c["robust_mode"] = "track_trim"
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(
-            df=df_syn,
-            out_prefix=out_prefix,
-            methods=DEFAULT_METHODS,
-            opts=opts_c,
-            use_stationary_subset=True,
-        )
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: ST-RBF anchor mode + normalization + refinement
-RUN_SYNTHETIC_JOB_D_EXAMPLE = False
-if RUN_SYNTHETIC_JOB_D_EXAMPLE:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobD"
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=2,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-    opts_d = dict(OPTIONS)
-    opts_d["rbf_space_input_mode"] = "track_anchor"
-    opts_d["space_input_mode"] = "ref_position"
-    opts_d["st_refine_iters"] = 2
-    opts_d["two_stage"] = 1
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts_d)
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: two-stage translation + residual field
-RUN_SYNTHETIC_JOB_E_EXAMPLE = False
-if RUN_SYNTHETIC_JOB_E_EXAMPLE:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files jobE"
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=2,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-    opts_e = dict(OPTIONS)
-    opts_e["two_stage"] = 1
-    opts_e["center_mode"] = "pooled"
-    opts_e["rbf_space_input_mode"] = "track_anchor"
-    opts_e["space_input_mode"] = "track_anchor"
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts_e)
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: Task 1 (RBF anchor coordinates)
-RUN_SYNTHETIC_TASK1_RBF_ANCHOR = False
-if RUN_SYNTHETIC_TASK1_RBF_ANCHOR:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files task1_rbf_anchor"
-    #generate_synthetic_imaris_folder(out_dir=synthetic_root, n_files=2, n_tracks=80, n_times=20, seed=42)
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=5,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-    opts = dict(OPTIONS)
-    opts["rbf_space_input_mode"] = "track_anchor"
-    opts["space_input_mode"] = "ref_position"
-    opts["center_mode"] = "ref"
-    opts["temporal_gamma"] = 0.6
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts)
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: Task 2+3 (ST-RBF residual refinement + one-time two-stage)
-RUN_SYNTHETIC_TASK23_ST_REFINEMENT = False
-if RUN_SYNTHETIC_TASK23_ST_REFINEMENT:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files task23_st_refine"
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=5,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-    opts = dict(OPTIONS)
-    opts["rbf_space_input_mode"] = "track_anchor"
-    opts["space_input_mode"] = "ref_position"
-    opts["st_refine_iters"] = 3
-    opts["two_stage"] = 1
-    opts["st_robust_mode"] = "sample_trim"
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts)
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: Task 4 (ST-RBF track-level robust fitting)
-RUN_SYNTHETIC_TASK4_ST_TRACK_TRIM = False
-if RUN_SYNTHETIC_TASK4_ST_TRACK_TRIM:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files task4_st_tracktrim"
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=5,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-    opts = dict(OPTIONS)
-    opts["st_robust_mode"] = "track_trim"
-    opts["st_track_trim_iters"] = 4
-    opts["st_robust_keep_fraction"] = 0.9
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts)
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: Task 5 (bias + optional linear terms)
-RUN_SYNTHETIC_TASK5_LINEAR_TERMS = False
-if RUN_SYNTHETIC_TASK5_LINEAR_TERMS:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files task5_linear_terms"
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=5,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-    opts = dict(OPTIONS)
-    opts["rbf_linear_terms"] = 1
-    opts["two_stage"] = 1
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts)
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: Task 6 (RBF row_position fixed-point correction)
-RUN_SYNTHETIC_TASK6_RBF_FIXED_POINT = False
-if RUN_SYNTHETIC_TASK6_RBF_FIXED_POINT:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files task6_rbf_fixed_point"
-    synthetic = generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=5,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9)
-    opts = dict(OPTIONS)
-    opts["rbf_space_input_mode"] = "row_position"
-    opts["space_input_mode"] = "ref_position"
-    opts["row_position_iters"] = 5
-    opts["row_position_tol"] = 1e-4
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=DEFAULT_METHODS, opts=opts)
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: ST-RBF MoE comparison (K=2,3,5)
-RUN_SYNTHETIC_ST_MOE = False
-if RUN_SYNTHETIC_ST_MOE:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files st_moe"
-    generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=2,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9,
-        local_mode="piecewise_smooth",
-    )
-    opts = dict(OPTIONS)
-    opts["st_moe_k_list"] = [2, 3, 5]
-    methods = ["rigid", "local", "st_rbf", "st_rbf_moe"]
-    for file_path in list_imaris_xls_files(synthetic_root):
-        df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = synthetic_root / "driftcorr_results" / file_path.stem / file_path.stem
-        corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=methods, opts=opts)
-        postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: Regime suite (3 regimes x 5 seeds)
-RUN_SYNTHETIC_REGIME_SUITE = False
-if RUN_SYNTHETIC_REGIME_SUITE:
-    synthetic_regime_benchmark(
-        synthetic_dir=str(PROJECT_ROOT / "synthetic_regime_suite"),
-        methods="rbf,rigid,local,st_rbf,st_rbf_moe",
-        synthetic_n_seeds=5,
-        st_moe_k_list="2,3,5",
-    )
-
-# %% HOW TO GENERATE SYNTHETIC DATA ONLY (Python API synthetic_generate)
-RUN_SYNTHETIC_GENERATE_ONLY = False
-if RUN_SYNTHETIC_GENERATE_ONLY:
-    synthetic_generate(
-        synthetic_dir=str(PROJECT_ROOT / "Synthetic IMARIS files generated_only"),
-        synthetic_seed=123,
-        synthetic_n_files=2,
-    )
-
-# %% HOW TO RUN PAPER OUTPUT REGRESSION HARNESS (just checks whether outputs plots still match expected)
-RUN_PAPER_OUTPUT_REGRESSION = False
-if RUN_PAPER_OUTPUT_REGRESSION:
-    paper_regression(
-        synthetic_dir=str(PROJECT_ROOT / "Synthetic IMARIS files paper_regression"),
-        manifest=str(PROJECT_ROOT / "paper_outputs_manifest.txt"),
-        columns_manifest=str(PROJECT_ROOT / "paper_metrics_columns.json"),
-        methods="rbf,rigid,local,st_rbf",
-        reuse_existing=1,
-    )
-
-# %% HOW TO GENERATE AND RUN SYNTHETIC DATA: ST-RBF per-axis scaling A/B comparison
-RUN_SYNTHETIC_ST_SCALING_AB = False
-if RUN_SYNTHETIC_ST_SCALING_AB:
-    synthetic_root = PROJECT_ROOT / "Synthetic IMARIS files st_scaling_ab"
-    generate_synthetic_imaris_folder(
-        out_dir=synthetic_root,
-        n_files=1,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9,
-        local_mode="smooth",
-    )
-    file_path = list_imaris_xls_files(synthetic_root)[0]
-    df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-
-    opts_on = dict(OPTIONS)
-    opts_on["st_per_axis_scaling"] = 1
-    out_prefix_on = synthetic_root / "driftcorr_results" / "scaling_on" / file_path.stem
-    corr_on = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix_on, methods=["st_rbf"], opts=opts_on)
-    postprocess_outputs(df_syn, file_path, out_prefix_on, corr_on)
-
-    opts_off = dict(OPTIONS)
-    opts_off["st_per_axis_scaling"] = 0
-    out_prefix_off = synthetic_root / "driftcorr_results" / "scaling_off" / file_path.stem
-    corr_off = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix_off, methods=["st_rbf"], opts=opts_off)
-    postprocess_outputs(df_syn, file_path, out_prefix_off, corr_off)
-
-# %% ## Synthetic benchmark: reproducible dataset + new option A/B tests (helpers)
-SYNTH_REPRO_ROOT = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark 2"
-SYNTH_REPRO_RESULTS = SYNTH_REPRO_ROOT / "driftcorr_results"
+# %% PARAMETER SWEEP DATASET + OUTPUT HELPERS
+SYNTH_REPRO_ROOT = PARAM_SWEEP_SYNTH_ROOT
 FAIRNESS_SYNTHETIC_N_SEEDS = 10
 RIGID_KEEP_FRACTIONS = [0.5, 0.7, 0.85, 0.95]
 RIGID_INLIER_ITERS = [5, 15, 30]
 LOCAL_K_NEIGHBORS = [8, 12, 20, 30]
 LOCAL_ELL_FIELD = [80.0, 120.0, 180.0, 240.0]
 
+def _results_root(tag: str) -> Path:
+    """Return centralized result root `driftcorr_results_<tag>` inside the main synthetic folder."""
+    safe = str(tag).strip().replace(" ", "_").replace("-", "_")
+    return SYNTH_REPRO_ROOT / f"driftcorr_results_{safe}"
 
 def _ensure_repro_dataset_exists() -> Path:
     """API-first equivalent of --reuse-existing: generate once, then reuse."""
@@ -675,7 +339,6 @@ def _ensure_repro_dataset_exists() -> Path:
         local_mode="smooth",
     )
     return SYNTH_REPRO_ROOT
-
 
 def _discover_method_timeseries_files(experiment_root: Path, method: str) -> dict[str, Path]:
     """Find `*_gt_rms_over_time_<method>.csv` files and map them by file stem."""
@@ -712,7 +375,6 @@ def _discover_method_timeseries_files(experiment_root: Path, method: str) -> dic
         if prev is None or len(p.parts) < len(prev.parts):
             tmp[stem] = p
     return tmp
-
 
 def _load_rms_timeseries(path: Path) -> pd.DataFrame | None:
     """Load one RMS-over-time CSV and standardize columns to `Time`, `rms_error`."""
@@ -756,7 +418,6 @@ def _load_rms_timeseries(path: Path) -> pd.DataFrame | None:
         return None
     return out.sort_values("Time").reset_index(drop=True)
 
-
 def _load_method_timeseries(experiment_root: Path, method: str) -> dict[str, pd.DataFrame]:
     files = _discover_method_timeseries_files(experiment_root, method)
     out: dict[str, pd.DataFrame] = {}
@@ -765,7 +426,6 @@ def _load_method_timeseries(experiment_root: Path, method: str) -> dict[str, pd.
         if ts is not None and not ts.empty:
             out[stem] = ts
     return out
-
 
 def _aggregate_timeseries(series_by_file: dict[str, pd.DataFrame]) -> pd.DataFrame:
     rows: list[pd.DataFrame] = []
@@ -784,7 +444,6 @@ def _aggregate_timeseries(series_by_file: dict[str, pd.DataFrame]) -> pd.DataFra
     )
     agg["std"] = pd.to_numeric(agg["std"], errors="coerce").fillna(0.0)
     return agg
-
 
 def _plot_timeseries_comparison(
     label_to_series: dict[str, dict[str, pd.DataFrame]],
@@ -819,7 +478,6 @@ def _plot_timeseries_comparison(
     plt.close(fig)
     return True
 
-
 def _plot_timeseries_per_file(
     label_to_series: dict[str, dict[str, pd.DataFrame]],
     out_dir: Path,
@@ -850,7 +508,6 @@ def _plot_timeseries_per_file(
         generated.append(out_path)
     return generated
 
-
 def _discover_gt_metrics_summary_files(experiment_root: Path) -> dict[str, Path]:
     """Find `*_gt_metrics_summary.csv` files and map them by file stem."""
     out: dict[str, Path] = {}
@@ -879,7 +536,6 @@ def _discover_gt_metrics_summary_files(experiment_root: Path) -> dict[str, Path]
             tmp[stem] = p
     return tmp
 
-
 def _collect_scalar_metric(experiment_root: Path, method: str, metric_col: str = "overall_rms_error") -> np.ndarray:
     """Collect a scalar metric for one method from `*_gt_metrics_summary.csv` files."""
     vals: list[float] = []
@@ -900,7 +556,6 @@ def _collect_scalar_metric(experiment_root: Path, method: str, metric_col: str =
         if np.isfinite(v):
             vals.append(float(v))
     return np.asarray(vals, dtype=float)
-
 
 def _plot_scalar_summary_bar(
     label_to_values: dict[str, np.ndarray],
@@ -930,7 +585,6 @@ def _plot_scalar_summary_bar(
     plt.close(fig)
     return True
 
-
 def _safe_mean_std(values: np.ndarray) -> tuple[float, float]:
     vals = np.asarray(values, dtype=float).reshape(-1)
     mask = np.isfinite(vals)
@@ -938,7 +592,6 @@ def _safe_mean_std(values: np.ndarray) -> tuple[float, float]:
         return float("nan"), float("nan")
     vv = vals[mask]
     return float(np.mean(vv)), float(np.std(vv, ddof=0))
-
 
 def _find_regime_metric_csvs(out_dir: Path) -> dict[str, Path]:
     """Map regime to a per-seed metrics CSV for one benchmark output directory."""
@@ -964,7 +617,6 @@ def _find_regime_metric_csvs(out_dir: Path) -> dict[str, Path]:
             for regime in sorted(df["regime"].dropna().astype(str).unique().tolist()):
                 mapping[regime] = runs_csv
     return mapping
-
 
 def _load_and_standardize_seed_metrics(csv_path: Path) -> pd.DataFrame:
     """Load a metrics CSV and standardize to one row per (regime, seed, method)."""
@@ -1012,7 +664,6 @@ def _load_and_standardize_seed_metrics(csv_path: Path) -> pd.DataFrame:
     out["seed"] = pd.to_numeric(out["seed"], errors="coerce")
     return out
 
-
 def _mean_drift_bias_from_per_seed_files(run_dir: Path, regime: str, seed: int, method: str) -> float:
     """Fallback drift-bias scalar from per-time bias files for one seed and regime."""
     reg_dir = run_dir / f"{regime}_seed_{int(seed):03d}"
@@ -1037,7 +688,6 @@ def _mean_drift_bias_from_per_seed_files(run_dir: Path, regime: str, seed: int, 
     m, _ = _safe_mean_std(np.asarray(per_file, dtype=float))
     return m
 
-
 def _has_completed_regime_run(out_dir: Path, method: str) -> bool:
     runs_csv = out_dir / "synthetic_regime_runs.csv"
     if not runs_csv.exists():
@@ -1052,10 +702,8 @@ def _has_completed_regime_run(out_dir: Path, method: str) -> bool:
         return method in df["method"].astype(str).unique().tolist()
     return True
 
-
 def _fmt_float_token(val: float, decimals: int = 2) -> str:
     return f"{float(val):.{decimals}f}".replace(".", "p")
-
 
 def _parse_rigid_config_name(name: str) -> tuple[float, int] | None:
     m = re.match(r"^kf(?P<kf>[0-9]+p[0-9]+)_inlier(?P<it>[0-9]+)$", name)
@@ -1324,10 +972,418 @@ def _write_fairness_sweep_readme(
     readme.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return readme
 
+# %% ST-RBF GRID + STATIONARY A/B HELPERS
+def _aggregate_st_rbf_grid(sweep_root: Path) -> pd.DataFrame:
+    """Aggregate ST-RBF grid outputs into one tidy table."""
+    if not sweep_root.exists():
+        raise FileNotFoundError(f"Output root not found: {sweep_root}")
 
-# %% Synthetic benchmark: Cell 1 / generate dataset once (Python API)
-RUN_SYNTH_NEW_CELL1_GENERATE_ONCE = False
-if RUN_SYNTH_NEW_CELL1_GENERATE_ONCE:
+    rows: list[dict[str, float | str | int]] = []
+    grid_dirs = sorted([p for p in sweep_root.iterdir() if p.is_dir() and p.name.startswith("st_rbf_grid_es")])
+    expected_names = {f"st_rbf_grid_es{es}_et{et}" for es in ES_VALUES for et in ET_VALUES}
+    existing_names = {p.name for p in grid_dirs}
+    for name in sorted(expected_names - existing_names):
+        print(f"[WARN] Expected grid folder not found (skip): {sweep_root / name}")
+    if not grid_dirs:
+        raise FileNotFoundError(f"No grid folders found in {sweep_root}")
+
+    for grid_dir in grid_dirs:
+        match = GRID_DIR_PATTERN.match(grid_dir.name)
+        if match is None:
+            print(f"[WARN] Skip unexpected folder name: {grid_dir.name}")
+            continue
+        ell_space = float(match.group("es"))
+        ell_time = float(match.group("et"))
+
+        regime_to_csv = _find_regime_metric_csvs(grid_dir)
+        for regime, csv_path in regime_to_csv.items():
+            metrics = _load_and_standardize_seed_metrics(csv_path)
+            if metrics.empty:
+                continue
+            subset = metrics[
+                (metrics["method"].astype(str) == "st_rbf")
+                & (metrics["regime"].astype(str) == str(regime))
+            ].copy()
+            if subset.empty:
+                continue
+
+            need_bias = ~np.isfinite(pd.to_numeric(subset["drift_bias_abs"], errors="coerce").to_numpy(float))
+            if bool(np.any(need_bias)):
+                for idx in subset.index[need_bias]:
+                    seed_val = pd.to_numeric(subset.loc[idx, "seed"], errors="coerce")
+                    if not np.isfinite(seed_val):
+                        continue
+                    subset.loc[idx, "drift_bias_abs"] = _mean_drift_bias_from_per_seed_files(
+                        run_dir=grid_dir,
+                        regime=str(regime),
+                        seed=int(seed_val),
+                        method="st_rbf",
+                    )
+
+            n_seeds = int(pd.to_numeric(subset["seed"], errors="coerce").dropna().nunique())
+            mean_all, std_all = _safe_mean_std(subset["rms_all"].to_numpy(float))
+            mean_stat, std_stat = _safe_mean_std(subset["rms_stationary"].to_numpy(float))
+            mean_migr, std_migr = _safe_mean_std(subset["rms_migrating"].to_numpy(float))
+            mean_bias, std_bias = _safe_mean_std(subset["drift_bias_abs"].to_numpy(float))
+
+            rows.append(
+                {
+                    "regime": str(regime),
+                    "ell_space": ell_space,
+                    "ell_time": ell_time,
+                    "n_seeds_found": n_seeds,
+                    "mean_rms_all": mean_all,
+                    "std_rms_all": std_all,
+                    "mean_rms_stationary": mean_stat,
+                    "std_rms_stationary": std_stat,
+                    "mean_rms_migrating": mean_migr,
+                    "std_rms_migrating": std_migr,
+                    "mean_drift_bias_abs": mean_bias,
+                    "std_drift_bias_abs": std_bias,
+                }
+            )
+
+    if not rows:
+        raise RuntimeError("No ST-RBF grid results could be aggregated.")
+
+    out = pd.DataFrame(rows).drop_duplicates(subset=["regime", "ell_space", "ell_time"], keep="last")
+    cols = [
+        "regime",
+        "ell_space",
+        "ell_time",
+        "n_seeds_found",
+        "mean_rms_all",
+        "std_rms_all",
+        "mean_rms_stationary",
+        "std_rms_stationary",
+        "mean_rms_migrating",
+        "std_rms_migrating",
+        "mean_drift_bias_abs",
+        "std_drift_bias_abs",
+    ]
+    return out[cols].sort_values(["regime", "ell_space", "ell_time"]).reset_index(drop=True)
+
+def _run_stationary_ab_tests(synthetic_dir: Path, out_root: Path) -> None:
+    """Run ST-RBF stationary subset A/B tests for two fixed candidate settings."""
+    for cand in STATIONARY_AB_CANDIDATES:
+        es = float(cand["ell_space"])
+        et = float(cand["ell_time"])
+        for use_subset in [0, 1]:
+            out_dir = out_root / f"st_rbf_stationary_ab_es{es}_et{et}_subset{use_subset}"
+            print(
+                "[INFO] Running stationary A/B config: "
+                f"ell_space={es}, ell_time={et}, use_stationary_subset={use_subset}"
+            )
+            synthetic_regime_benchmark(
+                synthetic_dir=str(synthetic_dir),
+                out=str(out_dir),
+                reuse_existing=1,
+                methods="st_rbf",
+                synthetic_n_seeds=10,
+                st_ell_space=es,
+                st_ell_time=et,
+                use_stationary_subset=bool(use_subset),
+            )
+
+def _aggregate_stationary_ab(out_root: Path) -> pd.DataFrame:
+    """Aggregate stationary subset A/B experiment outputs into one summary table."""
+    rows: list[dict[str, float | str | int]] = []
+    run_dirs = sorted([p for p in out_root.iterdir() if p.is_dir() and p.name.startswith("st_rbf_stationary_ab_es")])
+    if not run_dirs:
+        raise FileNotFoundError(f"No stationary A/B folders found in {out_root}")
+
+    for run_dir in run_dirs:
+        match = STATIONARY_AB_DIR_PATTERN.match(run_dir.name)
+        if match is None:
+            print(f"[WARN] Skip unexpected stationary A/B folder: {run_dir.name}")
+            continue
+        ell_space = float(match.group("es"))
+        ell_time = float(match.group("et"))
+        use_subset = int(match.group("subset"))
+
+        regime_to_csv = _find_regime_metric_csvs(run_dir)
+        for regime, csv_path in regime_to_csv.items():
+            metrics = _load_and_standardize_seed_metrics(csv_path)
+            if metrics.empty:
+                continue
+            subset = metrics[
+                (metrics["method"].astype(str) == "st_rbf")
+                & (metrics["regime"].astype(str) == str(regime))
+            ].copy()
+            if subset.empty:
+                continue
+
+            need_bias = ~np.isfinite(pd.to_numeric(subset["drift_bias_abs"], errors="coerce").to_numpy(float))
+            if bool(np.any(need_bias)):
+                for idx in subset.index[need_bias]:
+                    seed_val = pd.to_numeric(subset.loc[idx, "seed"], errors="coerce")
+                    if not np.isfinite(seed_val):
+                        continue
+                    subset.loc[idx, "drift_bias_abs"] = _mean_drift_bias_from_per_seed_files(
+                        run_dir=run_dir,
+                        regime=str(regime),
+                        seed=int(seed_val),
+                        method="st_rbf",
+                    )
+
+            n_seeds = int(pd.to_numeric(subset["seed"], errors="coerce").dropna().nunique())
+            mean_all, std_all = _safe_mean_std(subset["rms_all"].to_numpy(float))
+            mean_stat, std_stat = _safe_mean_std(subset["rms_stationary"].to_numpy(float))
+            mean_migr, std_migr = _safe_mean_std(subset["rms_migrating"].to_numpy(float))
+            mean_bias, std_bias = _safe_mean_std(subset["drift_bias_abs"].to_numpy(float))
+
+            rows.append(
+                {
+                    "regime": str(regime),
+                    "ell_space": ell_space,
+                    "ell_time": ell_time,
+                    "use_stationary_subset": use_subset,
+                    "n_seeds_found": n_seeds,
+                    "mean_rms_all": mean_all,
+                    "std_rms_all": std_all,
+                    "mean_rms_stationary": mean_stat,
+                    "std_rms_stationary": std_stat,
+                    "mean_rms_migrating": mean_migr,
+                    "std_rms_migrating": std_migr,
+                    "mean_drift_bias_abs": mean_bias,
+                    "std_drift_bias_abs": std_bias,
+                }
+            )
+
+    if not rows:
+        raise RuntimeError("No stationary A/B results could be aggregated.")
+    out = pd.DataFrame(rows).drop_duplicates(subset=["regime", "ell_space", "ell_time", "use_stationary_subset"], keep="last")
+    cols = [
+        "regime",
+        "ell_space",
+        "ell_time",
+        "use_stationary_subset",
+        "n_seeds_found",
+        "mean_rms_all",
+        "std_rms_all",
+        "mean_rms_stationary",
+        "std_rms_stationary",
+        "mean_rms_migrating",
+        "std_rms_migrating",
+        "mean_drift_bias_abs",
+        "std_drift_bias_abs",
+    ]
+    return out[cols].sort_values(["regime", "ell_space", "ell_time", "use_stationary_subset"]).reset_index(drop=True)
+
+def _write_stationary_ab_report(summary: pd.DataFrame, out_md_path: Path) -> None:
+    """Write a markdown ranking report for stationary subset A/B configs."""
+    lines: list[str] = []
+    lines.append("# ST-RBF Stationary Subset A/B Report")
+    lines.append("")
+    lines.append(f"- timestamp: {datetime.now().isoformat(timespec='seconds')}")
+    lines.append(f"- rows: {int(summary.shape[0])}")
+    lines.append("")
+
+    for regime in sorted(summary["regime"].astype(str).unique().tolist()):
+        cur = summary[summary["regime"].astype(str) == regime].copy()
+        if cur.empty:
+            continue
+        lines.append(f"## Regime: {regime}")
+        lines.append("")
+        cur["cfg"] = (
+            "es="
+            + cur["ell_space"].map(lambda v: f"{float(v):.1f}")
+            + ", et="
+            + cur["ell_time"].map(lambda v: f"{float(v):.1f}")
+            + ", subset="
+            + cur["use_stationary_subset"].astype(int).astype(str)
+        )
+        rms_rank = cur.assign(_sort=cur["mean_rms_all"].where(np.isfinite(cur["mean_rms_all"]), np.inf)).sort_values("_sort")
+        bias_rank = cur.assign(
+            _sort=cur["mean_drift_bias_abs"].where(np.isfinite(cur["mean_drift_bias_abs"]), np.inf)
+        ).sort_values("_sort")
+
+        lines.append("### Rank by mean_rms_all (lower is better)")
+        lines.append("")
+        lines.append("| rank | config | n_seeds_found | mean_rms_all | std_rms_all |")
+        lines.append("|---:|---|---:|---:|---:|")
+        for i, (_, row) in enumerate(rms_rank.iterrows(), start=1):
+            lines.append(
+                f"| {i} | {row['cfg']} | {int(row['n_seeds_found'])} | "
+                f"{float(row['mean_rms_all']):.6f} | {float(row['std_rms_all']):.6f} |"
+            )
+        lines.append("")
+        lines.append("### Rank by mean_drift_bias_abs (lower is better)")
+        lines.append("")
+        lines.append("| rank | config | n_seeds_found | mean_drift_bias_abs | std_drift_bias_abs |")
+        lines.append("|---:|---|---:|---:|---:|")
+        for i, (_, row) in enumerate(bias_rank.iterrows(), start=1):
+            mean_bias = float(row["mean_drift_bias_abs"]) if np.isfinite(row["mean_drift_bias_abs"]) else float("nan")
+            std_bias = float(row["std_drift_bias_abs"]) if np.isfinite(row["std_drift_bias_abs"]) else float("nan")
+            lines.append(
+                f"| {i} | {row['cfg']} | {int(row['n_seeds_found'])} | "
+                f"{mean_bias:.6f} | {std_bias:.6f} |"
+            )
+        lines.append("")
+
+    out_md_path.parent.mkdir(parents=True, exist_ok=True)
+    out_md_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+
+def _plot_grid_heatmap(
+    df: pd.DataFrame,
+    value_col: str,
+    title: str,
+    out_path: Path,
+    highlight: tuple[float, float] = (4.0, 0.4),
+) -> bool:
+    """Plot grid heatmap (x=ell_time, y=ell_space) from aggregated CSV rows."""
+    required = {"ell_space", "ell_time", value_col}
+    if not required.issubset(df.columns):
+        print(f"[WARN] Heatmap skipped ({out_path.name}): missing columns {sorted(required - set(df.columns))}")
+        return False
+    cur = df[["ell_space", "ell_time", value_col]].copy()
+    cur["ell_space"] = pd.to_numeric(cur["ell_space"], errors="coerce")
+    cur["ell_time"] = pd.to_numeric(cur["ell_time"], errors="coerce")
+    cur[value_col] = pd.to_numeric(cur[value_col], errors="coerce")
+    cur = cur.dropna(subset=["ell_space", "ell_time"])
+    if cur.empty:
+        print(f"[WARN] Heatmap skipped ({out_path.name}): no valid rows.")
+        return False
+
+    y_vals = sorted(cur["ell_space"].unique().tolist())
+    x_vals = sorted(cur["ell_time"].unique().tolist())
+    mat = np.full((len(y_vals), len(x_vals)), np.nan, dtype=float)
+    agg = cur.groupby(["ell_space", "ell_time"], as_index=False)[value_col].mean()
+    x_lookup = {float(v): i for i, v in enumerate(x_vals)}
+    y_lookup = {float(v): i for i, v in enumerate(y_vals)}
+    for _, row in agg.iterrows():
+        xv = float(row["ell_time"])
+        yv = float(row["ell_space"])
+        if xv in x_lookup and yv in y_lookup:
+            mat[y_lookup[yv], x_lookup[xv]] = float(row[value_col])
+
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad(color="#f0f0f0")
+    fig, ax = plt.subplots(figsize=(6.2, 4.8))
+    im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(value_col)
+    ax.set_xticks(np.arange(len(x_vals)))
+    ax.set_xticklabels([f"{v:.2g}" for v in x_vals])
+    ax.set_yticks(np.arange(len(y_vals)))
+    ax.set_yticklabels([f"{v:.2g}" for v in y_vals])
+    ax.set_xlabel("ell_time")
+    ax.set_ylabel("ell_space")
+    ax.set_title(title)
+
+    hs, ht = highlight
+    ix = next((i for i, x in enumerate(x_vals) if np.isclose(float(x), float(ht))), None)
+    iy = next((i for i, y in enumerate(y_vals) if np.isclose(float(y), float(hs))), None)
+    if ix is not None and iy is not None:
+        ax.scatter([ix], [iy], s=130, marker="o", facecolors="none", edgecolors="red", linewidths=1.8, zorder=5)
+        ax.scatter([ix], [iy], s=20, color="red", zorder=6)
+
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+def _plot_stationary_subset_ab(
+    df: pd.DataFrame,
+    regime: str | None,
+    out_path: Path,
+    highlight: tuple[float, float] = (4.0, 0.4),
+) -> bool:
+    """Plot stationary subset A/B bars (per regime) or combined line plot (across regimes)."""
+    req = {"regime", "ell_space", "ell_time", "use_stationary_subset", "mean_rms_all", "std_rms_all"}
+    if not req.issubset(df.columns):
+        print(f"[WARN] Stationary A/B plot skipped ({out_path.name}): missing columns {sorted(req - set(df.columns))}")
+        return False
+    cur = df.copy()
+    for c in ["ell_space", "ell_time", "use_stationary_subset", "mean_rms_all", "std_rms_all"]:
+        cur[c] = pd.to_numeric(cur[c], errors="coerce")
+    cur = cur.dropna(subset=["use_stationary_subset"])
+    cur["use_stationary_subset"] = cur["use_stationary_subset"].astype(int)
+    cur = cur[cur["use_stationary_subset"].isin([0, 1])]
+    if cur.empty:
+        return False
+
+    if regime is not None:
+        cur = cur[cur["regime"].astype(str) == str(regime)].copy()
+        if cur.empty:
+            return False
+        cur["cfg"] = cur.apply(lambda row: f"es={float(row['ell_space']):.1f}, et={float(row['ell_time']):.1f}", axis=1)
+        cfg_order = (
+            cur[["cfg", "ell_space", "ell_time"]].drop_duplicates().sort_values(["ell_space", "ell_time"])["cfg"].tolist()
+        )
+        piv_mean = cur.pivot_table(index="cfg", columns="use_stationary_subset", values="mean_rms_all", aggfunc="mean").reindex(cfg_order)
+        piv_std = cur.pivot_table(index="cfg", columns="use_stationary_subset", values="std_rms_all", aggfunc="mean").reindex(cfg_order)
+        x = np.arange(len(cfg_order), dtype=float)
+        w = 0.36
+        fig, ax = plt.subplots(figsize=(7.0, 4.6))
+        y0 = piv_mean.get(0, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        y1 = piv_mean.get(1, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        e0 = piv_std.get(0, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        e1 = piv_std.get(1, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        ax.bar(x - w / 2.0, y0, width=w, yerr=e0, capsize=3, label="subset=0")
+        ax.bar(x + w / 2.0, y1, width=w, yerr=e1, capsize=3, label="subset=1")
+        ax.set_xticks(x)
+        ax.set_xticklabels(cfg_order, rotation=20, ha="right")
+        ax.set_ylabel("mean_rms_all")
+        ax.set_title(f"Stationary subset A/B: {regime}")
+        ax.legend()
+        fig.tight_layout()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=300)
+        plt.close(fig)
+        return True
+
+    hs, ht = highlight
+    pick = cur[np.isclose(cur["ell_space"].to_numpy(float), hs) & np.isclose(cur["ell_time"].to_numpy(float), ht)].copy()
+    if pick.empty:
+        pick = cur.groupby(["regime", "use_stationary_subset"], as_index=False).agg(
+            mean_rms_all=("mean_rms_all", "mean"),
+            std_rms_all=("std_rms_all", "mean"),
+        )
+    regimes = sorted(pick["regime"].astype(str).unique().tolist())
+    if not regimes:
+        return False
+    p0 = pick[pick["use_stationary_subset"] == 0].set_index("regime")
+    p1 = pick[pick["use_stationary_subset"] == 1].set_index("regime")
+    x = np.arange(len(regimes), dtype=float)
+    y0 = np.array([float(p0.loc[r, "mean_rms_all"]) if r in p0.index else np.nan for r in regimes], dtype=float)
+    y1 = np.array([float(p1.loc[r, "mean_rms_all"]) if r in p1.index else np.nan for r in regimes], dtype=float)
+    e0 = np.array([float(p0.loc[r, "std_rms_all"]) if r in p0.index else np.nan for r in regimes], dtype=float)
+    e1 = np.array([float(p1.loc[r, "std_rms_all"]) if r in p1.index else np.nan for r in regimes], dtype=float)
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+    ax.errorbar(x, y0, yerr=e0, marker="o", capsize=3, label="subset=0")
+    ax.errorbar(x, y1, yerr=e1, marker="o", capsize=3, label="subset=1")
+    ax.set_xticks(x)
+    ax.set_xticklabels(regimes, rotation=20, ha="right")
+    ax.set_ylabel("mean_rms_all")
+    ax.set_title("Stationary subset A/B across regimes")
+    ax.legend()
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+def _write_st_rbf_plot_readme(out_root: Path, generated_paths: list[Path], grid_csv: Path, ab_csv: Path) -> Path:
+    """Write README for ST-RBF grid/stationary subset selection plots."""
+    readme_path = out_root / "st_rbf_parameter_selection_plots_README.txt"
+    lines = [
+        f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+        f"input_grid_csv: {grid_csv}",
+        f"input_stationary_ab_csv: {ab_csv}",
+        "selected_default_point: ell_space=4.0, ell_time=0.4",
+        "selected_stationary_default: use_stationary_subset=0 (off)",
+        "generated_plots:",
+    ]
+    lines.extend([f"- {p.name}" for p in sorted(generated_paths)])
+    readme_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return readme_path
+
+# %% Synthetic Dataset / Generate Or Reuse
+RUN_SYNTH_DATASET_GENERATE_ONCE = False
+if RUN_SYNTH_DATASET_GENERATE_ONCE:
     synthetic_generate(
         synthetic_dir=str(SYNTH_REPRO_ROOT),
         synthetic_seed=42,
@@ -1341,19 +1397,18 @@ if RUN_SYNTH_NEW_CELL1_GENERATE_ONCE:
     )
     print(f"Generated synthetic dataset at: {SYNTH_REPRO_ROOT}")
 
-
-# %% Synthetic benchmark: Cell 2 / baseline run on SAME dataset (rbf, rigid, local, st_rbf, st_rbf_moe)
-RUN_SYNTH_NEW_CELL2_BASELINE_API = False
-if RUN_SYNTH_NEW_CELL2_BASELINE_API:
+# %% Baseline Method Comparison (Per File)
+RUN_BASELINE_METHOD_COMPARISON = False
+if RUN_BASELINE_METHOD_COMPARISON:
     _ensure_repro_dataset_exists()
-
+    baseline_root = _results_root("baseline_suite")
     baseline_methods = ["rbf", "rigid", "local", "st_rbf", "st_rbf_moe"]
     baseline_opts = dict(OPTIONS)
     baseline_opts["st_moe_k_list"] = [2, 3, 5]
 
     for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
         df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix = SYNTH_REPRO_RESULTS / "baseline_suite" / file_path.stem / file_path.stem
+        out_prefix = baseline_root / file_path.stem / file_path.stem
         corr = run_methods_for_dataframe(
             df=df_syn,
             out_prefix=out_prefix,
@@ -1363,14 +1418,14 @@ if RUN_SYNTH_NEW_CELL2_BASELINE_API:
         )
         postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
-
-# %% Synthetic benchmark: Cell 2b / regime benchmark on fixed data (Python API, reuse_existing)
-RUN_SYNTH_NEW_CELL2B_BASELINE_REGIME_API = False
-if RUN_SYNTH_NEW_CELL2B_BASELINE_REGIME_API:
+# %% Baseline Regime Benchmark (Single Seed, Reuse Dataset)
+RUN_BASELINE_REGIME_BENCHMARK = False
+if RUN_BASELINE_REGIME_BENCHMARK:
     _ensure_repro_dataset_exists()
+    baseline_regime_root = _results_root("baseline_regime_suite")
     synthetic_regime_benchmark(
         synthetic_dir=str(SYNTH_REPRO_ROOT),
-        out=str(SYNTH_REPRO_RESULTS / "baseline_suite"),
+        out=str(baseline_regime_root),
         reuse_existing=1,
         methods="rbf,rigid,local,st_rbf,st_rbf_moe",
         synthetic_n_seeds=1,
@@ -1378,16 +1433,21 @@ if RUN_SYNTH_NEW_CELL2B_BASELINE_REGIME_API:
     )
 
 
-# %% Synthetic benchmark: Cell 3 / RBF robust-mode A/B (sample_trim vs irls_huber)
-RUN_SYNTH_NEW_CELL3_RBF_ROBUST_AB = False
-if RUN_SYNTH_NEW_CELL3_RBF_ROBUST_AB:
+# %% RBF Robust Mode A/B
+RUN_RBF_ROBUST_MODE_AB = False
+if RUN_RBF_ROBUST_MODE_AB:
     _ensure_repro_dataset_exists()
-    for robust_mode, out_tag in [("sample_trim", "rbf_ab_sampletrim"), ("irls_huber", "rbf_ab_irls")]:
+    runs = [
+        ("sample_trim", "rbf_robust_sample_trim"),
+        ("irls_huber", "rbf_robust_irls_huber"),
+    ]
+    for robust_mode, tag in runs:
         opts_rbf = dict(OPTIONS)
         opts_rbf["robust_mode"] = robust_mode
+        out_root = _results_root(tag)
         for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
             df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-            out_prefix = SYNTH_REPRO_RESULTS / out_tag / file_path.stem / file_path.stem
+            out_prefix = out_root / file_path.stem / file_path.stem
             corr = run_methods_for_dataframe(
                 df=df_syn,
                 out_prefix=out_prefix,
@@ -1398,21 +1458,22 @@ if RUN_SYNTH_NEW_CELL3_RBF_ROBUST_AB:
             postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
 
-# %% Synthetic benchmark: Cell 4 / ST-RBF robust-mode A/B/C
-RUN_SYNTH_NEW_CELL4_ST_ROBUST_ABC = False
-if RUN_SYNTH_NEW_CELL4_ST_ROBUST_ABC:
+# %% ST-RBF Robust Mode A/B/C
+RUN_ST_RBF_ROBUST_MODE_ABC = False
+if RUN_ST_RBF_ROBUST_MODE_ABC:
     _ensure_repro_dataset_exists()
-    robust_runs = [
-        ("sample_trim", "st_rbf_ab_sampletrim"),
-        ("irls_huber", "st_rbf_ab_irls"),
-        ("hybrid_track_irls", "st_rbf_ab_hybrid_track_irls"),
+    runs = [
+        ("sample_trim", "st_rbf_robust_sample_trim"),
+        ("irls_huber", "st_rbf_robust_irls_huber"),
+        ("hybrid_track_irls", "st_rbf_robust_hybrid_track_irls"),
     ]
-    for robust_mode, out_tag in robust_runs:
+    for robust_mode, tag in runs:
         opts_st = dict(OPTIONS)
         opts_st["st_robust_mode"] = robust_mode
+        out_root = _results_root(tag)
         for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
             df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-            out_prefix = SYNTH_REPRO_RESULTS / out_tag / file_path.stem / file_path.stem
+            out_prefix = out_root / file_path.stem / file_path.stem
             corr = run_methods_for_dataframe(
                 df=df_syn,
                 out_prefix=out_prefix,
@@ -1423,14 +1484,13 @@ if RUN_SYNTH_NEW_CELL4_ST_ROBUST_ABC:
             postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
 
-# %% Synthetic benchmark: Cell 5 / ST-RBF expressivity A/B (anisotropic on/off, linear interactions on/off)
-RUN_SYNTH_NEW_CELL5_ST_EXPRESSIVITY_AB = False
-if RUN_SYNTH_NEW_CELL5_ST_EXPRESSIVITY_AB:
+# %% ST-RBF Expressivity A/B
+RUN_ST_RBF_EXPRESSIVITY_AB = False
+if RUN_ST_RBF_EXPRESSIVITY_AB:
     _ensure_repro_dataset_exists()
-
     runs = [
         (
-            "st_rbf_anisotropic_off",
+            "st_rbf_expressivity_anisotropic_off",
             {
                 "st_ell_space": 2.0,
                 "st_ell_time": 0.8,
@@ -1442,7 +1502,7 @@ if RUN_SYNTH_NEW_CELL5_ST_EXPRESSIVITY_AB:
             },
         ),
         (
-            "st_rbf_anisotropic_on",
+            "st_rbf_expressivity_anisotropic_on",
             {
                 "st_ell_space": 2.0,
                 "st_ell_time": 0.8,
@@ -1454,7 +1514,7 @@ if RUN_SYNTH_NEW_CELL5_ST_EXPRESSIVITY_AB:
             },
         ),
         (
-            "st_rbf_linear_interactions_off",
+            "st_rbf_expressivity_linear_terms_off",
             {
                 "st_ell_space": 2.0,
                 "st_ell_time": 0.8,
@@ -1466,7 +1526,7 @@ if RUN_SYNTH_NEW_CELL5_ST_EXPRESSIVITY_AB:
             },
         ),
         (
-            "st_rbf_linear_interactions_on",
+            "st_rbf_expressivity_linear_terms_on",
             {
                 "st_ell_space": 2.0,
                 "st_ell_time": 0.8,
@@ -1479,12 +1539,13 @@ if RUN_SYNTH_NEW_CELL5_ST_EXPRESSIVITY_AB:
         ),
     ]
 
-    for out_tag, cfg in runs:
+    for tag, cfg in runs:
         opts_st = dict(OPTIONS)
         opts_st.update(cfg)
+        out_root = _results_root(tag)
         for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
             df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-            out_prefix = SYNTH_REPRO_RESULTS / out_tag / file_path.stem / file_path.stem
+            out_prefix = out_root / file_path.stem / file_path.stem
             corr = run_methods_for_dataframe(
                 df=df_syn,
                 out_prefix=out_prefix,
@@ -1495,13 +1556,13 @@ if RUN_SYNTH_NEW_CELL5_ST_EXPRESSIVITY_AB:
             postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
 
-# %% Synthetic benchmark: Cell 6 (optional) / paper-regression check on SAME dataset (Python API)
-RUN_SYNTH_NEW_CELL6_PAPER_REGRESSION = False
-if RUN_SYNTH_NEW_CELL6_PAPER_REGRESSION:
+# %% Paper Regression Harness (Optional)
+RUN_PAPER_REGRESSION_CHECK = False
+if RUN_PAPER_REGRESSION_CHECK:
     _ensure_repro_dataset_exists()
     paper_regression(
         synthetic_dir=str(SYNTH_REPRO_ROOT),
-        out=str(SYNTH_REPRO_RESULTS / "paper_regression"),
+        out=str(_results_root("paper_regression")),
         manifest=str(PROJECT_ROOT / "paper_outputs_manifest.txt"),
         columns_manifest=str(PROJECT_ROOT / "paper_metrics_columns.json"),
         methods="rbf,rigid,local,st_rbf",
@@ -1509,13 +1570,154 @@ if RUN_SYNTH_NEW_CELL6_PAPER_REGRESSION:
     )
 
 
-# %% FAIRNESS SWEEPS: Rigid and Local (bounded grids)
+# %% ST-RBF Regime Benchmark (20 Seeds, Fixed Dataset)
+RUN_ST_RBF_REGIMES_20_SEEDS = False
+if RUN_ST_RBF_REGIMES_20_SEEDS:
+    _ensure_repro_dataset_exists()
+    synthetic_regime_benchmark(
+        synthetic_dir=str(SYNTH_REPRO_ROOT),
+        out=str(_results_root("regimes_20seeds")),
+        reuse_existing=1,
+        methods="rbf,rigid,local,st_rbf",
+        synthetic_n_seeds=20,
+    )
+
+
+# %% ST-RBF Parameter Grid Sweep (3x3)
+RUN_ST_RBF_GRID_SWEEP = False
+if RUN_ST_RBF_GRID_SWEEP:
+    _ensure_repro_dataset_exists()
+    grid_root = _results_root("st_rbf_parameter_selection")
+    grid_root.mkdir(parents=True, exist_ok=True)
+    for es in ES_VALUES:
+        print(f"[INFO] Starting ST-RBF grid sweep for ell_space={es}")
+        for et in ET_VALUES:
+            print(f"[INFO] Running grid point ell_space={es}, ell_time={et}")
+            synthetic_regime_benchmark(
+                synthetic_dir=str(SYNTH_REPRO_ROOT),
+                out=str(grid_root / f"st_rbf_grid_es{es}_et{et}"),
+                reuse_existing=1,
+                methods="st_rbf",
+                synthetic_n_seeds=10,
+                st_ell_space=float(es),
+                st_ell_time=float(et),
+            )
+
+
+# %% ST-RBF Grid Aggregation
+RUN_ST_RBF_GRID_AGGREGATION = False
+if RUN_ST_RBF_GRID_AGGREGATION:
+    grid_root = _results_root("st_rbf_parameter_selection")
+    grid_root.mkdir(parents=True, exist_ok=True)
+    aggregated = _aggregate_st_rbf_grid(grid_root)
+    aggregated_csv = grid_root / "st_rbf_grid_aggregated.csv"
+    aggregated.to_csv(aggregated_csv, index=False)
+    readme = grid_root / "st_rbf_grid_aggregated_README.txt"
+    n_grid_points = int(aggregated[["ell_space", "ell_time"]].drop_duplicates().shape[0])
+    n_regimes = int(aggregated["regime"].nunique())
+    readme.write_text(
+        "\n".join(
+            [
+                f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                f"synthetic_dir: {SYNTH_REPRO_ROOT}",
+                f"ell_space_values: {ES_VALUES}",
+                f"ell_time_values: {ET_VALUES}",
+                f"aggregated_csv: {aggregated_csv}",
+                f"grid_points_aggregated: {n_grid_points}",
+                f"regimes_aggregated: {n_regimes}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"[OK] Wrote ST-RBF grid aggregation: {aggregated_csv}")
+
+
+# %% ST-RBF Stationary Subset A/B (10 Seeds)
+RUN_ST_RBF_STATIONARY_AB_TESTS = False
+if RUN_ST_RBF_STATIONARY_AB_TESTS:
+    _ensure_repro_dataset_exists()
+    selection_root = _results_root("st_rbf_parameter_selection")
+    selection_root.mkdir(parents=True, exist_ok=True)
+    _run_stationary_ab_tests(synthetic_dir=SYNTH_REPRO_ROOT, out_root=selection_root)
+    summary = _aggregate_stationary_ab(out_root=selection_root)
+    summary_csv = selection_root / "st_rbf_stationary_ab_summary.csv"
+    summary.to_csv(summary_csv, index=False)
+    report_md = selection_root / "st_rbf_stationary_ab_report.md"
+    _write_stationary_ab_report(summary, report_md)
+    print(f"[OK] Wrote stationary subset A/B summary: {summary_csv}")
+
+
+# %% ST-RBF Parameter Selection Plots (Paper-Ready)
+RUN_ST_RBF_SELECTION_PLOTS = False
+if RUN_ST_RBF_SELECTION_PLOTS:
+    selection_root = _results_root("st_rbf_parameter_selection")
+    generated: list[Path] = []
+    grid_csv = selection_root / "st_rbf_grid_aggregated.csv"
+    ab_csv = selection_root / "st_rbf_stationary_ab_summary.csv"
+
+    if grid_csv.exists():
+        grid = pd.read_csv(grid_csv)
+        if "regime" in grid.columns:
+            for regime in sorted(grid["regime"].dropna().astype(str).unique().tolist()):
+                reg = grid[grid["regime"].astype(str) == regime].copy()
+                p1 = selection_root / f"st_rbf_grid_heatmap_mean_rms_all__regime_{regime}.png"
+                if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}: mean_rms_all", p1, highlight=(4.0, 0.4)):
+                    generated.append(p1)
+                p2 = selection_root / f"st_rbf_grid_heatmap_mean_drift_bias_abs__regime_{regime}.png"
+                if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}: mean_drift_bias_abs", p2, highlight=(4.0, 0.4)):
+                    generated.append(p2)
+
+            g_rms = grid.groupby(["ell_space", "ell_time"], as_index=False).agg(mean_rms_all=("mean_rms_all", "mean"))
+            p3 = selection_root / "st_rbf_grid_heatmap_mean_rms_all__across_regimes.png"
+            if _plot_grid_heatmap(g_rms, "mean_rms_all", "Across regimes: mean_rms_all", p3, highlight=(4.0, 0.4)):
+                generated.append(p3)
+
+            g_bias = grid.groupby(["ell_space", "ell_time"], as_index=False).agg(
+                mean_drift_bias_abs=("mean_drift_bias_abs", "mean")
+            )
+            p4 = selection_root / "st_rbf_grid_heatmap_mean_drift_bias_abs__across_regimes.png"
+            if _plot_grid_heatmap(
+                g_bias, "mean_drift_bias_abs", "Across regimes: mean_drift_bias_abs", p4, highlight=(4.0, 0.4)
+            ):
+                generated.append(p4)
+        else:
+            print(f"[WARN] Grid plots skipped: missing regime column in {grid_csv}")
+    else:
+        print(f"[WARN] Grid plots skipped: missing input CSV {grid_csv}")
+
+    if ab_csv.exists():
+        ab = pd.read_csv(ab_csv)
+        if "regime" in ab.columns:
+            for regime in sorted(ab["regime"].dropna().astype(str).unique().tolist()):
+                p = selection_root / f"st_rbf_stationary_subset_ab__mean_rms_all__regime_{regime}.png"
+                if _plot_stationary_subset_ab(ab, regime=regime, out_path=p, highlight=(4.0, 0.4)):
+                    generated.append(p)
+            p_all = selection_root / "st_rbf_stationary_subset_ab__mean_rms_all__all_regimes.png"
+            if _plot_stationary_subset_ab(ab, regime=None, out_path=p_all, highlight=(4.0, 0.4)):
+                generated.append(p_all)
+        else:
+            print(f"[WARN] Stationary A/B plots skipped: missing regime column in {ab_csv}")
+    else:
+        print(f"[WARN] Stationary A/B plots skipped: missing input CSV {ab_csv}")
+
+    readme_plot = _write_st_rbf_plot_readme(
+        out_root=selection_root,
+        generated_paths=generated,
+        grid_csv=grid_csv,
+        ab_csv=ab_csv,
+    )
+    print(f"[OK] Wrote ST-RBF selection plot README: {readme_plot}")
+    print(f"[OK] Generated {len(generated)} plot(s) in {selection_root}")
+
+
+# %% FAIRNESS SWEEPS: Rigid and Local (Bounded Grids)
 RUN_RIGID_FAIRNESS_SWEEP = False
 RUN_LOCAL_FAIRNESS_SWEEP = False
 
 if RUN_RIGID_FAIRNESS_SWEEP:
     _ensure_repro_dataset_exists()
-    rigid_root = SYNTH_REPRO_RESULTS / "rigid_fairness_sweep"
+    rigid_root = _results_root("rigid_fairness_sweep")
     rigid_root.mkdir(parents=True, exist_ok=True)
 
     for keep_fraction in RIGID_KEEP_FRACTIONS:
@@ -1581,7 +1783,7 @@ if RUN_RIGID_FAIRNESS_SWEEP:
 
 if RUN_LOCAL_FAIRNESS_SWEEP:
     _ensure_repro_dataset_exists()
-    local_root = SYNTH_REPRO_RESULTS / "local_fairness_sweep"
+    local_root = _results_root("local_fairness_sweep")
     local_root.mkdir(parents=True, exist_ok=True)
 
     for k_neighbors in LOCAL_K_NEIGHBORS:
@@ -1646,22 +1848,16 @@ if RUN_LOCAL_FAIRNESS_SWEEP:
         print(f"[OK] Wrote local fairness aggregated CSV: {local_csv}")
         print(f"[OK] Wrote local fairness README: {local_readme}")
 
-# %% PAPER SUMMARY PLOTS (MoE + robust modes, no rigid/local)
+# %% PAPER SUMMARY PLOTS (MoE + Robust Modes, No Rigid/Local)
 RUN_PAPER_SUMMARY_PLOTS = False
 
-# we need to point in SYNTH_REPRO_RESULTS_1 to the folder, where we have stored 
-# above the MoE and robust mode runs (baseline_suite, rbf_ab_sampletrim, rbf_ab_irls, 
-# st_rbf_ab_sampletrim, st_rbf_ab_irls, st_rbf_ab_hybrid_track_irls)
-#SYNTH_REPRO_RESULTS_1 = Path(" ? ")
-
 if RUN_PAPER_SUMMARY_PLOTS:
-    paper_out = SYNTH_REPRO_RESULTS / "paper_summary_plots"
+    paper_out = _results_root("paper_summary_plots")
     paper_out.mkdir(parents=True, exist_ok=True)
 
     # A) ST-RBF MoE k comparison (vs plain ST-RBF)
     moe_root_candidates = [
-        SYNTH_REPRO_RESULTS / "baseline_suite",
-        PROJECT_ROOT / "Synthetic IMARIS files st_moe" / "driftcorr_results",
+        _results_root("baseline_suite"),
     ]
     moe_methods = {
         "st_rbf": "st_rbf",
@@ -1706,8 +1902,8 @@ if RUN_PAPER_SUMMARY_PLOTS:
 
     # B) Robust mode comparison (RBF): sample_trim vs irls_huber
     rbf_robust_roots = {
-        "sample_trim": SYNTH_REPRO_RESULTS / "rbf_ab_sampletrim",
-        "irls_huber": SYNTH_REPRO_RESULTS / "rbf_ab_irls",
+        "sample_trim": _results_root("rbf_robust_sample_trim"),
+        "irls_huber": _results_root("rbf_robust_irls_huber"),
     }
     rbf_label_to_series = {label: _load_method_timeseries(root, "rbf") for label, root in rbf_robust_roots.items()}
     for label, series_map in rbf_label_to_series.items():
@@ -1733,9 +1929,9 @@ if RUN_PAPER_SUMMARY_PLOTS:
 
     # C) Robust mode comparison (ST-RBF): sample_trim vs irls_huber vs hybrid_track_irls
     st_robust_roots = {
-        "sample_trim": SYNTH_REPRO_RESULTS / "st_rbf_ab_sampletrim",
-        "irls_huber": SYNTH_REPRO_RESULTS / "st_rbf_ab_irls",
-        "hybrid_track_irls": SYNTH_REPRO_RESULTS / "st_rbf_ab_hybrid_track_irls",
+        "sample_trim": _results_root("st_rbf_robust_sample_trim"),
+        "irls_huber": _results_root("st_rbf_robust_irls_huber"),
+        "hybrid_track_irls": _results_root("st_rbf_robust_hybrid_track_irls"),
     }
     st_label_to_series = {label: _load_method_timeseries(root, "st_rbf") for label, root in st_robust_roots.items()}
     for label, series_map in st_label_to_series.items():

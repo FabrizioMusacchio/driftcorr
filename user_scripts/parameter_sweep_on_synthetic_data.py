@@ -13,6 +13,7 @@ date: Feb 2026
 """
 # %% IMPORTS
 from __future__ import annotations
+"""Import pipeline modules and provide fallback imports from the local repository."""
 
 from pathlib import Path
 import sys
@@ -72,6 +73,8 @@ except ModuleNotFoundError as exc:
             "Could not import 'driftcorr'. Install the package or run this script from inside the cloned project."
         ) from exc
 # %% GLOBAL SETTINGS
+"""Set shared paths, default options, and sweep constants used across all cells."""
+
 IMARIS_DIR = PROJECT_ROOT / "IMARIS xls files"
 RESULTS_ROOT = IMARIS_DIR / "driftcorr_results_from_python"
 PARAM_SWEEP_SYNTH_ROOT = PROJECT_ROOT / "Synthetic IMARIS files parameter sweep"
@@ -142,6 +145,8 @@ STATIONARY_AB_DIR_PATTERN = re.compile(
 )
 
 # %% FUNCTIONS
+"""Define reusable functions for running methods, postprocessing, aggregation, and plotting."""
+
 def run_methods_for_dataframe(
     df: pd.DataFrame,
     out_prefix: Path,
@@ -311,6 +316,8 @@ def postprocess_outputs(
         save_groundtruth_evaluation_outputs(out_prefix, gt, corr_by_method, drift_field_groundtruth=drift_gt)
 
 # %% PARAMETER SWEEP DATASET + OUTPUT HELPERS
+"""Provide dataset/output-root helpers and generic utility functions for sweep result handling."""
+
 SYNTH_REPRO_ROOT = PARAM_SWEEP_SYNTH_ROOT
 FAIRNESS_SYNTHETIC_N_SEEDS = 10
 RIGID_KEEP_FRACTIONS = [0.5, 0.7, 0.85, 0.95]
@@ -973,6 +980,8 @@ def _write_fairness_sweep_readme(
     return readme
 
 # %% ST-RBF GRID + STATIONARY A/B HELPERS
+"""Provide ST-RBF-specific helper functions for grid aggregation, A/B tests, and summary plotting."""
+
 def _aggregate_st_rbf_grid(sweep_root: Path) -> pd.DataFrame:
     """Aggregate ST-RBF grid outputs into one tidy table."""
     if not sweep_root.exists():
@@ -1381,7 +1390,9 @@ def _write_st_rbf_plot_readme(out_root: Path, generated_paths: list[Path], grid_
     readme_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return readme_path
 
-# %% Synthetic Dataset / Generate Or Reuse
+# %% GENERATE SYNTHETIC BASELINE DATASET
+"""Generate the reproducible synthetic dataset once, or reuse existing files if already present."""
+
 RUN_SYNTH_DATASET_GENERATE_ONCE = False
 if RUN_SYNTH_DATASET_GENERATE_ONCE:
     synthetic_generate(
@@ -1398,7 +1409,9 @@ if RUN_SYNTH_DATASET_GENERATE_ONCE:
     print(f"Generated synthetic dataset at: {SYNTH_REPRO_ROOT}")
 
 # %% Baseline Method Comparison (Per File)
-RUN_BASELINE_METHOD_COMPARISON = False
+"""Run baseline methods per synthetic file and write full per-file outputs for qualitative/quantitative checks."""
+
+RUN_BASELINE_METHOD_COMPARISON = True
 if RUN_BASELINE_METHOD_COMPARISON:
     _ensure_repro_dataset_exists()
     baseline_root = _results_root("baseline_suite")
@@ -1414,11 +1427,12 @@ if RUN_BASELINE_METHOD_COMPARISON:
             out_prefix=out_prefix,
             methods=baseline_methods,
             opts=baseline_opts,
-            use_stationary_subset=False,
-        )
+            use_stationary_subset=False)
         postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
 # %% Baseline Regime Benchmark (Single Seed, Reuse Dataset)
+"""Run a one-seed regime benchmark on the fixed dataset for quick cross-regime baseline comparison."""
+
 RUN_BASELINE_REGIME_BENCHMARK = False
 if RUN_BASELINE_REGIME_BENCHMARK:
     _ensure_repro_dataset_exists()
@@ -1434,6 +1448,8 @@ if RUN_BASELINE_REGIME_BENCHMARK:
 
 
 # %% RBF Robust Mode A/B
+"""Compare RBF robust fitting variants (sample_trim vs irls_huber) on identical synthetic inputs."""
+
 RUN_RBF_ROBUST_MODE_AB = False
 if RUN_RBF_ROBUST_MODE_AB:
     _ensure_repro_dataset_exists()
@@ -1459,6 +1475,8 @@ if RUN_RBF_ROBUST_MODE_AB:
 
 
 # %% ST-RBF Robust Mode A/B/C
+"""Compare ST-RBF robust modes (sample_trim, irls_huber, hybrid_track_irls) under matched conditions."""
+
 RUN_ST_RBF_ROBUST_MODE_ABC = False
 if RUN_ST_RBF_ROBUST_MODE_ABC:
     _ensure_repro_dataset_exists()
@@ -1485,6 +1503,8 @@ if RUN_ST_RBF_ROBUST_MODE_ABC:
 
 
 # %% ST-RBF Expressivity A/B
+"""Test ST-RBF expressivity settings (anisotropic lengthscales and linear interaction terms)."""
+
 RUN_ST_RBF_EXPRESSIVITY_AB = False
 if RUN_ST_RBF_EXPRESSIVITY_AB:
     _ensure_repro_dataset_exists()
@@ -1557,6 +1577,8 @@ if RUN_ST_RBF_EXPRESSIVITY_AB:
 
 
 # %% Paper Regression Harness (Optional)
+"""Run the paper regression harness to verify expected artifact manifests and metrics schema stability."""
+
 RUN_PAPER_REGRESSION_CHECK = False
 if RUN_PAPER_REGRESSION_CHECK:
     _ensure_repro_dataset_exists()
@@ -1571,6 +1593,8 @@ if RUN_PAPER_REGRESSION_CHECK:
 
 
 # %% ST-RBF Regime Benchmark (20 Seeds, Fixed Dataset)
+"""Run a multi-seed regime benchmark on the fixed dataset to estimate mean/std method behavior."""
+
 RUN_ST_RBF_REGIMES_20_SEEDS = False
 if RUN_ST_RBF_REGIMES_20_SEEDS:
     _ensure_repro_dataset_exists()
@@ -1584,6 +1608,8 @@ if RUN_ST_RBF_REGIMES_20_SEEDS:
 
 
 # %% ST-RBF Parameter Grid Sweep (3x3)
+"""Run a compact 3x3 ST-RBF lengthscale sweep over spatial and temporal kernel scales."""
+
 RUN_ST_RBF_GRID_SWEEP = False
 if RUN_ST_RBF_GRID_SWEEP:
     _ensure_repro_dataset_exists()
@@ -1605,6 +1631,8 @@ if RUN_ST_RBF_GRID_SWEEP:
 
 
 # %% ST-RBF Grid Aggregation
+"""Aggregate ST-RBF grid runs into one tidy CSV with regime-level summary statistics."""
+
 RUN_ST_RBF_GRID_AGGREGATION = False
 if RUN_ST_RBF_GRID_AGGREGATION:
     grid_root = _results_root("st_rbf_parameter_selection")
@@ -1634,6 +1662,8 @@ if RUN_ST_RBF_GRID_AGGREGATION:
 
 
 # %% ST-RBF Stationary Subset A/B (10 Seeds)
+"""Run stationary-subset A/B experiments for selected ST-RBF parameter candidates across 10 seeds."""
+
 RUN_ST_RBF_STATIONARY_AB_TESTS = False
 if RUN_ST_RBF_STATIONARY_AB_TESTS:
     _ensure_repro_dataset_exists()
@@ -1649,6 +1679,8 @@ if RUN_ST_RBF_STATIONARY_AB_TESTS:
 
 
 # %% ST-RBF Parameter Selection Plots (Paper-Ready)
+"""Generate paper-ready parameter-selection plots from aggregated ST-RBF grid and A/B summary CSVs."""
+
 RUN_ST_RBF_SELECTION_PLOTS = False
 if RUN_ST_RBF_SELECTION_PLOTS:
     selection_root = _results_root("st_rbf_parameter_selection")
@@ -1712,6 +1744,8 @@ if RUN_ST_RBF_SELECTION_PLOTS:
 
 
 # %% FAIRNESS SWEEPS: Rigid and Local (Bounded Grids)
+"""Run bounded fairness sweeps for rigid/local baselines and aggregate per-regime outcome metrics."""
+
 RUN_RIGID_FAIRNESS_SWEEP = False
 RUN_LOCAL_FAIRNESS_SWEEP = False
 
@@ -1849,6 +1883,8 @@ if RUN_LOCAL_FAIRNESS_SWEEP:
         print(f"[OK] Wrote local fairness README: {local_readme}")
 
 # %% PAPER SUMMARY PLOTS (MoE + Robust Modes, No Rigid/Local)
+"""Generate compact paper-summary plots for MoE and robust-mode studies without rigid/local curves."""
+
 RUN_PAPER_SUMMARY_PLOTS = False
 
 if RUN_PAPER_SUMMARY_PLOTS:

@@ -18,6 +18,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+import re
+from datetime import datetime
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 try:
@@ -647,8 +650,13 @@ if RUN_SYNTHETIC_ST_SCALING_AB:
     postprocess_outputs(df_syn, file_path, out_prefix_off, corr_off)
 
 # %% ## Synthetic benchmark: reproducible dataset + new option A/B tests (helpers)
-SYNTH_REPRO_ROOT = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark"
+SYNTH_REPRO_ROOT = PROJECT_ROOT / "Synthetic IMARIS files tutorial reproducible benchmark 2"
 SYNTH_REPRO_RESULTS = SYNTH_REPRO_ROOT / "driftcorr_results"
+FAIRNESS_SYNTHETIC_N_SEEDS = 10
+RIGID_KEEP_FRACTIONS = [0.5, 0.7, 0.85, 0.95]
+RIGID_INLIER_ITERS = [5, 15, 30]
+LOCAL_K_NEIGHBORS = [8, 12, 20, 30]
+LOCAL_ELL_FIELD = [80.0, 120.0, 180.0, 240.0]
 
 
 def _ensure_repro_dataset_exists() -> Path:
@@ -923,6 +931,400 @@ def _plot_scalar_summary_bar(
     return True
 
 
+def _safe_mean_std(values: np.ndarray) -> tuple[float, float]:
+    vals = np.asarray(values, dtype=float).reshape(-1)
+    mask = np.isfinite(vals)
+    if not np.any(mask):
+        return float("nan"), float("nan")
+    vv = vals[mask]
+    return float(np.mean(vv)), float(np.std(vv, ddof=0))
+
+
+def _find_regime_metric_csvs(out_dir: Path) -> dict[str, Path]:
+    """Map regime to a per-seed metrics CSV for one benchmark output directory."""
+    mapping: dict[str, Path] = {}
+    if not out_dir.exists():
+        return mapping
+
+    long_files = sorted(out_dir.glob("*_seed_metrics_long.csv"))
+    for path in long_files:
+        regime = path.name.replace("_seed_metrics_long.csv", "")
+        if regime:
+            mapping[regime] = path
+    if mapping:
+        return mapping
+
+    runs_csv = out_dir / "synthetic_regime_runs.csv"
+    if runs_csv.exists():
+        try:
+            df = pd.read_csv(runs_csv)
+        except Exception:
+            return mapping
+        if "regime" in df.columns:
+            for regime in sorted(df["regime"].dropna().astype(str).unique().tolist()):
+                mapping[regime] = runs_csv
+    return mapping
+
+
+def _load_and_standardize_seed_metrics(csv_path: Path) -> pd.DataFrame:
+    """Load a metrics CSV and standardize to one row per (regime, seed, method)."""
+    raw = pd.read_csv(csv_path)
+    if raw.empty:
+        return pd.DataFrame(columns=["regime", "seed", "method", "rms_all", "rms_stationary", "rms_migrating", "drift_bias_abs"])
+
+    if {"metric_name", "metric_value"}.issubset(raw.columns):
+        wide = (
+            raw.pivot_table(
+                index=["regime", "seed", "method"],
+                columns="metric_name",
+                values="metric_value",
+                aggfunc="first",
+            )
+            .reset_index()
+        )
+        wide.columns.name = None
+        src = wide
+    else:
+        src = raw.copy()
+
+    needed = {"regime", "seed", "method"}
+    if not needed.issubset(src.columns):
+        return pd.DataFrame(columns=["regime", "seed", "method", "rms_all", "rms_stationary", "rms_migrating", "drift_bias_abs"])
+
+    def _pick(cands: list[str]) -> str | None:
+        for c in cands:
+            if c in src.columns:
+                return c
+        return None
+
+    col_rms_all = _pick(["overall_rms_error", "rms_error_overall", "rms_all", "overall_rms"])
+    col_rms_stat = _pick(["overall_rms_error_stationary", "rms_error_stationary", "rms_stationary"])
+    col_rms_migr = _pick(["overall_rms_error_migrating", "rms_error_migrating", "rms_migrating"])
+    col_bias = _pick(["drift_bias_abs", "drift_bias_abs_mean_over_time", "drift_bias_mean_abs", "drift_bias_mag_abs", "drift_bias"])
+    if col_rms_all is None:
+        return pd.DataFrame(columns=["regime", "seed", "method", "rms_all", "rms_stationary", "rms_migrating", "drift_bias_abs"])
+
+    out = src[["regime", "seed", "method"]].copy()
+    out["rms_all"] = pd.to_numeric(src[col_rms_all], errors="coerce")
+    out["rms_stationary"] = pd.to_numeric(src[col_rms_stat], errors="coerce") if col_rms_stat is not None else np.nan
+    out["rms_migrating"] = pd.to_numeric(src[col_rms_migr], errors="coerce") if col_rms_migr is not None else np.nan
+    out["drift_bias_abs"] = pd.to_numeric(src[col_bias], errors="coerce") if col_bias is not None else np.nan
+    out["seed"] = pd.to_numeric(out["seed"], errors="coerce")
+    return out
+
+
+def _mean_drift_bias_from_per_seed_files(run_dir: Path, regime: str, seed: int, method: str) -> float:
+    """Fallback drift-bias scalar from per-time bias files for one seed and regime."""
+    reg_dir = run_dir / f"{regime}_seed_{int(seed):03d}"
+    if not reg_dir.exists():
+        return float("nan")
+    files = sorted(reg_dir.glob(f"*/*_gt_drift_bias_over_time_{method}.csv"))
+    if not files:
+        return float("nan")
+    per_file: list[float] = []
+    for path in files:
+        try:
+            df = pd.read_csv(path)
+        except Exception:
+            continue
+        if "drift_bias_norm" not in df.columns:
+            continue
+        m, _ = _safe_mean_std(pd.to_numeric(df["drift_bias_norm"], errors="coerce").to_numpy(float))
+        if np.isfinite(m):
+            per_file.append(float(m))
+    if not per_file:
+        return float("nan")
+    m, _ = _safe_mean_std(np.asarray(per_file, dtype=float))
+    return m
+
+
+def _has_completed_regime_run(out_dir: Path, method: str) -> bool:
+    runs_csv = out_dir / "synthetic_regime_runs.csv"
+    if not runs_csv.exists():
+        return False
+    try:
+        df = pd.read_csv(runs_csv)
+    except Exception:
+        return False
+    if df.empty:
+        return False
+    if "method" in df.columns:
+        return method in df["method"].astype(str).unique().tolist()
+    return True
+
+
+def _fmt_float_token(val: float, decimals: int = 2) -> str:
+    return f"{float(val):.{decimals}f}".replace(".", "p")
+
+
+def _parse_rigid_config_name(name: str) -> tuple[float, int] | None:
+    m = re.match(r"^kf(?P<kf>[0-9]+p[0-9]+)_inlier(?P<it>[0-9]+)$", name)
+    if m is None:
+        return None
+    keep_fraction = float(m.group("kf").replace("p", "."))
+    inlier_iters = int(m.group("it"))
+    return keep_fraction, inlier_iters
+
+
+def _parse_local_config_name(name: str) -> tuple[int, float] | None:
+    m = re.match(r"^k(?P<k>[0-9]+)_field(?P<f>[0-9]+(?:p[0-9]+)?)$", name)
+    if m is None:
+        return None
+    k_neighbors = int(m.group("k"))
+    field_tok = m.group("f").replace("p", ".")
+    return k_neighbors, float(field_tok)
+
+
+def _aggregate_fairness_sweep(sweep_root: Path, method: str, sweep_kind: str) -> pd.DataFrame:
+    """Aggregate one fairness sweep folder into tidy regime-level summary rows."""
+    rows: list[dict[str, float | str | int]] = []
+    if not sweep_root.exists():
+        return pd.DataFrame()
+
+    config_dirs = sorted([p for p in sweep_root.iterdir() if p.is_dir()])
+    for cfg_dir in config_dirs:
+        if sweep_kind == "rigid":
+            parsed = _parse_rigid_config_name(cfg_dir.name)
+            if parsed is None:
+                continue
+            keep_fraction, inlier_iters = parsed
+        else:
+            parsed2 = _parse_local_config_name(cfg_dir.name)
+            if parsed2 is None:
+                continue
+            k_neighbors, ell_um_field = parsed2
+
+        regime_map = _find_regime_metric_csvs(cfg_dir)
+        for regime, csv_path in regime_map.items():
+            metrics = _load_and_standardize_seed_metrics(csv_path)
+            if metrics.empty:
+                continue
+            subset = metrics[
+                (metrics["method"].astype(str) == str(method))
+                & (metrics["regime"].astype(str) == str(regime))
+            ].copy()
+            if subset.empty:
+                continue
+
+            need_bias = ~np.isfinite(pd.to_numeric(subset["drift_bias_abs"], errors="coerce").to_numpy(float))
+            if bool(np.any(need_bias)):
+                for idx in subset.index[need_bias]:
+                    seed_val = pd.to_numeric(subset.loc[idx, "seed"], errors="coerce")
+                    if not np.isfinite(seed_val):
+                        continue
+                    subset.loc[idx, "drift_bias_abs"] = _mean_drift_bias_from_per_seed_files(
+                        run_dir=cfg_dir,
+                        regime=str(regime),
+                        seed=int(seed_val),
+                        method=method,
+                    )
+
+            n_seeds = int(pd.to_numeric(subset["seed"], errors="coerce").dropna().nunique())
+            mean_all, std_all = _safe_mean_std(subset["rms_all"].to_numpy(float))
+            mean_stat, std_stat = _safe_mean_std(subset["rms_stationary"].to_numpy(float))
+            mean_migr, std_migr = _safe_mean_std(subset["rms_migrating"].to_numpy(float))
+            mean_bias, std_bias = _safe_mean_std(subset["drift_bias_abs"].to_numpy(float))
+
+            row: dict[str, float | str | int] = {
+                "regime": str(regime),
+                "method": str(method),
+                "n_seeds_found": n_seeds,
+                "mean_rms_all": mean_all,
+                "std_rms_all": std_all,
+                "mean_rms_stationary": mean_stat,
+                "std_rms_stationary": std_stat,
+                "mean_rms_migrating": mean_migr,
+                "std_rms_migrating": std_migr,
+                "mean_drift_bias_abs": mean_bias,
+                "std_drift_bias_abs": std_bias,
+            }
+            if sweep_kind == "rigid":
+                row["keep_fraction"] = float(keep_fraction)
+                row["inlier_reestimate_iters"] = int(inlier_iters)
+            else:
+                row["k_neighbors"] = int(k_neighbors)
+                row["ell_um_field"] = float(ell_um_field)
+            rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    out = pd.DataFrame(rows)
+    if sweep_kind == "rigid":
+        cols = [
+            "regime",
+            "method",
+            "keep_fraction",
+            "inlier_reestimate_iters",
+            "n_seeds_found",
+            "mean_rms_all",
+            "std_rms_all",
+            "mean_rms_stationary",
+            "std_rms_stationary",
+            "mean_rms_migrating",
+            "std_rms_migrating",
+            "mean_drift_bias_abs",
+            "std_drift_bias_abs",
+        ]
+        out = out.drop_duplicates(subset=["regime", "method", "keep_fraction", "inlier_reestimate_iters"], keep="last")
+        out = out[cols].sort_values(["regime", "keep_fraction", "inlier_reestimate_iters"]).reset_index(drop=True)
+    else:
+        cols = [
+            "regime",
+            "method",
+            "k_neighbors",
+            "ell_um_field",
+            "n_seeds_found",
+            "mean_rms_all",
+            "std_rms_all",
+            "mean_rms_stationary",
+            "std_rms_stationary",
+            "mean_rms_migrating",
+            "std_rms_migrating",
+            "mean_drift_bias_abs",
+            "std_drift_bias_abs",
+        ]
+        out = out.drop_duplicates(subset=["regime", "method", "k_neighbors", "ell_um_field"], keep="last")
+        out = out[cols].sort_values(["regime", "k_neighbors", "ell_um_field"]).reset_index(drop=True)
+    return out
+
+
+def _plot_lines_by_regime(
+    df: pd.DataFrame,
+    x_col: str,
+    line_col: str,
+    y_col: str,
+    out_path_base: Path,
+    title_prefix: str,
+    x_label: str,
+    legend_label: str,
+) -> list[Path]:
+    generated: list[Path] = []
+    if df.empty:
+        return generated
+    regimes = sorted(df["regime"].astype(str).unique().tolist())
+    if not regimes:
+        return generated
+    n = len(regimes)
+    ncols = min(3, n)
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.0 * ncols, 3.8 * nrows), squeeze=False)
+    for i, regime in enumerate(regimes):
+        ax = axes[i // ncols][i % ncols]
+        cur = df[df["regime"].astype(str) == regime].copy()
+        groups = sorted(cur[line_col].dropna().unique().tolist())
+        for gv in groups:
+            gg = cur[cur[line_col] == gv].sort_values(x_col)
+            ax.plot(
+                pd.to_numeric(gg[x_col], errors="coerce").to_numpy(float),
+                pd.to_numeric(gg[y_col], errors="coerce").to_numpy(float),
+                marker="o",
+                linewidth=1.8,
+                label=f"{legend_label}={gv:g}",
+            )
+        ax.set_title(regime)
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_col)
+        ax.set_ylim(bottom=0.0)
+        ax.legend()
+    for j in range(n, nrows * ncols):
+        axes[j // ncols][j % ncols].axis("off")
+    fig.suptitle(title_prefix)
+    fig.tight_layout()
+    png = out_path_base.with_suffix(".png")
+    pdf = out_path_base.with_suffix(".pdf")
+    fig.savefig(png, dpi=300)
+    fig.savefig(pdf)
+    plt.close(fig)
+    generated.extend([png, pdf])
+    return generated
+
+
+def _plot_heatmaps_by_regime(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    value_col: str,
+    out_path_base: Path,
+    title_prefix: str,
+    x_label: str,
+    y_label: str,
+) -> list[Path]:
+    generated: list[Path] = []
+    if df.empty:
+        return generated
+    regimes = sorted(df["regime"].astype(str).unique().tolist())
+    if not regimes:
+        return generated
+    n = len(regimes)
+    ncols = min(3, n)
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.2 * ncols, 4.2 * nrows), squeeze=False)
+    for i, regime in enumerate(regimes):
+        ax = axes[i // ncols][i % ncols]
+        cur = df[df["regime"].astype(str) == regime].copy()
+        x_vals = sorted(pd.to_numeric(cur[x_col], errors="coerce").dropna().unique().tolist())
+        y_vals = sorted(pd.to_numeric(cur[y_col], errors="coerce").dropna().unique().tolist())
+        if not x_vals or not y_vals:
+            ax.axis("off")
+            continue
+        mat = np.full((len(y_vals), len(x_vals)), np.nan, dtype=float)
+        x_lookup = {float(v): idx for idx, v in enumerate(x_vals)}
+        y_lookup = {float(v): idx for idx, v in enumerate(y_vals)}
+        for _, r in cur.iterrows():
+            xv = float(pd.to_numeric(r[x_col], errors="coerce"))
+            yv = float(pd.to_numeric(r[y_col], errors="coerce"))
+            vv = float(pd.to_numeric(r[value_col], errors="coerce"))
+            if np.isfinite(xv) and np.isfinite(yv) and xv in x_lookup and yv in y_lookup:
+                mat[y_lookup[yv], x_lookup[xv]] = vv
+        cmap = plt.get_cmap("viridis").copy()
+        cmap.set_bad(color="#f0f0f0")
+        im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_xticks(np.arange(len(x_vals)))
+        ax.set_xticklabels([f"{v:g}" for v in x_vals])
+        ax.set_yticks(np.arange(len(y_vals)))
+        ax.set_yticklabels([f"{v:g}" for v in y_vals])
+        ax.set_xlabel(x_label)
+        ax.set_ylabel(y_label)
+        ax.set_title(regime)
+    for j in range(n, nrows * ncols):
+        axes[j // ncols][j % ncols].axis("off")
+    fig.suptitle(title_prefix)
+    fig.tight_layout()
+    png = out_path_base.with_suffix(".png")
+    pdf = out_path_base.with_suffix(".pdf")
+    fig.savefig(png, dpi=300)
+    fig.savefig(pdf)
+    plt.close(fig)
+    generated.extend([png, pdf])
+    return generated
+
+
+def _write_fairness_sweep_readme(
+    sweep_root: Path,
+    synthetic_dir: Path,
+    aggregated_csv: Path,
+    generated_plots: list[Path],
+    sweep_desc: str,
+    grid_desc: str,
+    n_regimes: int,
+) -> Path:
+    readme = sweep_root / "README.txt"
+    lines = [
+        f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+        f"synthetic_dataset: {synthetic_dir}",
+        f"sweep: {sweep_desc}",
+        f"grid: {grid_desc}",
+        f"regimes_aggregated: {n_regimes}",
+        f"aggregated_csv: {aggregated_csv}",
+        "plots:",
+    ]
+    lines.extend([f"- {p.name}" for p in generated_plots])
+    readme.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return readme
+
+
 # %% Synthetic benchmark: Cell 1 / generate dataset once (Python API)
 RUN_SYNTH_NEW_CELL1_GENERATE_ONCE = False
 if RUN_SYNTH_NEW_CELL1_GENERATE_ONCE:
@@ -1107,8 +1509,151 @@ if RUN_SYNTH_NEW_CELL6_PAPER_REGRESSION:
     )
 
 
+# %% FAIRNESS SWEEPS: Rigid and Local (bounded grids)
+RUN_RIGID_FAIRNESS_SWEEP = False
+RUN_LOCAL_FAIRNESS_SWEEP = False
+
+if RUN_RIGID_FAIRNESS_SWEEP:
+    _ensure_repro_dataset_exists()
+    rigid_root = SYNTH_REPRO_RESULTS / "rigid_fairness_sweep"
+    rigid_root.mkdir(parents=True, exist_ok=True)
+
+    for keep_fraction in RIGID_KEEP_FRACTIONS:
+        for inlier_iters in RIGID_INLIER_ITERS:
+            tag = f"kf{_fmt_float_token(keep_fraction, 2)}_inlier{int(inlier_iters)}"
+            out_dir = rigid_root / tag
+            if _has_completed_regime_run(out_dir, method="rigid"):
+                print(f"[INFO] Reusing rigid sweep run: {out_dir}")
+                continue
+            print(f"[INFO] Running rigid sweep config: keep_fraction={keep_fraction}, inlier_reestimate_iters={inlier_iters}")
+            synthetic_regime_benchmark(
+                synthetic_dir=str(SYNTH_REPRO_ROOT),
+                out=str(out_dir),
+                reuse_existing=1,
+                methods="rigid",
+                synthetic_n_seeds=int(FAIRNESS_SYNTHETIC_N_SEEDS),
+                keep_fraction=float(keep_fraction),
+                inlier_reestimate_iters=int(inlier_iters),
+            )
+
+    rigid_agg = _aggregate_fairness_sweep(rigid_root, method="rigid", sweep_kind="rigid")
+    if rigid_agg.empty:
+        print("[WARN] Rigid fairness sweep aggregation produced no rows.")
+    else:
+        rigid_csv = rigid_root / "rigid_fairness_aggregated.csv"
+        rigid_agg.to_csv(rigid_csv, index=False)
+        rigid_plots: list[Path] = []
+        rigid_plots.extend(
+            _plot_lines_by_regime(
+                rigid_agg,
+                x_col="keep_fraction",
+                line_col="inlier_reestimate_iters",
+                y_col="mean_rms_all",
+                out_path_base=rigid_root / "plot_rigid_lines_by_regime_mean_rms_all",
+                title_prefix="Rigid fairness sweep: mean_rms_all by regime",
+                x_label="keep_fraction",
+                legend_label="inlier_reestimate_iters",
+            )
+        )
+        rigid_plots.extend(
+            _plot_heatmaps_by_regime(
+                rigid_agg,
+                x_col="keep_fraction",
+                y_col="inlier_reestimate_iters",
+                value_col="mean_rms_all",
+                out_path_base=rigid_root / "plot_rigid_heatmaps_by_regime_mean_rms_all",
+                title_prefix="Rigid fairness sweep heatmaps: mean_rms_all",
+                x_label="keep_fraction",
+                y_label="inlier_reestimate_iters",
+            )
+        )
+        rigid_readme = _write_fairness_sweep_readme(
+            sweep_root=rigid_root,
+            synthetic_dir=SYNTH_REPRO_ROOT,
+            aggregated_csv=rigid_csv,
+            generated_plots=rigid_plots,
+            sweep_desc="rigid fairness sweep",
+            grid_desc=f"keep_fraction={RIGID_KEEP_FRACTIONS}, inlier_reestimate_iters={RIGID_INLIER_ITERS}, n_seeds={FAIRNESS_SYNTHETIC_N_SEEDS}",
+            n_regimes=int(rigid_agg["regime"].nunique()),
+        )
+        print(f"[OK] Wrote rigid fairness aggregated CSV: {rigid_csv}")
+        print(f"[OK] Wrote rigid fairness README: {rigid_readme}")
+
+if RUN_LOCAL_FAIRNESS_SWEEP:
+    _ensure_repro_dataset_exists()
+    local_root = SYNTH_REPRO_RESULTS / "local_fairness_sweep"
+    local_root.mkdir(parents=True, exist_ok=True)
+
+    for k_neighbors in LOCAL_K_NEIGHBORS:
+        for ell_field in LOCAL_ELL_FIELD:
+            field_token = _fmt_float_token(float(ell_field), 0) if float(ell_field).is_integer() else _fmt_float_token(float(ell_field), 2)
+            tag = f"k{int(k_neighbors)}_field{field_token}"
+            out_dir = local_root / tag
+            if _has_completed_regime_run(out_dir, method="local"):
+                print(f"[INFO] Reusing local sweep run: {out_dir}")
+                continue
+            print(f"[INFO] Running local sweep config: k_neighbors={k_neighbors}, ell_um_field={ell_field}")
+            synthetic_regime_benchmark(
+                synthetic_dir=str(SYNTH_REPRO_ROOT),
+                out=str(out_dir),
+                reuse_existing=1,
+                methods="local",
+                synthetic_n_seeds=int(FAIRNESS_SYNTHETIC_N_SEEDS),
+                k_neighbors=int(k_neighbors),
+                ell_um_field=float(ell_field),
+            )
+
+    local_agg = _aggregate_fairness_sweep(local_root, method="local", sweep_kind="local")
+    if local_agg.empty:
+        print("[WARN] Local fairness sweep aggregation produced no rows.")
+    else:
+        local_csv = local_root / "local_fairness_aggregated.csv"
+        local_agg.to_csv(local_csv, index=False)
+        local_plots: list[Path] = []
+        local_plots.extend(
+            _plot_lines_by_regime(
+                local_agg,
+                x_col="k_neighbors",
+                line_col="ell_um_field",
+                y_col="mean_rms_all",
+                out_path_base=local_root / "plot_local_lines_by_regime_mean_rms_all",
+                title_prefix="Local fairness sweep: mean_rms_all by regime",
+                x_label="k_neighbors",
+                legend_label="ell_um_field",
+            )
+        )
+        local_plots.extend(
+            _plot_heatmaps_by_regime(
+                local_agg,
+                x_col="k_neighbors",
+                y_col="ell_um_field",
+                value_col="mean_rms_all",
+                out_path_base=local_root / "plot_local_heatmaps_by_regime_mean_rms_all",
+                title_prefix="Local fairness sweep heatmaps: mean_rms_all",
+                x_label="k_neighbors",
+                y_label="ell_um_field",
+            )
+        )
+        local_readme = _write_fairness_sweep_readme(
+            sweep_root=local_root,
+            synthetic_dir=SYNTH_REPRO_ROOT,
+            aggregated_csv=local_csv,
+            generated_plots=local_plots,
+            sweep_desc="local fairness sweep",
+            grid_desc=f"k_neighbors={LOCAL_K_NEIGHBORS}, ell_um_field={LOCAL_ELL_FIELD}, n_seeds={FAIRNESS_SYNTHETIC_N_SEEDS}",
+            n_regimes=int(local_agg["regime"].nunique()),
+        )
+        print(f"[OK] Wrote local fairness aggregated CSV: {local_csv}")
+        print(f"[OK] Wrote local fairness README: {local_readme}")
+
 # %% PAPER SUMMARY PLOTS (MoE + robust modes, no rigid/local)
 RUN_PAPER_SUMMARY_PLOTS = False
+
+# we need to point in SYNTH_REPRO_RESULTS_1 to the folder, where we have stored 
+# above the MoE and robust mode runs (baseline_suite, rbf_ab_sampletrim, rbf_ab_irls, 
+# st_rbf_ab_sampletrim, st_rbf_ab_irls, st_rbf_ab_hybrid_track_irls)
+#SYNTH_REPRO_RESULTS_1 = Path(" ? ")
+
 if RUN_PAPER_SUMMARY_PLOTS:
     paper_out = SYNTH_REPRO_RESULTS / "paper_summary_plots"
     paper_out.mkdir(parents=True, exist_ok=True)

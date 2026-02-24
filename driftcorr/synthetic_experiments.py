@@ -109,6 +109,9 @@ def generate_controlled_drift_dataset(
     local_mode: str = "smooth",
     piecewise_regions: int = 3,
     piecewise_transition_um: float = 90.0,
+    dx_scale_um: float = 0.8,
+    dx_distribution: str = "gaussian",
+    dx_track_smoothness: float = 0.7,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Generate 3D tracks with known drift and known no-drift groundtruth.
 
@@ -151,6 +154,7 @@ def generate_controlled_drift_dataset(
     cell_type = np.array(["slow"] * n, dtype=object)
     cell_type[idx_stationary] = "stationary"
     cell_type[idx_migrating] = "migrating"
+    mode = str(local_mode)
 
     x_true = np.zeros((n, t_count, 3), dtype=float)
     x_true[:, 0, :] = p0
@@ -168,6 +172,59 @@ def generate_controlled_drift_dataset(
 
     for ti in range(1, t_count):
         x_true[:, ti, :] = x_true[:, ti - 1, :] + vel + rw_step[:, ti, :]
+
+    if mode == "nodrift_dx_sweep":
+        # Association-only regime: no imaging drift, controlled per-frame motion magnitude.
+        rng_dx = np.random.default_rng(int(seed) + 19013)
+        x_true = np.zeros((n, t_count, 3), dtype=float)
+        x_true[:, 0, :] = p0
+        a = float(np.clip(dx_track_smoothness, 0.0, 0.98))
+        sxy = float(max(dx_scale_um, 1e-6))
+        sz = 0.6 * sxy
+
+        # Persistent per-track drift-free motion direction and speed.
+        base_dir = rng_dx.normal(size=(n, 3))
+        base_norm = np.linalg.norm(base_dir, axis=1, keepdims=True)
+        base_norm[base_norm <= 1e-9] = 1.0
+        base_dir = base_dir / base_norm
+        speed = rng_dx.uniform(0.8, 1.8, size=(n, 1)) * (2.8 * sxy)
+        base_vel = base_dir * speed
+
+        # Smooth oscillatory component for curvature / non-linear trajectories.
+        phase_xy = rng_dx.uniform(0.0, 2.0 * np.pi, size=(n, 1))
+        phase_z = rng_dx.uniform(0.0, 2.0 * np.pi, size=(n, 1))
+        freq_xy = rng_dx.uniform(0.15, 0.65, size=(n, 1))
+        freq_z = rng_dx.uniform(0.10, 0.45, size=(n, 1))
+        osc_amp_xy = rng_dx.uniform(0.25, 0.55, size=(n, 1)) * (2.2 * sxy)
+        osc_amp_z = rng_dx.uniform(0.15, 0.40, size=(n, 1)) * (1.2 * sxy)
+
+        v_prev = base_vel.copy()
+        for ti in range(1, t_count):
+            if str(dx_distribution).lower() == "bounded_uniform":
+                noise = rng_dx.uniform(low=[-sxy, -sxy, -sz], high=[sxy, sxy, sz], size=(n, 3))
+            else:
+                noise = rng_dx.normal(scale=np.array([sxy, sxy, sz]), size=(n, 3))
+
+            # AR(1) velocity with stationary std approx equal to noise std.
+            innovation = np.sqrt(max(1e-9, 1.0 - a * a)) * noise
+            v_prev = a * v_prev + innovation + (1.0 - a) * 0.35 * base_vel
+
+            tt = float(ti)
+            osc = np.column_stack(
+                [
+                    (osc_amp_xy[:, 0] * np.sin(freq_xy[:, 0] * tt + phase_xy[:, 0])),
+                    (osc_amp_xy[:, 0] * np.cos(freq_xy[:, 0] * tt + phase_xy[:, 0])),
+                    (osc_amp_z[:, 0] * np.sin(freq_z[:, 0] * tt + phase_z[:, 0])),
+                ]
+            )
+            # Small frame-to-frame zigzag component.
+            zig_sign = -1.0 if (ti % 2 == 0) else 1.0
+            zig = zig_sign * 0.22 * noise
+
+            step = v_prev + osc + zig
+            step[mask_stationary] *= 0.05
+            step[mask_slow] *= 0.55
+            x_true[:, ti, :] = x_true[:, ti - 1, :] + step
 
     x_true[:, :, 0] = np.clip(x_true[:, :, 0], x_rng[0], x_rng[1])
     x_true[:, :, 1] = np.clip(x_true[:, :, 1], y_rng[0], y_rng[1])
@@ -252,7 +309,6 @@ def generate_controlled_drift_dataset(
         drift_global_all[:, ti, :] = global_drift[ti][None, :]
         drift_local_all[:, ti, :] = local
 
-    mode = str(local_mode)
     if mode in {"rotation_drift", "piecewise_spatial_drift", "jump_events"}:
         # Use a dedicated RNG stream for new non-rigid regimes so existing modes
         # (`smooth`, `piecewise_smooth`, `piecewise_abrupt`) remain bitwise stable.
@@ -356,6 +412,10 @@ def generate_controlled_drift_dataset(
                 p_rot = _rotate_about_z(p_t, ref_center, float(ang[ti]))
                 drift_local_all[:, ti, :] += 0.6 * (p_rot - p_t)
 
+    if mode == "nodrift_dx_sweep":
+        drift_global_all = np.zeros_like(x_true)
+        drift_local_all = np.zeros_like(x_true)
+
     drift_total = drift_global_all + drift_local_all
     x_obs = x_true + drift_total + rng.normal(scale=float(measurement_noise_um), size=x_true.shape)
 
@@ -453,6 +513,9 @@ def generate_synthetic_imaris_folder(
     local_drift_scale_um: float = 2.4,
     n_rbf_centers: int = 10,
     measurement_noise_um: float = 0.2,
+    dx_scale_um: float = 0.8,
+    dx_distribution: str = "gaussian",
+    dx_track_smoothness: float = 0.7,
 ) -> dict[str, Any]:
     """Create a synthetic IMARIS folder plus ground-truth sidecar files."""
     out_dir = Path(out_dir)
@@ -478,6 +541,9 @@ def generate_synthetic_imaris_folder(
             local_drift_scale_um=local_drift_scale_um,
             n_rbf_centers=n_rbf_centers,
             measurement_noise_um=measurement_noise_um,
+            dx_scale_um=dx_scale_um,
+            dx_distribution=dx_distribution,
+            dx_track_smoothness=dx_track_smoothness,
         )
 
         base = f"synthetic_drift_{i + 1:03d}"
@@ -504,6 +570,9 @@ def generate_synthetic_imaris_folder(
             "local_drift_scale_um": float(local_drift_scale_um),
             "n_rbf_centers": int(n_rbf_centers),
             "measurement_noise_um": float(measurement_noise_um),
+            "dx_scale_um": float(dx_scale_um),
+            "dx_distribution": str(dx_distribution),
+            "dx_track_smoothness": float(dx_track_smoothness),
         }
         pd.DataFrame([meta]).to_csv(gt_dir / f"{base}_meta.csv", index=False)
         written_files.append(xlsx_path)

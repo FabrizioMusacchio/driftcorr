@@ -393,7 +393,7 @@ def plot_tracks_over_time_panels(
                 d_gt = df_groundtruth[df_groundtruth["TrackID"] == tid].sort_values("Time")
                 d_corr = df_corr[df_corr["TrackID"] == tid].sort_values("Time")
 
-                # GT: thin/dashed
+                # GT:
                 ax_overlay.plot(
                     d_gt["Position X"],
                     d_gt["Position Y"],
@@ -404,7 +404,7 @@ def plot_tracks_over_time_panels(
                     linestyle="-",
                 )
 
-                # Corrected: thick/solid on top
+                # Corrected:
                 ax_overlay.plot(
                     d_corr["Position X_corr"],
                     d_corr["Position Y_corr"],

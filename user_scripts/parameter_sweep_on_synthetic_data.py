@@ -4,7 +4,7 @@ This script is intentionally organized in notebook-like cells (`# %% ...`) so us
 run it in VS Code/PyCharm cell mode or as a normal Python script. All synthetic parameter
 study outputs are centralized under one root folder:
 
-`Synthetic IMARIS files parameter sweep`
+`Synthetic files parameter sweep`
 
 Author
 -------
@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 import re
+import shutil
 from datetime import datetime
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +40,6 @@ try:
     from driftcorr.method_spacetime_rbf_moe import apply_spacetime_rbf_moe_correction, fit_spacetime_rbf_moe_model
     from driftcorr.stationary import find_stationary_tracks
     from driftcorr.synthetic_experiments import (
-        generate_synthetic_imaris_folder,
         load_drift_field_for_imaris_file,
         load_groundtruth_for_imaris_file,
         save_groundtruth_evaluation_outputs,
@@ -62,7 +62,6 @@ except ModuleNotFoundError as exc:
         from driftcorr.method_spacetime_rbf_moe import apply_spacetime_rbf_moe_correction, fit_spacetime_rbf_moe_model
         from driftcorr.stationary import find_stationary_tracks
         from driftcorr.synthetic_experiments import (
-            generate_synthetic_imaris_folder,
             load_drift_field_for_imaris_file,
             load_groundtruth_for_imaris_file,
             save_groundtruth_evaluation_outputs,
@@ -73,11 +72,29 @@ except ModuleNotFoundError as exc:
             "Could not import 'driftcorr'. Install the package or run this script from inside the cloned project."
         ) from exc
 # %% GLOBAL SETTINGS
-"""Set shared paths, default options, and sweep constants used across all cells."""
+"""Set shared paths, default options, and sweep constants used across all cells.
 
-IMARIS_DIR = PROJECT_ROOT / "IMARIS xls files"
-RESULTS_ROOT = IMARIS_DIR / "driftcorr_results_from_python"
-PARAM_SWEEP_SYNTH_ROOT = PROJECT_ROOT / "Synthetic IMARIS files parameter sweep"
+Directory contract
+------------------
+- `Synthetic files parameter sweep/_groundtruth`: baseline synthetic datasets (3 modes x 5 files).
+- `Synthetic files parameter sweep/_groundtruth_large`: large regime datasets (3 regimes x 20 seeds).
+- `Synthetic files parameter sweep/<study_tag>`: all benchmark and evaluation outputs.
+"""
+
+CURRENT_ANALYSIS_ROOT = PROJECT_ROOT / "Synthetic files parameter sweep"
+
+GROUNDTRUTH_ROOT = CURRENT_ANALYSIS_ROOT / "_groundtruth"
+GROUNDTRUTH_LARGE_ROOT = CURRENT_ANALYSIS_ROOT / "_groundtruth_large"
+RESULTS_ROOT = CURRENT_ANALYSIS_ROOT
+BASELINE_MODES = ["smooth", "piecewise_smooth", "piecewise_abrupt"]
+BASELINE_FILES_PER_MODE = 5
+LARGE_SEED_START = 42
+LARGE_N_SEEDS = 20
+LARGE_FOLDER_MODE_TOKEN = {
+    "smooth": "smooth_spacetime",
+    "piecewise_smooth": "piecewise_smooth",
+    "piecewise_abrupt": "piecewise_abrupt",
+}
 
 DEFAULT_METHODS = ["rbf", "rigid", "local", "st_rbf"]
 
@@ -315,37 +332,180 @@ def postprocess_outputs(
     if gt is not None:
         save_groundtruth_evaluation_outputs(out_prefix, gt, corr_by_method, drift_field_groundtruth=drift_gt)
 
-# %% PARAMETER SWEEP DATASET + OUTPUT HELPERS
+
+# PARAMETER SWEEP DATASET + OUTPUT HELPERS:
 """Provide dataset/output-root helpers and generic utility functions for sweep result handling."""
 
-SYNTH_REPRO_ROOT = PARAM_SWEEP_SYNTH_ROOT
 FAIRNESS_SYNTHETIC_N_SEEDS = 10
 RIGID_KEEP_FRACTIONS = [0.5, 0.7, 0.85, 0.95]
 RIGID_INLIER_ITERS = [5, 15, 30]
 LOCAL_K_NEIGHBORS = [8, 12, 20, 30]
 LOCAL_ELL_FIELD = [80.0, 120.0, 180.0, 240.0]
 
-def _results_root(tag: str) -> Path:
-    """Return centralized result root `driftcorr_results_<tag>` inside the main synthetic folder."""
+def results_root(tag: str) -> Path:
+    """Return centralized study output root under the main analysis folder."""
     safe = str(tag).strip().replace(" ", "_").replace("-", "_")
-    return SYNTH_REPRO_ROOT / f"driftcorr_results_{safe}"
+    return RESULTS_ROOT / safe
 
-def _ensure_repro_dataset_exists() -> Path:
-    """API-first equivalent of --reuse-existing: generate once, then reuse."""
-    if list_imaris_xls_files(SYNTH_REPRO_ROOT):
-        return SYNTH_REPRO_ROOT
-    generate_synthetic_imaris_folder(
-        out_dir=SYNTH_REPRO_ROOT,
-        n_files=5,
-        n_tracks=80,
-        n_times=20,
-        stationary_fraction=0.45,
-        migrating_fraction=0.35,
-        seed=42,
-        temporal_smoothness=0.9,
-        local_mode="smooth",
-    )
-    return SYNTH_REPRO_ROOT
+def parse_mode_from_filename(stem: str) -> str | None:
+    """Parse synthetic mode token from a mode-prefixed file stem."""
+    s = str(stem)
+    for mode in BASELINE_MODES:
+        prefix = f"{mode}_"
+        if s.startswith(prefix):
+            return mode
+    return None
+
+def enumerate_groundtruth_files(root: Path, modes: list[str] | None = None) -> dict[str, list[Path]]:
+    """Return synthetic files grouped by mode from a shared groundtruth root."""
+    mode_list = BASELINE_MODES if modes is None else list(modes)
+    grouped: dict[str, list[Path]] = {m: [] for m in mode_list}
+    for p in list_imaris_xls_files(root):
+        mode = parse_mode_from_filename(p.stem)
+        if mode in grouped:
+            grouped[mode].append(p)
+    for m in grouped:
+        grouped[m] = sorted(grouped[m])
+    return grouped
+
+def list_baseline_imaris_files() -> list[Path]:
+    """List all baseline synthetic files across all required modes."""
+    ensure_baseline_groundtruth()
+    grouped = enumerate_groundtruth_files(GROUNDTRUTH_ROOT)
+    out: list[Path] = []
+    for mode in BASELINE_MODES:
+        out.extend(grouped.get(mode, []))
+    return sorted(out)
+
+def _ensure_mode_generated(mode: str) -> None:
+    """Generate one missing baseline mode and move data+sidecars with mode prefix."""
+    tmp_dir = GROUNDTRUTH_ROOT / f"__tmp_generate_{mode}"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        synthetic_generate(
+            synthetic_dir=str(tmp_dir),
+            synthetic_seed=42,
+            synthetic_n_files=5,
+            synthetic_n_tracks=80,
+            synthetic_n_times=20,
+            synthetic_stationary_fraction=0.45,
+            synthetic_migrating_fraction=0.35,
+            synthetic_temporal_smoothness=0.9,
+            synthetic_local_mode=mode,
+        )
+        generated = sorted(list_imaris_xls_files(tmp_dir))
+        tmp_gt_dir = tmp_dir / "_groundtruth"
+        tgt_gt_dir = GROUNDTRUTH_ROOT / "_groundtruth"
+        tgt_gt_dir.mkdir(parents=True, exist_ok=True)
+        for src in generated:
+            pref_stem = f"{mode}_{src.stem}"
+            dst = GROUNDTRUTH_ROOT / f"{pref_stem}{src.suffix}"
+            if not dst.exists():
+                shutil.move(str(src), str(dst))
+            for suf in ["_groundtruth.csv", "_drift_field_groundtruth.csv", "_meta.csv"]:
+                src_side = tmp_gt_dir / f"{src.stem}{suf}"
+                dst_side = tgt_gt_dir / f"{pref_stem}{suf}"
+                if src_side.exists() and not dst_side.exists():
+                    shutil.move(str(src_side), str(dst_side))
+    finally:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+
+
+def _has_required_sidecars(imaris_file: Path) -> bool:
+    """Check whether required GT sidecars exist for one synthetic IMARIS file."""
+    gt_dir = imaris_file.parent / "_groundtruth"
+    stem = imaris_file.stem
+    req = [
+        gt_dir / f"{stem}_groundtruth.csv",
+        gt_dir / f"{stem}_drift_field_groundtruth.csv",
+    ]
+    return all(p.exists() for p in req)
+
+def ensure_baseline_groundtruth() -> Path:
+    """Ensure `_groundtruth` contains baseline synthetic files for all required modes."""
+    GROUNDTRUTH_ROOT.mkdir(parents=True, exist_ok=True)
+    grouped = enumerate_groundtruth_files(GROUNDTRUTH_ROOT)
+    missing_modes: list[str] = []
+    for mode in BASELINE_MODES:
+        files = grouped.get(mode, [])
+        if len(files) < BASELINE_FILES_PER_MODE:
+            missing_modes.append(mode)
+            continue
+        if not all(_has_required_sidecars(p) for p in files):
+            missing_modes.append(mode)
+    for mode in missing_modes:
+        print(f"[INFO] Generating missing baseline mode '{mode}' in {GROUNDTRUTH_ROOT}")
+        _ensure_mode_generated(mode)
+    # Recheck and fail fast if incomplete.
+    grouped_after = enumerate_groundtruth_files(GROUNDTRUTH_ROOT)
+    for mode in BASELINE_MODES:
+        files = grouped_after.get(mode, [])
+        n = len(files)
+        if n < BASELINE_FILES_PER_MODE:
+            raise RuntimeError(
+                f"Incomplete baseline groundtruth for mode '{mode}': found {n}, expected >= {BASELINE_FILES_PER_MODE}."
+            )
+        missing_sidecars = [p.name for p in files if not _has_required_sidecars(p)]
+        if missing_sidecars:
+            raise RuntimeError(
+                f"Missing GT sidecars for mode '{mode}' files: {missing_sidecars[:5]}"
+            )
+    return GROUNDTRUTH_ROOT
+
+def _expected_large_folder_names() -> list[str]:
+    names: list[str] = []
+    for mode in BASELINE_MODES:
+        token = LARGE_FOLDER_MODE_TOKEN[mode]
+        for seed in range(LARGE_SEED_START, LARGE_SEED_START + LARGE_N_SEEDS):
+            names.append(f"{token}_seed_{seed:03d}")
+    return sorted(names)
+
+def list_large_regime_folders() -> list[Path]:
+    """List existing large regime folders under `_groundtruth_large`."""
+    if not GROUNDTRUTH_LARGE_ROOT.exists():
+        return []
+    return sorted([p for p in GROUNDTRUTH_LARGE_ROOT.iterdir() if p.is_dir()])
+
+def ensure_large_groundtruth_regimes() -> Path:
+    """Ensure `_groundtruth_large` contains deterministic 3-regime x 20-seed datasets."""
+    GROUNDTRUTH_LARGE_ROOT.mkdir(parents=True, exist_ok=True)
+    expected = _expected_large_folder_names()
+    existing = {p.name for p in list_large_regime_folders()}
+    missing = [name for name in expected if name not in existing]
+
+    for folder_name in missing:
+        mode = None
+        for m, token in LARGE_FOLDER_MODE_TOKEN.items():
+            if folder_name.startswith(f"{token}_seed_"):
+                mode = m
+                break
+        if mode is None:
+            continue
+        seed = int(folder_name.rsplit("_", 1)[-1])
+        out_dir = GROUNDTRUTH_LARGE_ROOT / folder_name
+        out_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Generating large groundtruth folder: {folder_name}")
+        synthetic_generate(
+            synthetic_dir=str(out_dir),
+            synthetic_seed=seed,
+            synthetic_n_files=5,
+            synthetic_n_tracks=80,
+            synthetic_n_times=20,
+            synthetic_stationary_fraction=0.45,
+            synthetic_migrating_fraction=0.35,
+            synthetic_temporal_smoothness=0.9,
+            synthetic_local_mode=mode,
+        )
+
+    # Strict completeness check.
+    existing_after = {p.name for p in list_large_regime_folders()}
+    missing_after = [name for name in expected if name not in existing_after]
+    if missing_after:
+        raise RuntimeError(f"Missing large-groundtruth folders after generation: {missing_after[:5]}")
+    return GROUNDTRUTH_LARGE_ROOT
 
 def _discover_method_timeseries_files(experiment_root: Path, method: str) -> dict[str, Path]:
     """Find `*_gt_rms_over_time_<method>.csv` files and map them by file stem."""
@@ -720,7 +880,6 @@ def _parse_rigid_config_name(name: str) -> tuple[float, int] | None:
     inlier_iters = int(m.group("it"))
     return keep_fraction, inlier_iters
 
-
 def _parse_local_config_name(name: str) -> tuple[int, float] | None:
     m = re.match(r"^k(?P<k>[0-9]+)_field(?P<f>[0-9]+(?:p[0-9]+)?)$", name)
     if m is None:
@@ -728,7 +887,6 @@ def _parse_local_config_name(name: str) -> tuple[int, float] | None:
     k_neighbors = int(m.group("k"))
     field_tok = m.group("f").replace("p", ".")
     return k_neighbors, float(field_tok)
-
 
 def _aggregate_fairness_sweep(sweep_root: Path, method: str, sweep_kind: str) -> pd.DataFrame:
     """Aggregate one fairness sweep folder into tidy regime-level summary rows."""
@@ -843,7 +1001,6 @@ def _aggregate_fairness_sweep(sweep_root: Path, method: str, sweep_kind: str) ->
         out = out[cols].sort_values(["regime", "k_neighbors", "ell_um_field"]).reset_index(drop=True)
     return out
 
-
 def _plot_lines_by_regime(
     df: pd.DataFrame,
     x_col: str,
@@ -893,7 +1050,6 @@ def _plot_lines_by_regime(
     plt.close(fig)
     generated.extend([png, pdf])
     return generated
-
 
 def _plot_heatmaps_by_regime(
     df: pd.DataFrame,
@@ -955,7 +1111,6 @@ def _plot_heatmaps_by_regime(
     generated.extend([png, pdf])
     return generated
 
-
 def _write_fairness_sweep_readme(
     sweep_root: Path,
     synthetic_dir: Path,
@@ -979,7 +1134,8 @@ def _write_fairness_sweep_readme(
     readme.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return readme
 
-# %% ST-RBF GRID + STATIONARY A/B HELPERS
+
+# ST-RBF GRID + STATIONARY A/B HELPERS:
 """Provide ST-RBF-specific helper functions for grid aggregation, A/B tests, and summary plotting."""
 
 def _aggregate_st_rbf_grid(sweep_root: Path) -> pd.DataFrame:
@@ -1390,36 +1546,324 @@ def _write_st_rbf_plot_readme(out_root: Path, generated_paths: list[Path], grid_
     readme_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return readme_path
 
+
+# STUDY AGGREGATION HELPERS:
+"""Build tidy and summary aggregation tables from per-file groundtruth metrics outputs.
+
+This helper layer exists so each sweep cell can emit canonical study artifacts:
+- `<study_tag>_aggregated.csv` (long/tidy)
+- `<study_tag>_summary.csv` (grouped mean/std/n)
+"""
+
+def _collect_metrics_from_roots(config_roots: dict[str, Path]) -> pd.DataFrame:
+    rows: list[pd.DataFrame] = []
+    for config, root in config_roots.items():
+        if not root.exists():
+            continue
+        for p in sorted(root.rglob("*_gt_metrics_summary.csv")):
+            file_stem = p.name.replace("_gt_metrics_summary.csv", "")
+            mode = parse_mode_from_filename(file_stem) or "unknown"
+            try:
+                df = pd.read_csv(p)
+            except Exception as exc:
+                print(f"[WARN] Failed to read {p}: {exc}")
+                continue
+            if df.empty:
+                continue
+            if "method" not in df.columns:
+                df = df.copy()
+                df["method"] = "unknown"
+            metric_cols = [
+                c for c in df.columns
+                if c not in {"method"} and pd.api.types.is_numeric_dtype(df[c])
+            ]
+            if not metric_cols:
+                continue
+            tidy = df[["method"] + metric_cols].melt(
+                id_vars=["method"], var_name="metric_name", value_name="metric_value"
+            )
+            tidy["file_stem"] = file_stem
+            tidy["mode"] = mode
+            tidy["config"] = config
+            rows.append(tidy[["file_stem", "mode", "config", "method", "metric_name", "metric_value"]])
+    if not rows:
+        return pd.DataFrame(columns=["file_stem", "mode", "config", "method", "metric_name", "metric_value"])
+    out = pd.concat(rows, ignore_index=True)
+    out["metric_value"] = pd.to_numeric(out["metric_value"], errors="coerce")
+    return out
+
+def _write_study_aggregates(study_tag: str, config_roots: dict[str, Path]) -> tuple[Path, Path]:
+    """Write tidy and grouped summary CSVs for a study across multiple configs."""
+    out_dir = results_root(study_tag)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tidy = _collect_metrics_from_roots(config_roots)
+    tidy_path = out_dir / f"{study_tag}_aggregated.csv"
+    tidy.to_csv(tidy_path, index=False)
+
+    metrics_of_interest = ["overall_rms_error", "drift_bias_abs"]
+    sub = tidy[tidy["metric_name"].isin(metrics_of_interest)].copy()
+    if sub.empty:
+        summary = pd.DataFrame(
+            columns=["mode", "config", "method", "metric_name", "mean", "std", "n"]
+        )
+    else:
+        summary = (
+            sub.groupby(["mode", "config", "method", "metric_name"], as_index=False)["metric_value"]
+            .agg(mean="mean", std="std", n="count")
+            .sort_values(["mode", "config", "method", "metric_name"])
+            .reset_index(drop=True)
+        )
+    summary_path = out_dir / f"{study_tag}_summary.csv"
+    summary.to_csv(summary_path, index=False)
+    return tidy_path, summary_path
+
+
+def _ordered_modes(values: list[str]) -> list[str]:
+    """Return mode labels in canonical order with unknown extras appended."""
+    known = [m for m in BASELINE_MODES if m in values]
+    extras = sorted([m for m in values if m not in BASELINE_MODES])
+    return known + extras
+
+
+def _ordered_methods(values: list[str]) -> list[str]:
+    """Return method labels in canonical order with unknown extras appended."""
+    known = [m for m in DEFAULT_METHODS if m in values]
+    extras = sorted([m for m in values if m not in DEFAULT_METHODS])
+    return known + extras
+
+
+def _plot_summary_grouped_bars(
+    summary_df: pd.DataFrame,
+    metric_name: str,
+    out_path: Path,
+    title: str,
+) -> bool:
+    """Plot grouped mean±std bars per mode with one bar per method."""
+    sub = summary_df[summary_df["metric_name"].astype(str) == str(metric_name)].copy()
+    if sub.empty:
+        print(f"[WARN] No rows for metric '{metric_name}' in baseline summary.")
+        return False
+    modes = _ordered_modes(sorted(sub["mode"].astype(str).unique().tolist()))
+    methods = _ordered_methods(sorted(sub["method"].astype(str).unique().tolist()))
+    if not modes or not methods:
+        return False
+
+    piv_mean = sub.pivot_table(index="mode", columns="method", values="mean", aggfunc="mean")
+    piv_std = sub.pivot_table(index="mode", columns="method", values="std", aggfunc="mean")
+    piv_mean = piv_mean.reindex(index=modes, columns=methods)
+    piv_std = piv_std.reindex(index=modes, columns=methods)
+
+    x = np.arange(len(modes), dtype=float)
+    width = min(0.8 / max(len(methods), 1), 0.22)
+    fig, ax = plt.subplots(figsize=(8.0, 4.8))
+    for i, method in enumerate(methods):
+        xi = x + (i - (len(methods) - 1) / 2.0) * width
+        yy = pd.to_numeric(piv_mean[method], errors="coerce").to_numpy(float)
+        ee = pd.to_numeric(piv_std[method], errors="coerce").to_numpy(float)
+        ax.bar(xi, yy, width=width, yerr=ee, capsize=3, label=method)
+    ax.set_xticks(x)
+    ax.set_xticklabels(modes, rotation=15, ha="right")
+    ax.set_ylabel(metric_name)
+    ax.set_title(title)
+    ax.set_ylim(bottom=0.0)
+    ax.legend()
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
+def _plot_summary_heatmap(
+    summary_df: pd.DataFrame,
+    metric_name: str,
+    out_path: Path,
+    title: str,
+) -> bool:
+    """Plot method x mode heatmap of mean metric values."""
+    sub = summary_df[summary_df["metric_name"].astype(str) == str(metric_name)].copy()
+    if sub.empty:
+        return False
+    modes = _ordered_modes(sorted(sub["mode"].astype(str).unique().tolist()))
+    methods = _ordered_methods(sorted(sub["method"].astype(str).unique().tolist()))
+    piv = sub.pivot_table(index="method", columns="mode", values="mean", aggfunc="mean")
+    piv = piv.reindex(index=methods, columns=modes)
+    if piv.shape[0] == 0 or piv.shape[1] == 0:
+        return False
+
+    mat = piv.to_numpy(float)
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("#f0f0f0")
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(metric_name)
+    ax.set_xticks(np.arange(len(modes)))
+    ax.set_xticklabels(modes, rotation=20, ha="right")
+    ax.set_yticks(np.arange(len(methods)))
+    ax.set_yticklabels(methods)
+    ax.set_title(title)
+    ax.set_xlabel("mode")
+    ax.set_ylabel("method")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
+def _plot_config_grouped_bars(
+    summary_df: pd.DataFrame,
+    metric_name: str,
+    out_path: Path,
+    title: str,
+    method_name: str = "rbf",
+) -> bool:
+    """Plot grouped mean±std bars per mode with one bar per config for a single method."""
+    sub = summary_df[
+        (summary_df["metric_name"].astype(str) == str(metric_name))
+        & (summary_df["method"].astype(str) == str(method_name))
+    ].copy()
+    if sub.empty:
+        print(f"[WARN] No rows for metric='{metric_name}', method='{method_name}'.")
+        return False
+
+    modes = _ordered_modes(sorted(sub["mode"].astype(str).unique().tolist()))
+    configs = sorted(sub["config"].astype(str).unique().tolist())
+    if not modes or not configs:
+        return False
+
+    piv_mean = sub.pivot_table(index="mode", columns="config", values="mean", aggfunc="mean").reindex(index=modes, columns=configs)
+    piv_std = sub.pivot_table(index="mode", columns="config", values="std", aggfunc="mean").reindex(index=modes, columns=configs)
+
+    x = np.arange(len(modes), dtype=float)
+    width = min(0.8 / max(len(configs), 1), 0.25)
+    fig, ax = plt.subplots(figsize=(8.0, 4.8))
+    for i, cfg in enumerate(configs):
+        xi = x + (i - (len(configs) - 1) / 2.0) * width
+        yy = pd.to_numeric(piv_mean[cfg], errors="coerce").to_numpy(float)
+        ee = pd.to_numeric(piv_std[cfg], errors="coerce").to_numpy(float)
+        ax.bar(xi, yy, width=width, yerr=ee, capsize=3, label=cfg)
+    ax.set_xticks(x)
+    ax.set_xticklabels(modes, rotation=15, ha="right")
+    ax.set_ylabel(metric_name)
+    ax.set_title(title)
+    ax.set_ylim(bottom=0.0)
+    ax.legend(title="config")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
+def _plot_config_heatmap(
+    summary_df: pd.DataFrame,
+    metric_name: str,
+    out_path: Path,
+    title: str,
+    method_name: str = "rbf",
+) -> bool:
+    """Plot config x mode heatmap of mean metric values for a single method."""
+    sub = summary_df[
+        (summary_df["metric_name"].astype(str) == str(metric_name))
+        & (summary_df["method"].astype(str) == str(method_name))
+    ].copy()
+    if sub.empty:
+        return False
+    modes = _ordered_modes(sorted(sub["mode"].astype(str).unique().tolist()))
+    configs = sorted(sub["config"].astype(str).unique().tolist())
+    piv = sub.pivot_table(index="config", columns="mode", values="mean", aggfunc="mean").reindex(index=configs, columns=modes)
+    if piv.shape[0] == 0 or piv.shape[1] == 0:
+        return False
+
+    mat = piv.to_numpy(float)
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("#f0f0f0")
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(metric_name)
+    ax.set_xticks(np.arange(len(modes)))
+    ax.set_xticklabels(modes, rotation=20, ha="right")
+    ax.set_yticks(np.arange(len(configs)))
+    ax.set_yticklabels(configs)
+    ax.set_title(title)
+    ax.set_xlabel("mode")
+    ax.set_ylabel("config")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
 # %% GENERATE SYNTHETIC BASELINE DATASET
-"""Generate the reproducible synthetic dataset once, or reuse existing files if already present."""
+"""Generate/validate baseline dataset across three modes in `_groundtruth`.
 
-RUN_SYNTH_DATASET_GENERATE_ONCE = False
-if RUN_SYNTH_DATASET_GENERATE_ONCE:
-    synthetic_generate(
-        synthetic_dir=str(SYNTH_REPRO_ROOT),
-        synthetic_seed=42,
-        synthetic_n_files=5,
-        synthetic_n_tracks=80,
-        synthetic_n_times=20,
-        synthetic_stationary_fraction=0.45,
-        synthetic_migrating_fraction=0.35,
-        synthetic_temporal_smoothness=0.9,
-        synthetic_local_mode="smooth",
-    )
-    print(f"Generated synthetic dataset at: {SYNTH_REPRO_ROOT}")
+Question answered:
+- Are all baseline modes (smooth, piecewise_smooth, piecewise_abrupt) present with stable names?
 
-# %% Baseline Method Comparison (Per File)
-"""Run baseline methods per synthetic file and write full per-file outputs for qualitative/quantitative checks."""
+Datasets:
+- Uses `_groundtruth` only.
 
-RUN_BASELINE_METHOD_COMPARISON = True
+Artifacts:
+- Mode-prefixed synthetic files in `_groundtruth`.
+
+Success:
+- Exactly/at least 5 files per mode exist and are discoverable by mode prefix.
+"""
+
+RUN_GENERATE_BASELINE_GROUNDTRUTH = False
+if RUN_GENERATE_BASELINE_GROUNDTRUTH:
+    ensure_baseline_groundtruth()
+    grouped = enumerate_groundtruth_files(GROUNDTRUTH_ROOT)
+    for mode in BASELINE_MODES:
+        print(f"[OK] {mode}: {len(grouped.get(mode, []))} files in {GROUNDTRUTH_ROOT}")
+# %% GENERATE LARGE REGIME DATASET
+"""Generate/validate 3x20 seeded regime datasets in `_groundtruth_large`.
+
+Question answered:
+- Is the canonical large dataset for regime benchmarking complete and reproducible?
+
+Datasets:
+- Uses `_groundtruth_large` only.
+
+Artifacts:
+- 60 deterministic folders: `<mode_token>_seed_<NNN>`.
+
+Success:
+- All expected folders exist; missing folders are generated without touching existing ones.
+"""
+
+RUN_GENERATE_LARGE_GROUNDTRUTH = False
+if RUN_GENERATE_LARGE_GROUNDTRUTH:
+    ensure_large_groundtruth_regimes()
+    print(f"[OK] large dataset folders: {len(list_large_regime_folders())}")
+# %% Baseline Method Comparison (All Baseline Modes; "baseline_suite")
+"""Run baseline methods on all baseline files across all three modes.
+
+Question answered:
+- How do core methods compare on per-file synthetic groundtruth across mode diversity?
+
+Datasets:
+- `_groundtruth` (smooth + piecewise_smooth + piecewise_abrupt).
+
+Artifacts:
+- Per-file method outputs under `Synthetic files parameter sweep/baseline_suite/<file_stem>/...`.
+
+Success:
+- Full outputs are generated for every baseline file and method.
+"""
+
+RUN_BASELINE_METHOD_COMPARISON = False
 if RUN_BASELINE_METHOD_COMPARISON:
-    _ensure_repro_dataset_exists()
-    baseline_root = _results_root("baseline_suite")
+    ensure_baseline_groundtruth()
+    baseline_root = results_root("baseline_suite")
     baseline_methods = ["rbf", "rigid", "local", "st_rbf", "st_rbf_moe"]
     baseline_opts = dict(OPTIONS)
     baseline_opts["st_moe_k_list"] = [2, 3, 5]
 
-    for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
+    for file_path in list_baseline_imaris_files():
         df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
         out_prefix = baseline_root / file_path.stem / file_path.stem
         corr = run_methods_for_dataframe(
@@ -1430,56 +1874,167 @@ if RUN_BASELINE_METHOD_COMPARISON:
             use_stationary_subset=False)
         postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
-# %% Baseline Regime Benchmark (Single Seed, Reuse Dataset)
-"""Run a one-seed regime benchmark on the fixed dataset for quick cross-regime baseline comparison."""
+# Baseline Suite Aggregation
+"""Aggregate baseline suite metrics into canonical tidy and summary CSVs.
 
-RUN_BASELINE_REGIME_BENCHMARK = False
-if RUN_BASELINE_REGIME_BENCHMARK:
-    _ensure_repro_dataset_exists()
-    baseline_regime_root = _results_root("baseline_regime_suite")
-    synthetic_regime_benchmark(
-        synthetic_dir=str(SYNTH_REPRO_ROOT),
-        out=str(baseline_regime_root),
-        reuse_existing=1,
-        methods="rbf,rigid,local,st_rbf,st_rbf_moe",
-        synthetic_n_seeds=1,
-        st_moe_k_list="2,3,5",
-    )
+Question answered:
+- What is the method-level performance distribution by mode over baseline files?
 
+Datasets:
+- Reads outputs from `Synthetic files parameter sweep/baseline_suite`.
 
-# %% RBF Robust Mode A/B
-"""Compare RBF robust fitting variants (sample_trim vs irls_huber) on identical synthetic inputs."""
+Artifacts:
+- `Synthetic files parameter sweep/baseline_suite/baseline_suite_aggregated.csv`
+- `Synthetic files parameter sweep/baseline_suite/baseline_suite_summary.csv`
+- `Synthetic files parameter sweep/baseline_suite/baseline_suite_*_plot.png` (mode-vs-method summaries)
 
-RUN_RBF_ROBUST_MODE_AB = False
-if RUN_RBF_ROBUST_MODE_AB:
-    _ensure_repro_dataset_exists()
-    runs = [
-        ("sample_trim", "rbf_robust_sample_trim"),
-        ("irls_huber", "rbf_robust_irls_huber"),
+Success:
+- Summary tables plus overview plots make method differences across smooth/piecewise modes directly visible.
+"""
+
+RUN_BASELINE_SUITE_AGGREGATION = False
+if RUN_BASELINE_SUITE_AGGREGATION:
+    tidy_path, summary_path = _write_study_aggregates(
+        "baseline_suite",
+        {"baseline_suite": results_root("baseline_suite")})
+    print(f"[OK] {tidy_path}")
+    print(f"[OK] {summary_path}")
+
+    summary = pd.read_csv(summary_path)
+    out_dir = results_root("baseline_suite")
+    generated: list[Path] = []
+    plot_specs = [
+        ("overall_rms_error", "Baseline suite: overall RMS by mode and method"),
+        ("drift_bias_abs", "Baseline suite: drift bias by mode and method"),
     ]
+    for metric_name, title in plot_specs:
+        p_bar = out_dir / f"baseline_suite_{metric_name}_grouped_bar_plot.png"
+        if _plot_summary_grouped_bars(summary, metric_name=metric_name, out_path=p_bar, title=title):
+            generated.append(p_bar)
+        p_hm = out_dir / f"baseline_suite_{metric_name}_heatmap_plot.png"
+        if _plot_summary_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title):
+            generated.append(p_hm)
+
+    if generated:
+        readme = out_dir / "baseline_suite_plots_README.txt"
+        readme.write_text(
+            "\n".join(
+                [
+                    f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                    f"summary_csv: {summary_path}",
+                    "description: Means and std over baseline files, grouped by mode and method.",
+                    "plots:",
+                    *[f"- {p.name}" for p in generated],
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"[OK] Wrote baseline suite plots: {len(generated)}")
+# %% RBF Robust Mode Sweep (All Baseline Modes)
+"""Run RBF robust-mode sweep across all baseline files and modes.
+
+Question answered:
+- Does IRLS-Huber improve or stabilize RBF versus sample trimming across modes?
+
+Datasets:
+- `_groundtruth` all files.
+
+Artifacts:
+- Per-config outputs under `Synthetic files parameter sweep/rbf_robust_*`.
+"""
+
+RUN_RBF_ROBUST_MODE_SWEEP = False
+if RUN_RBF_ROBUST_MODE_SWEEP:
+    ensure_baseline_groundtruth()
+    runs = [("sample_trim", "rbf_robust_sample_trim"), ("irls_huber", "rbf_robust_irls_huber")]
     for robust_mode, tag in runs:
         opts_rbf = dict(OPTIONS)
         opts_rbf["robust_mode"] = robust_mode
-        out_root = _results_root(tag)
-        for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
+        out_root = results_root(tag)
+        for file_path in list_baseline_imaris_files():
             df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
             out_prefix = out_root / file_path.stem / file_path.stem
-            corr = run_methods_for_dataframe(
-                df=df_syn,
-                out_prefix=out_prefix,
-                methods=["rbf"],
-                opts=opts_rbf,
-                use_stationary_subset=False,
-            )
+            corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=["rbf"], opts=opts_rbf)
             postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
+# RBF Robust Mode Aggregation:
+"""Aggregate RBF robust sweep into tidy and summary CSVs.
 
-# %% ST-RBF Robust Mode A/B/C
-"""Compare ST-RBF robust modes (sample_trim, irls_huber, hybrid_track_irls) under matched conditions."""
+Question answered:
+- Which robust configuration yields lower RMS and drift-bias by mode?
 
-RUN_ST_RBF_ROBUST_MODE_ABC = False
-if RUN_ST_RBF_ROBUST_MODE_ABC:
-    _ensure_repro_dataset_exists()
+Datasets:
+- Reads `Synthetic files parameter sweep/rbf_robust_sample_trim` and `Synthetic files parameter sweep/rbf_robust_irls_huber`.
+
+Artifacts:
+- `Synthetic files parameter sweep/rbf_robust_sweep/rbf_robust_sweep_aggregated.csv`
+- `Synthetic files parameter sweep/rbf_robust_sweep/rbf_robust_sweep_summary.csv`
+- `Synthetic files parameter sweep/rbf_robust_sweep/rbf_robust_*_plot.png` (config-vs-mode summaries)
+
+Success:
+- Plots clearly show whether `sample_trim` or `irls_huber` is better per mode and in aggregate.
+"""
+
+RUN_RBF_ROBUST_MODE_AGGREGATION = False
+if RUN_RBF_ROBUST_MODE_AGGREGATION:
+    tidy_path, summary_path = _write_study_aggregates(
+        "rbf_robust_sweep",
+        {
+            "sample_trim": results_root("rbf_robust_sample_trim"),
+            "irls_huber": results_root("rbf_robust_irls_huber"),
+        },
+    )
+    print(f"[OK] {tidy_path}")
+    print(f"[OK] {summary_path}")
+
+    summary = pd.read_csv(summary_path)
+    out_dir = results_root("rbf_robust_sweep")
+    generated: list[Path] = []
+    plot_specs = [
+        ("overall_rms_error", "RBF robust sweep: overall RMS by mode and config"),
+        ("drift_bias_abs", "RBF robust sweep: drift bias by mode and config"),
+    ]
+    for metric_name, title in plot_specs:
+        p_bar = out_dir / f"rbf_robust_{metric_name}_grouped_bar_plot.png"
+        if _plot_config_grouped_bars(summary, metric_name=metric_name, out_path=p_bar, title=title, method_name="rbf"):
+            generated.append(p_bar)
+        p_hm = out_dir / f"rbf_robust_{metric_name}_heatmap_plot.png"
+        if _plot_config_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title, method_name="rbf"):
+            generated.append(p_hm)
+
+    if generated:
+        readme = out_dir / "rbf_robust_plots_README.txt"
+        readme.write_text(
+            "\n".join(
+                [
+                    f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                    f"summary_csv: {summary_path}",
+                    "description: Means and std over baseline files, grouped by mode and robust config.",
+                    "plots:",
+                    *[f"- {p.name}" for p in generated],
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"[OK] Wrote RBF robust plots: {len(generated)}")
+# %% ST-RBF Robust Mode Sweep (All Baseline Modes)
+"""Run ST-RBF robust-mode sweep across all baseline files and modes.
+
+Question answered:
+- How do sample_trim, irls_huber, and hybrid_track_irls compare under identical data coverage?
+
+Datasets:
+- `_groundtruth` all files.
+
+Artifacts:
+- Per-config outputs under `Synthetic files parameter sweep/st_rbf_robust_*`.
+"""
+
+RUN_ST_RBF_ROBUST_MODE_SWEEP = False
+if RUN_ST_RBF_ROBUST_MODE_SWEEP:
+    ensure_baseline_groundtruth()
     runs = [
         ("sample_trim", "st_rbf_robust_sample_trim"),
         ("irls_huber", "st_rbf_robust_irls_huber"),
@@ -1488,26 +2043,100 @@ if RUN_ST_RBF_ROBUST_MODE_ABC:
     for robust_mode, tag in runs:
         opts_st = dict(OPTIONS)
         opts_st["st_robust_mode"] = robust_mode
-        out_root = _results_root(tag)
-        for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
+        out_root = results_root(tag)
+        for file_path in list_baseline_imaris_files():
             df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
             out_prefix = out_root / file_path.stem / file_path.stem
-            corr = run_methods_for_dataframe(
-                df=df_syn,
-                out_prefix=out_prefix,
-                methods=["st_rbf"],
-                opts=opts_st,
-                use_stationary_subset=False,
-            )
+            corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=["st_rbf"], opts=opts_st)
             postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
 
-# %% ST-RBF Expressivity A/B
-"""Test ST-RBF expressivity settings (anisotropic lengthscales and linear interaction terms)."""
+# ST-RBF Robust Mode Aggregation:
+"""Aggregate ST-RBF robust-mode sweep into canonical tidy and summary CSVs.
 
-RUN_ST_RBF_EXPRESSIVITY_AB = False
-if RUN_ST_RBF_EXPRESSIVITY_AB:
-    _ensure_repro_dataset_exists()
+Question answered:
+- Which robust mode is best overall and by baseline mode.
+
+Datasets:
+- Reads `Synthetic files parameter sweep/st_rbf_robust_*`.
+
+Artifacts:
+- `Synthetic files parameter sweep/st_rbf_robust_sweep/st_rbf_robust_sweep_aggregated.csv`
+- `Synthetic files parameter sweep/st_rbf_robust_sweep/st_rbf_robust_sweep_summary.csv`
+- `Synthetic files parameter sweep/st_rbf_robust_sweep/st_rbf_robust_*_plot.png` (config-vs-mode summaries)
+"""
+
+RUN_ST_RBF_ROBUST_MODE_AGGREGATION = False
+if RUN_ST_RBF_ROBUST_MODE_AGGREGATION:
+    tidy_path, summary_path = _write_study_aggregates(
+        "st_rbf_robust_sweep",
+        {
+            "sample_trim": results_root("st_rbf_robust_sample_trim"),
+            "irls_huber": results_root("st_rbf_robust_irls_huber"),
+            "hybrid_track_irls": results_root("st_rbf_robust_hybrid_track_irls"),
+        },
+    )
+    print(f"[OK] {tidy_path}")
+    print(f"[OK] {summary_path}")
+    summary = pd.read_csv(summary_path)
+    out_dir = results_root("st_rbf_robust_sweep")
+    generated: list[Path] = []
+    plot_specs = [
+        ("overall_rms_error", "ST-RBF robust sweep: overall RMS by mode and config"),
+        ("drift_bias_abs", "ST-RBF robust sweep: drift bias by mode and config"),
+    ]
+    for metric_name, title in plot_specs:
+        p_bar = out_dir / f"st_rbf_robust_{metric_name}_grouped_bar_plot.png"
+        if _plot_config_grouped_bars(
+            summary,
+            metric_name=metric_name,
+            out_path=p_bar,
+            title=title,
+            method_name="st_rbf",
+        ):
+            generated.append(p_bar)
+        p_hm = out_dir / f"st_rbf_robust_{metric_name}_heatmap_plot.png"
+        if _plot_config_heatmap(
+            summary,
+            metric_name=metric_name,
+            out_path=p_hm,
+            title=title,
+            method_name="st_rbf",
+        ):
+            generated.append(p_hm)
+
+    if generated:
+        readme = out_dir / "st_rbf_robust_plots_README.txt"
+        readme.write_text(
+            "\n".join(
+                [
+                    f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                    f"summary_csv: {summary_path}",
+                    "description: Means and std over baseline files, grouped by mode and robust config.",
+                    "plots:",
+                    *[f"- {p.name}" for p in generated],
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"[OK] Wrote ST-RBF robust plots: {len(generated)}")
+# %% ST-RBF Expressivity Sweep (All Baseline Modes)
+"""Run ST-RBF expressivity settings across all baseline files.
+
+Question answered:
+- Do anisotropic scales and/or linear interaction terms improve fit quality across modes?
+
+Datasets:
+- `_groundtruth` all files.
+
+Artifacts:
+- Per-config outputs under `Synthetic files parameter sweep/st_rbf_expressivity_*`.
+"""
+
+RUN_ST_RBF_EXPRESSIVITY_SWEEP = False
+if RUN_ST_RBF_EXPRESSIVITY_SWEEP:
+    ensure_baseline_groundtruth()
     runs = [
         (
             "st_rbf_expressivity_anisotropic_off",
@@ -1558,212 +2187,330 @@ if RUN_ST_RBF_EXPRESSIVITY_AB:
             },
         ),
     ]
-
     for tag, cfg in runs:
+        out_root = results_root(tag)
         opts_st = dict(OPTIONS)
         opts_st.update(cfg)
-        out_root = _results_root(tag)
-        for file_path in list_imaris_xls_files(SYNTH_REPRO_ROOT):
+        for file_path in list_baseline_imaris_files():
             df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
             out_prefix = out_root / file_path.stem / file_path.stem
-            corr = run_methods_for_dataframe(
-                df=df_syn,
-                out_prefix=out_prefix,
-                methods=["st_rbf"],
-                opts=opts_st,
-                use_stationary_subset=False,
-            )
+            corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=["st_rbf"], opts=opts_st)
             postprocess_outputs(df_syn, file_path, out_prefix, corr)
 
 
-# %% Paper Regression Harness (Optional)
-"""Run the paper regression harness to verify expected artifact manifests and metrics schema stability."""
+# ST-RBF Expressivity Aggregation:
+"""Aggregate ST-RBF expressivity sweep into tidy and summary CSVs.
 
-RUN_PAPER_REGRESSION_CHECK = False
-if RUN_PAPER_REGRESSION_CHECK:
-    _ensure_repro_dataset_exists()
-    paper_regression(
-        synthetic_dir=str(SYNTH_REPRO_ROOT),
-        out=str(_results_root("paper_regression")),
-        manifest=str(PROJECT_ROOT / "paper_outputs_manifest.txt"),
-        columns_manifest=str(PROJECT_ROOT / "paper_metrics_columns.json"),
-        methods="rbf,rigid,local,st_rbf",
-        reuse_existing=1,
+Question answered:
+- Which expressivity toggle wins by mode and overall.
+
+Datasets:
+- Reads `Synthetic files parameter sweep/st_rbf_expressivity_*`.
+
+Artifacts:
+- `Synthetic files parameter sweep/st_rbf_expressivity_sweep/st_rbf_expressivity_sweep_aggregated.csv`
+- `Synthetic files parameter sweep/st_rbf_expressivity_sweep/st_rbf_expressivity_sweep_summary.csv`
+- `Synthetic files parameter sweep/st_rbf_expressivity_sweep/st_rbf_expressivity_*_plot.png` (config-vs-mode summaries)
+"""
+
+RUN_ST_RBF_EXPRESSIVITY_AGGREGATION = False
+if RUN_ST_RBF_EXPRESSIVITY_AGGREGATION:
+    tidy_path, summary_path = _write_study_aggregates(
+        "st_rbf_expressivity_sweep",
+        {
+            "anisotropic_off": results_root("st_rbf_expressivity_anisotropic_off"),
+            "anisotropic_on": results_root("st_rbf_expressivity_anisotropic_on"),
+            "linear_terms_off": results_root("st_rbf_expressivity_linear_terms_off"),
+            "linear_terms_on": results_root("st_rbf_expressivity_linear_terms_on"),
+        },
     )
+    print(f"[OK] {tidy_path}")
+    print(f"[OK] {summary_path}")
+    summary = pd.read_csv(summary_path)
+    out_dir = results_root("st_rbf_expressivity_sweep")
+    generated: list[Path] = []
+    plot_specs = [
+        ("overall_rms_error", "ST-RBF expressivity sweep: overall RMS by mode and config"),
+        ("drift_bias_abs", "ST-RBF expressivity sweep: drift bias by mode and config"),
+    ]
+    for metric_name, title in plot_specs:
+        p_bar = out_dir / f"st_rbf_expressivity_{metric_name}_grouped_bar_plot.png"
+        if _plot_config_grouped_bars(
+            summary,
+            metric_name=metric_name,
+            out_path=p_bar,
+            title=title,
+            method_name="st_rbf",
+        ):
+            generated.append(p_bar)
+        p_hm = out_dir / f"st_rbf_expressivity_{metric_name}_heatmap_plot.png"
+        if _plot_config_heatmap(
+            summary,
+            metric_name=metric_name,
+            out_path=p_hm,
+            title=title,
+            method_name="st_rbf",
+        ):
+            generated.append(p_hm)
 
+    if generated:
+        readme = out_dir / "st_rbf_expressivity_plots_README.txt"
+        readme.write_text(
+            "\n".join(
+                [
+                    f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                    f"summary_csv: {summary_path}",
+                    "description: Means and std over baseline files, grouped by mode and expressivity config.",
+                    "plots:",
+                    *[f"- {p.name}" for p in generated],
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"[OK] Wrote ST-RBF expressivity plots: {len(generated)}")
+# %% Canonical Large Regime Benchmark (3 Modes x 20 Seeds)
+"""Run the canonical large benchmark over `_groundtruth_large`.
 
-# %% ST-RBF Regime Benchmark (20 Seeds, Fixed Dataset)
-"""Run a multi-seed regime benchmark on the fixed dataset to estimate mean/std method behavior."""
+Question answered:
+- How stable are method rankings across 3 regimes and 20 seeds each?
 
-RUN_ST_RBF_REGIMES_20_SEEDS = False
-if RUN_ST_RBF_REGIMES_20_SEEDS:
-    _ensure_repro_dataset_exists()
-    synthetic_regime_benchmark(
-        synthetic_dir=str(SYNTH_REPRO_ROOT),
-        out=str(_results_root("regimes_20seeds")),
-        reuse_existing=1,
-        methods="rbf,rigid,local,st_rbf",
-        synthetic_n_seeds=20,
-    )
+Datasets:
+- `_groundtruth_large` only.
 
+Artifacts:
+- Per-run outputs in `Synthetic files parameter sweep/regime_benchmark_large_20seeds/...`
+- Aggregated tables in the same root.
+"""
 
+RUN_LARGE_REGIME_BENCHMARK = False
+if RUN_LARGE_REGIME_BENCHMARK:
+    ensure_large_groundtruth_regimes()
+    out_root = results_root("regime_benchmark_large_20seeds")
+    methods = ["rbf", "rigid", "local", "st_rbf"]
+    opts = dict(OPTIONS)
+
+    for regime_dir in list_large_regime_folders():
+        for file_path in list_imaris_xls_files(regime_dir):
+            df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+            out_prefix = out_root / regime_dir.name / file_path.stem / file_path.stem
+            corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=methods, opts=opts)
+            postprocess_outputs(df_syn, file_path, out_prefix, corr)
+
+    # Aggregate per-file metric summaries.
+    rows: list[pd.DataFrame] = []
+    for p in sorted(out_root.rglob("*_gt_metrics_summary.csv")):
+        try:
+            df = pd.read_csv(p)
+        except Exception:
+            continue
+        if df.empty or "method" not in df.columns:
+            continue
+        run_folder = p.parents[1].name  # <regime_folder>/<file_stem>/<file_stem>_gt_metrics_summary.csv
+        metrics = [c for c in df.columns if c != "method" and pd.api.types.is_numeric_dtype(df[c])]
+        if not metrics:
+            continue
+        tidy = df[["method"] + metrics].melt(id_vars=["method"], var_name="metric_name", value_name="metric_value")
+        tidy["run_folder"] = run_folder
+        tidy["file_stem"] = p.name.replace("_gt_metrics_summary.csv", "")
+        rows.append(tidy[["run_folder", "file_stem", "method", "metric_name", "metric_value"]])
+    if rows:
+        agg = pd.concat(rows, ignore_index=True)
+        agg.to_csv(out_root / "regime_benchmark_large_20seeds_aggregated.csv", index=False)
+        summary = (
+            agg.groupby(["run_folder", "method", "metric_name"], as_index=False)["metric_value"]
+            .agg(mean="mean", std="std", n="count")
+            .sort_values(["run_folder", "method", "metric_name"])
+            .reset_index(drop=True)
+        )
+        summary.to_csv(out_root / "regime_benchmark_large_20seeds_summary.csv", index=False)
 # %% ST-RBF Parameter Grid Sweep (3x3)
-"""Run a compact 3x3 ST-RBF lengthscale sweep over spatial and temporal kernel scales."""
+"""Run ST-RBF parameter grid sweep using baseline datasets across all modes.
+
+Question answered:
+- Which (ell_space, ell_time) pair minimizes RMS/bias across mode-diverse baseline data?
+
+Datasets:
+- `_groundtruth` as source for reuse-existing benchmark inputs.
+
+Artifacts:
+- Grid run folders and aggregated tables under `Synthetic files parameter sweep/st_rbf_parameter_selection`.
+"""
 
 RUN_ST_RBF_GRID_SWEEP = False
 if RUN_ST_RBF_GRID_SWEEP:
-    _ensure_repro_dataset_exists()
-    grid_root = _results_root("st_rbf_parameter_selection")
+    baseline_dir = ensure_baseline_groundtruth()
+    grid_root = results_root("st_rbf_parameter_selection")
     grid_root.mkdir(parents=True, exist_ok=True)
     for es in ES_VALUES:
-        print(f"[INFO] Starting ST-RBF grid sweep for ell_space={es}")
         for et in ET_VALUES:
-            print(f"[INFO] Running grid point ell_space={es}, ell_time={et}")
             synthetic_regime_benchmark(
-                synthetic_dir=str(SYNTH_REPRO_ROOT),
+                synthetic_dir=str(baseline_dir),
                 out=str(grid_root / f"st_rbf_grid_es{es}_et{et}"),
                 reuse_existing=1,
                 methods="st_rbf",
                 synthetic_n_seeds=10,
                 st_ell_space=float(es),
-                st_ell_time=float(et),
-            )
+                st_ell_time=float(et))
 
+# ST-RBF Grid Aggregation:
+"""Aggregate ST-RBF grid sweep into canonical CSV artifacts.
 
-# %% ST-RBF Grid Aggregation
-"""Aggregate ST-RBF grid runs into one tidy CSV with regime-level summary statistics."""
+Question answered:
+- Which ST-RBF grid points are robust across regimes.
+
+Datasets:
+- Reads `Synthetic files parameter sweep/st_rbf_parameter_selection/st_rbf_grid_es*_et*`.
+
+Artifacts:
+- `st_rbf_grid_aggregated.csv` + README in the same result root.
+- `st_rbf_grid_aggregation_*_plot.png` (per-regime and across-regime heatmaps for RMS and drift bias).
+"""
 
 RUN_ST_RBF_GRID_AGGREGATION = False
 if RUN_ST_RBF_GRID_AGGREGATION:
-    grid_root = _results_root("st_rbf_parameter_selection")
+    grid_root = results_root("st_rbf_parameter_selection")
     grid_root.mkdir(parents=True, exist_ok=True)
     aggregated = _aggregate_st_rbf_grid(grid_root)
     aggregated_csv = grid_root / "st_rbf_grid_aggregated.csv"
     aggregated.to_csv(aggregated_csv, index=False)
-    readme = grid_root / "st_rbf_grid_aggregated_README.txt"
-    n_grid_points = int(aggregated[["ell_space", "ell_time"]].drop_duplicates().shape[0])
-    n_regimes = int(aggregated["regime"].nunique())
-    readme.write_text(
+    generated: list[Path] = []
+    if "regime" in aggregated.columns:
+        for regime in sorted(aggregated["regime"].dropna().astype(str).unique().tolist()):
+            reg = aggregated[aggregated["regime"].astype(str) == regime].copy()
+            p_rms = grid_root / f"st_rbf_grid_aggregation_mean_rms_all__regime_{regime}.png"
+            if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}: mean_rms_all", p_rms):
+                generated.append(p_rms)
+            p_bias = grid_root / f"st_rbf_grid_aggregation_mean_drift_bias_abs__regime_{regime}.png"
+            if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}: mean_drift_bias_abs", p_bias):
+                generated.append(p_bias)
+    p_all_rms = grid_root / "st_rbf_grid_aggregation_mean_rms_all__across_regimes.png"
+    if _plot_grid_heatmap(
+        aggregated,
+        "mean_rms_all",
+        "ST-RBF grid: mean_rms_all across regimes",
+        p_all_rms,
+    ):
+        generated.append(p_all_rms)
+    p_all_bias = grid_root / "st_rbf_grid_aggregation_mean_drift_bias_abs__across_regimes.png"
+    if _plot_grid_heatmap(
+        aggregated,
+        "mean_drift_bias_abs",
+        "ST-RBF grid: mean_drift_bias_abs across regimes",
+        p_all_bias,
+    ):
+        generated.append(p_all_bias)
+
+    (grid_root / "st_rbf_grid_aggregated_README.txt").write_text(
         "\n".join(
             [
                 f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
-                f"synthetic_dir: {SYNTH_REPRO_ROOT}",
+                f"baseline_groundtruth: {GROUNDTRUTH_ROOT}",
                 f"ell_space_values: {ES_VALUES}",
                 f"ell_time_values: {ET_VALUES}",
                 f"aggregated_csv: {aggregated_csv}",
-                f"grid_points_aggregated: {n_grid_points}",
-                f"regimes_aggregated: {n_regimes}",
+                "plots:",
+                *[f"- {p.name}" for p in generated],
             ]
         )
         + "\n",
         encoding="utf-8",
     )
-    print(f"[OK] Wrote ST-RBF grid aggregation: {aggregated_csv}")
+    if generated:
+        print(f"[OK] Wrote ST-RBF grid aggregation plots: {len(generated)}")
 
+# %% ST-RBF Stationary Subset A/B
+"""Run and aggregate stationary subset A/B tests for ST-RBF parameter selection.
 
-# %% ST-RBF Stationary Subset A/B (10 Seeds)
-"""Run stationary-subset A/B experiments for selected ST-RBF parameter candidates across 10 seeds."""
+Question answered:
+- Should stationary-only fitting be enabled by default for ST-RBF parameter selection setup?
+
+Datasets:
+- `_groundtruth` reused for benchmark runs.
+
+Artifacts:
+- `st_rbf_stationary_ab_summary.csv`, `st_rbf_stationary_ab_report.md`.
+"""
 
 RUN_ST_RBF_STATIONARY_AB_TESTS = False
 if RUN_ST_RBF_STATIONARY_AB_TESTS:
-    _ensure_repro_dataset_exists()
-    selection_root = _results_root("st_rbf_parameter_selection")
+    baseline_dir = ensure_baseline_groundtruth()
+    selection_root = results_root("st_rbf_parameter_selection")
     selection_root.mkdir(parents=True, exist_ok=True)
-    _run_stationary_ab_tests(synthetic_dir=SYNTH_REPRO_ROOT, out_root=selection_root)
+    _run_stationary_ab_tests(synthetic_dir=baseline_dir, out_root=selection_root)
     summary = _aggregate_stationary_ab(out_root=selection_root)
     summary_csv = selection_root / "st_rbf_stationary_ab_summary.csv"
     summary.to_csv(summary_csv, index=False)
-    report_md = selection_root / "st_rbf_stationary_ab_report.md"
-    _write_stationary_ab_report(summary, report_md)
-    print(f"[OK] Wrote stationary subset A/B summary: {summary_csv}")
+    _write_stationary_ab_report(summary, selection_root / "st_rbf_stationary_ab_report.md")
+# %% ST-RBF Parameter Selection Plots
+"""Generate compact parameter-selection plots from canonical ST-RBF aggregate CSVs.
 
+Question answered:
+- Are selected defaults visually justified across regimes and stationary subset A/B settings?
 
-# %% ST-RBF Parameter Selection Plots (Paper-Ready)
-"""Generate paper-ready parameter-selection plots from aggregated ST-RBF grid and A/B summary CSVs."""
+Datasets:
+- Reads aggregated CSVs from `Synthetic files parameter sweep/st_rbf_parameter_selection`.
+
+Artifacts:
+- Heatmaps and A/B plots plus plotting README in selection root.
+"""
 
 RUN_ST_RBF_SELECTION_PLOTS = False
 if RUN_ST_RBF_SELECTION_PLOTS:
-    selection_root = _results_root("st_rbf_parameter_selection")
+    selection_root = results_root("st_rbf_parameter_selection")
     generated: list[Path] = []
     grid_csv = selection_root / "st_rbf_grid_aggregated.csv"
     ab_csv = selection_root / "st_rbf_stationary_ab_summary.csv"
-
     if grid_csv.exists():
         grid = pd.read_csv(grid_csv)
         if "regime" in grid.columns:
             for regime in sorted(grid["regime"].dropna().astype(str).unique().tolist()):
                 reg = grid[grid["regime"].astype(str) == regime].copy()
                 p1 = selection_root / f"st_rbf_grid_heatmap_mean_rms_all__regime_{regime}.png"
-                if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}: mean_rms_all", p1, highlight=(4.0, 0.4)):
+                if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}: mean_rms_all", p1):
                     generated.append(p1)
                 p2 = selection_root / f"st_rbf_grid_heatmap_mean_drift_bias_abs__regime_{regime}.png"
-                if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}: mean_drift_bias_abs", p2, highlight=(4.0, 0.4)):
+                if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}: mean_drift_bias_abs", p2):
                     generated.append(p2)
-
-            g_rms = grid.groupby(["ell_space", "ell_time"], as_index=False).agg(mean_rms_all=("mean_rms_all", "mean"))
-            p3 = selection_root / "st_rbf_grid_heatmap_mean_rms_all__across_regimes.png"
-            if _plot_grid_heatmap(g_rms, "mean_rms_all", "Across regimes: mean_rms_all", p3, highlight=(4.0, 0.4)):
-                generated.append(p3)
-
-            g_bias = grid.groupby(["ell_space", "ell_time"], as_index=False).agg(
-                mean_drift_bias_abs=("mean_drift_bias_abs", "mean")
-            )
-            p4 = selection_root / "st_rbf_grid_heatmap_mean_drift_bias_abs__across_regimes.png"
-            if _plot_grid_heatmap(
-                g_bias, "mean_drift_bias_abs", "Across regimes: mean_drift_bias_abs", p4, highlight=(4.0, 0.4)
-            ):
-                generated.append(p4)
-        else:
-            print(f"[WARN] Grid plots skipped: missing regime column in {grid_csv}")
-    else:
-        print(f"[WARN] Grid plots skipped: missing input CSV {grid_csv}")
-
     if ab_csv.exists():
         ab = pd.read_csv(ab_csv)
         if "regime" in ab.columns:
             for regime in sorted(ab["regime"].dropna().astype(str).unique().tolist()):
                 p = selection_root / f"st_rbf_stationary_subset_ab__mean_rms_all__regime_{regime}.png"
-                if _plot_stationary_subset_ab(ab, regime=regime, out_path=p, highlight=(4.0, 0.4)):
+                if _plot_stationary_subset_ab(ab, regime=regime, out_path=p):
                     generated.append(p)
             p_all = selection_root / "st_rbf_stationary_subset_ab__mean_rms_all__all_regimes.png"
-            if _plot_stationary_subset_ab(ab, regime=None, out_path=p_all, highlight=(4.0, 0.4)):
+            if _plot_stationary_subset_ab(ab, regime=None, out_path=p_all):
                 generated.append(p_all)
-        else:
-            print(f"[WARN] Stationary A/B plots skipped: missing regime column in {ab_csv}")
-    else:
-        print(f"[WARN] Stationary A/B plots skipped: missing input CSV {ab_csv}")
+    _write_st_rbf_plot_readme(selection_root, generated, grid_csv, ab_csv)
+# %% Rigid/Local Fairness Sweeps
+"""Run bounded fairness sweeps and aggregate outputs from canonical benchmark folders.
 
-    readme_plot = _write_st_rbf_plot_readme(
-        out_root=selection_root,
-        generated_paths=generated,
-        grid_csv=grid_csv,
-        ab_csv=ab_csv,
-    )
-    print(f"[OK] Wrote ST-RBF selection plot README: {readme_plot}")
-    print(f"[OK] Generated {len(generated)} plot(s) in {selection_root}")
+Question answered:
+- Are rigid/local baselines competitive because of defaults or due to genuine method behavior?
 
+Datasets:
+- Baseline `_groundtruth` reused for synthetic benchmark entry point.
 
-# %% FAIRNESS SWEEPS: Rigid and Local (Bounded Grids)
-"""Run bounded fairness sweeps for rigid/local baselines and aggregate per-regime outcome metrics."""
+Artifacts:
+- Sweep folders + aggregated CSV + line/heatmap plots under `Synthetic files parameter sweep/rigid_fairness_sweep` and `Synthetic files parameter sweep/local_fairness_sweep`.
+"""
 
 RUN_RIGID_FAIRNESS_SWEEP = False
 RUN_LOCAL_FAIRNESS_SWEEP = False
 
 if RUN_RIGID_FAIRNESS_SWEEP:
-    _ensure_repro_dataset_exists()
-    rigid_root = _results_root("rigid_fairness_sweep")
+    baseline_dir = ensure_baseline_groundtruth()
+    rigid_root = results_root("rigid_fairness_sweep")
     rigid_root.mkdir(parents=True, exist_ok=True)
-
     for keep_fraction in RIGID_KEEP_FRACTIONS:
         for inlier_iters in RIGID_INLIER_ITERS:
             tag = f"kf{_fmt_float_token(keep_fraction, 2)}_inlier{int(inlier_iters)}"
             out_dir = rigid_root / tag
             if _has_completed_regime_run(out_dir, method="rigid"):
-                print(f"[INFO] Reusing rigid sweep run: {out_dir}")
                 continue
-            print(f"[INFO] Running rigid sweep config: keep_fraction={keep_fraction}, inlier_reestimate_iters={inlier_iters}")
             synthetic_regime_benchmark(
-                synthetic_dir=str(SYNTH_REPRO_ROOT),
+                synthetic_dir=str(baseline_dir),
                 out=str(out_dir),
                 reuse_existing=1,
                 methods="rigid",
@@ -1771,11 +2518,8 @@ if RUN_RIGID_FAIRNESS_SWEEP:
                 keep_fraction=float(keep_fraction),
                 inlier_reestimate_iters=int(inlier_iters),
             )
-
     rigid_agg = _aggregate_fairness_sweep(rigid_root, method="rigid", sweep_kind="rigid")
-    if rigid_agg.empty:
-        print("[WARN] Rigid fairness sweep aggregation produced no rows.")
-    else:
+    if not rigid_agg.empty:
         rigid_csv = rigid_root / "rigid_fairness_aggregated.csv"
         rigid_agg.to_csv(rigid_csv, index=False)
         rigid_plots: list[Path] = []
@@ -1803,34 +2547,29 @@ if RUN_RIGID_FAIRNESS_SWEEP:
                 y_label="inlier_reestimate_iters",
             )
         )
-        rigid_readme = _write_fairness_sweep_readme(
+        _write_fairness_sweep_readme(
             sweep_root=rigid_root,
-            synthetic_dir=SYNTH_REPRO_ROOT,
+            synthetic_dir=baseline_dir,
             aggregated_csv=rigid_csv,
             generated_plots=rigid_plots,
             sweep_desc="rigid fairness sweep",
             grid_desc=f"keep_fraction={RIGID_KEEP_FRACTIONS}, inlier_reestimate_iters={RIGID_INLIER_ITERS}, n_seeds={FAIRNESS_SYNTHETIC_N_SEEDS}",
             n_regimes=int(rigid_agg["regime"].nunique()),
         )
-        print(f"[OK] Wrote rigid fairness aggregated CSV: {rigid_csv}")
-        print(f"[OK] Wrote rigid fairness README: {rigid_readme}")
 
 if RUN_LOCAL_FAIRNESS_SWEEP:
-    _ensure_repro_dataset_exists()
-    local_root = _results_root("local_fairness_sweep")
+    baseline_dir = ensure_baseline_groundtruth()
+    local_root = results_root("local_fairness_sweep")
     local_root.mkdir(parents=True, exist_ok=True)
-
     for k_neighbors in LOCAL_K_NEIGHBORS:
         for ell_field in LOCAL_ELL_FIELD:
             field_token = _fmt_float_token(float(ell_field), 0) if float(ell_field).is_integer() else _fmt_float_token(float(ell_field), 2)
             tag = f"k{int(k_neighbors)}_field{field_token}"
             out_dir = local_root / tag
             if _has_completed_regime_run(out_dir, method="local"):
-                print(f"[INFO] Reusing local sweep run: {out_dir}")
                 continue
-            print(f"[INFO] Running local sweep config: k_neighbors={k_neighbors}, ell_um_field={ell_field}")
             synthetic_regime_benchmark(
-                synthetic_dir=str(SYNTH_REPRO_ROOT),
+                synthetic_dir=str(baseline_dir),
                 out=str(out_dir),
                 reuse_existing=1,
                 methods="local",
@@ -1838,11 +2577,8 @@ if RUN_LOCAL_FAIRNESS_SWEEP:
                 k_neighbors=int(k_neighbors),
                 ell_um_field=float(ell_field),
             )
-
     local_agg = _aggregate_fairness_sweep(local_root, method="local", sweep_kind="local")
-    if local_agg.empty:
-        print("[WARN] Local fairness sweep aggregation produced no rows.")
-    else:
+    if not local_agg.empty:
         local_csv = local_root / "local_fairness_aggregated.csv"
         local_agg.to_csv(local_csv, index=False)
         local_plots: list[Path] = []
@@ -1870,128 +2606,41 @@ if RUN_LOCAL_FAIRNESS_SWEEP:
                 y_label="ell_um_field",
             )
         )
-        local_readme = _write_fairness_sweep_readme(
+        _write_fairness_sweep_readme(
             sweep_root=local_root,
-            synthetic_dir=SYNTH_REPRO_ROOT,
+            synthetic_dir=baseline_dir,
             aggregated_csv=local_csv,
             generated_plots=local_plots,
             sweep_desc="local fairness sweep",
             grid_desc=f"k_neighbors={LOCAL_K_NEIGHBORS}, ell_um_field={LOCAL_ELL_FIELD}, n_seeds={FAIRNESS_SYNTHETIC_N_SEEDS}",
             n_regimes=int(local_agg["regime"].nunique()),
         )
-        print(f"[OK] Wrote local fairness aggregated CSV: {local_csv}")
-        print(f"[OK] Wrote local fairness README: {local_readme}")
 
-# %% PAPER SUMMARY PLOTS (MoE + Robust Modes, No Rigid/Local)
-"""Generate compact paper-summary plots for MoE and robust-mode studies without rigid/local curves."""
 
-RUN_PAPER_SUMMARY_PLOTS = False
+# %% Paper Regression Harness (Optional)
+"""Run optional paper regression harness for output-manifest verification.
 
-if RUN_PAPER_SUMMARY_PLOTS:
-    paper_out = _results_root("paper_summary_plots")
-    paper_out.mkdir(parents=True, exist_ok=True)
+Question answered:
+- Are canonical paper artifacts still present after refactors?
 
-    # A) ST-RBF MoE k comparison (vs plain ST-RBF)
-    moe_root_candidates = [
-        _results_root("baseline_suite"),
-    ]
-    moe_methods = {
-        "st_rbf": "st_rbf",
-        "st_rbf_moe_k2": "st_rbf_moe_k2",
-        "st_rbf_moe_k3": "st_rbf_moe_k3",
-        "st_rbf_moe_k5": "st_rbf_moe_k5",
-    }
-    moe_label_to_series: dict[str, dict[str, pd.DataFrame]] = {}
-    for label, method_name in moe_methods.items():
-        best_map: dict[str, pd.DataFrame] = {}
-        for root in moe_root_candidates:
-            series_map = _load_method_timeseries(root, method_name)
-            if len(series_map) > len(best_map):
-                best_map = series_map
-        if best_map:
-            moe_label_to_series[label] = best_map
-        else:
-            print(f"[WARN] Missing MoE timeseries for {label}")
+Datasets:
+- Uses `_groundtruth` as reusable synthetic input source.
 
-    _plot_timeseries_comparison(
-        moe_label_to_series,
-        paper_out / "moe_k_comparison__aggregate.png",
-        title="ST-RBF MoE k comparison (aggregate)",
+Artifacts:
+- Regression report folder under `Synthetic files parameter sweep/paper_regression`.
+"""
+
+RUN_PAPER_REGRESSION_CHECK = False
+if RUN_PAPER_REGRESSION_CHECK:
+    baseline_dir = ensure_baseline_groundtruth()
+    paper_regression(
+        synthetic_dir=str(baseline_dir),
+        out=str(results_root("paper_regression")),
+        manifest=str(PROJECT_ROOT / "paper_outputs_manifest.txt"),
+        columns_manifest=str(PROJECT_ROOT / "paper_metrics_columns.json"),
+        methods="rbf,rigid,local,st_rbf",
+        reuse_existing=1,
     )
-    _plot_timeseries_per_file(moe_label_to_series, paper_out, "moe_k_comparison")
-
-    moe_label_to_vals: dict[str, np.ndarray] = {}
-    for label, method_name in moe_methods.items():
-        best_vals = np.array([], dtype=float)
-        for root in moe_root_candidates:
-            vals = _collect_scalar_metric(root, method_name, metric_col="overall_rms_error")
-            if vals.size > best_vals.size:
-                best_vals = vals
-        if best_vals.size > 0:
-            moe_label_to_vals[label] = best_vals
-    _plot_scalar_summary_bar(
-        moe_label_to_vals,
-        paper_out / "moe_k_summary_bar__overall_rms.png",
-        title="ST-RBF MoE k: overall RMS summary",
-        y_label="overall_rms_error",
-    )
-
-    # B) Robust mode comparison (RBF): sample_trim vs irls_huber
-    rbf_robust_roots = {
-        "sample_trim": _results_root("rbf_robust_sample_trim"),
-        "irls_huber": _results_root("rbf_robust_irls_huber"),
-    }
-    rbf_label_to_series = {label: _load_method_timeseries(root, "rbf") for label, root in rbf_robust_roots.items()}
-    for label, series_map in rbf_label_to_series.items():
-        if not series_map:
-            print(f"[WARN] Missing RBF robust timeseries for {label}")
-    _plot_timeseries_comparison(
-        rbf_label_to_series,
-        paper_out / "rbf_robust_mode_ab__aggregate.png",
-        title="RBF robust mode A/B (aggregate)",
-    )
-    _plot_timeseries_per_file(rbf_label_to_series, paper_out, "rbf_robust_mode_ab")
-
-    rbf_label_to_vals = {
-        label: _collect_scalar_metric(root, "rbf", metric_col="overall_rms_error")
-        for label, root in rbf_robust_roots.items()
-    }
-    _plot_scalar_summary_bar(
-        rbf_label_to_vals,
-        paper_out / "rbf_robust_summary_bar__overall_rms.png",
-        title="RBF robust mode: overall RMS summary",
-        y_label="overall_rms_error",
-    )
-
-    # C) Robust mode comparison (ST-RBF): sample_trim vs irls_huber vs hybrid_track_irls
-    st_robust_roots = {
-        "sample_trim": _results_root("st_rbf_robust_sample_trim"),
-        "irls_huber": _results_root("st_rbf_robust_irls_huber"),
-        "hybrid_track_irls": _results_root("st_rbf_robust_hybrid_track_irls"),
-    }
-    st_label_to_series = {label: _load_method_timeseries(root, "st_rbf") for label, root in st_robust_roots.items()}
-    for label, series_map in st_label_to_series.items():
-        if not series_map:
-            print(f"[WARN] Missing ST-RBF robust timeseries for {label}")
-    _plot_timeseries_comparison(
-        st_label_to_series,
-        paper_out / "st_rbf_robust_mode_abc__aggregate.png",
-        title="ST-RBF robust mode A/B/C (aggregate)",
-    )
-    _plot_timeseries_per_file(st_label_to_series, paper_out, "st_rbf_robust_mode_abc")
-
-    st_label_to_vals = {
-        label: _collect_scalar_metric(root, "st_rbf", metric_col="overall_rms_error")
-        for label, root in st_robust_roots.items()
-    }
-    _plot_scalar_summary_bar(
-        st_label_to_vals,
-        paper_out / "st_rbf_robust_summary_bar__overall_rms.png",
-        title="ST-RBF robust mode: overall RMS summary",
-        y_label="overall_rms_error",
-    )
-
-    print(f"[OK] Paper summary plots written to: {paper_out}")
 
 
 # %% END

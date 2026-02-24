@@ -1797,6 +1797,83 @@ def _plot_config_heatmap(
     plt.close(fig)
     return True
 
+
+def _regime_from_run_folder(run_folder: str) -> str:
+    """Extract regime name from `<regime>_seed_<NNN>` run folder labels."""
+    s = str(run_folder)
+    if "_seed_" in s:
+        return s.split("_seed_")[0]
+    return s
+
+
+def _plot_large_regime_benchmark_from_aggregates(out_root: Path) -> list[Path]:
+    """Create interpretable overview plots from large-regime aggregated CSV outputs."""
+    out_root = Path(out_root)
+    agg_path = out_root / "regime_benchmark_large_20seeds_aggregated.csv"
+    if not agg_path.exists():
+        print(f"[WARN] Large-regime plots skipped: missing {agg_path}")
+        return []
+    try:
+        agg = pd.read_csv(agg_path)
+    except Exception as exc:
+        print(f"[WARN] Large-regime plots skipped: failed reading {agg_path}: {exc}")
+        return []
+    required = {"run_folder", "method", "metric_name", "metric_value"}
+    if not required.issubset(agg.columns):
+        print(f"[WARN] Large-regime plots skipped: missing columns {sorted(required - set(agg.columns))}")
+        return []
+    if agg.empty:
+        return []
+
+    tab = agg.copy()
+    tab["mode"] = tab["run_folder"].astype(str).map(_regime_from_run_folder)
+    tab["metric_value"] = pd.to_numeric(tab["metric_value"], errors="coerce")
+    tab = tab.dropna(subset=["metric_value"])
+    if tab.empty:
+        return []
+
+    summary_regime = (
+        tab.groupby(["mode", "method", "metric_name"], as_index=False)["metric_value"]
+        .agg(mean="mean", std="std", n="count")
+        .sort_values(["mode", "method", "metric_name"])
+        .reset_index(drop=True)
+    )
+    summary_regime_path = out_root / "regime_benchmark_large_20seeds_regime_summary.csv"
+    summary_regime.to_csv(summary_regime_path, index=False)
+
+    generated: list[Path] = []
+    plot_specs = [
+        ("overall_rms_error", "Large regime benchmark: overall RMS by regime and method"),
+        ("drift_bias_abs", "Large regime benchmark: drift bias by regime and method"),
+        ("overall_rms_error_stationary", "Large regime benchmark: stationary RMS by regime and method"),
+        ("overall_rms_error_migrating", "Large regime benchmark: migrating RMS by regime and method"),
+    ]
+    for metric_name, title in plot_specs:
+        p_bar = out_root / f"regime_benchmark_large_20seeds_{metric_name}_grouped_bar_plot.png"
+        if _plot_summary_grouped_bars(summary_regime, metric_name=metric_name, out_path=p_bar, title=title):
+            generated.append(p_bar)
+        p_hm = out_root / f"regime_benchmark_large_20seeds_{metric_name}_heatmap_plot.png"
+        if _plot_summary_heatmap(summary_regime, metric_name=metric_name, out_path=p_hm, title=title):
+            generated.append(p_hm)
+
+    if generated:
+        readme = out_root / "regime_benchmark_large_20seeds_plots_README.txt"
+        readme.write_text(
+            "\n".join(
+                [
+                    f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                    f"input_aggregated_csv: {agg_path}",
+                    f"regime_summary_csv: {summary_regime_path}",
+                    "description: Regime-level mean/std aggregation across all seeds and files.",
+                    "plots:",
+                    *[f"- {p.name}" for p in generated],
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    return generated
+
 # %% GENERATE SYNTHETIC BASELINE DATASET
 """Generate/validate baseline dataset across three modes in `_groundtruth`.
 
@@ -1839,7 +1916,7 @@ RUN_GENERATE_LARGE_GROUNDTRUTH = False
 if RUN_GENERATE_LARGE_GROUNDTRUTH:
     ensure_large_groundtruth_regimes()
     print(f"[OK] large dataset folders: {len(list_large_regime_folders())}")
-# %% Baseline Method Comparison (All Baseline Modes; "baseline_suite")
+# %% BASELINE METHOD COMPARISON (All Baseline Modes; "baseline_suite")
 """Run baseline methods on all baseline files across all three modes.
 
 Question answered:
@@ -2283,7 +2360,7 @@ Artifacts:
 - Aggregated tables in the same root.
 """
 
-RUN_LARGE_REGIME_BENCHMARK = False
+RUN_LARGE_REGIME_BENCHMARK = True
 if RUN_LARGE_REGIME_BENCHMARK:
     ensure_large_groundtruth_regimes()
     out_root = results_root("regime_benchmark_large_20seeds")
@@ -2324,6 +2401,13 @@ if RUN_LARGE_REGIME_BENCHMARK:
             .reset_index(drop=True)
         )
         summary.to_csv(out_root / "regime_benchmark_large_20seeds_summary.csv", index=False)
+
+RUN_LARGE_REGIME_BENCHMARK_PLOTS = True
+if RUN_LARGE_REGIME_BENCHMARK and RUN_LARGE_REGIME_BENCHMARK_PLOTS:
+    large_root = results_root("regime_benchmark_large_20seeds")
+    generated = _plot_large_regime_benchmark_from_aggregates(large_root)
+    if generated:
+        print(f"[OK] Wrote large-regime evaluation plots: {len(generated)}")
 # %% ST-RBF Parameter Grid Sweep (3x3)
 """Run ST-RBF parameter grid sweep using baseline datasets across all modes.
 
@@ -2337,7 +2421,7 @@ Artifacts:
 - Grid run folders and aggregated tables under `Synthetic files parameter sweep/st_rbf_parameter_selection`.
 """
 
-RUN_ST_RBF_GRID_SWEEP = False
+RUN_ST_RBF_GRID_SWEEP = True
 if RUN_ST_RBF_GRID_SWEEP:
     baseline_dir = ensure_baseline_groundtruth()
     grid_root = results_root("st_rbf_parameter_selection")
@@ -2367,7 +2451,7 @@ Artifacts:
 - `st_rbf_grid_aggregation_*_plot.png` (per-regime and across-regime heatmaps for RMS and drift bias).
 """
 
-RUN_ST_RBF_GRID_AGGREGATION = False
+RUN_ST_RBF_GRID_AGGREGATION = True
 if RUN_ST_RBF_GRID_AGGREGATION:
     grid_root = results_root("st_rbf_parameter_selection")
     grid_root.mkdir(parents=True, exist_ok=True)
@@ -2418,7 +2502,6 @@ if RUN_ST_RBF_GRID_AGGREGATION:
     )
     if generated:
         print(f"[OK] Wrote ST-RBF grid aggregation plots: {len(generated)}")
-
 # %% ST-RBF Stationary Subset A/B
 """Run and aggregate stationary subset A/B tests for ST-RBF parameter selection.
 
@@ -2432,7 +2515,7 @@ Artifacts:
 - `st_rbf_stationary_ab_summary.csv`, `st_rbf_stationary_ab_report.md`.
 """
 
-RUN_ST_RBF_STATIONARY_AB_TESTS = False
+RUN_ST_RBF_STATIONARY_AB_TESTS = True
 if RUN_ST_RBF_STATIONARY_AB_TESTS:
     baseline_dir = ensure_baseline_groundtruth()
     selection_root = results_root("st_rbf_parameter_selection")

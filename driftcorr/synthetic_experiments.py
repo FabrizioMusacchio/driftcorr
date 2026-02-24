@@ -8,6 +8,8 @@ Generated components:
 - Ground-truth cell motion (stationary + migrating subsets).
 - Global translation drift over time.
 - Spatially varying smooth local drift (low-frequency RBF field).
+- Optional non-rigid regimes: global rotation drift, piecewise spatial drift,
+  and abrupt jump-event drift.
 - Optional temporal smoothness in drift dynamics.
 - Measurement noise.
 
@@ -77,6 +79,18 @@ def _rbf_kernel(points: np.ndarray, centers: np.ndarray, lengthscale: float) -> 
     ksum = np.sum(k, axis=1, keepdims=True)
     ksum[ksum <= 1e-12] = 1.0
     return k / ksum
+
+
+def _rotate_about_z(points: np.ndarray, center_xyz: np.ndarray, angle_rad: float) -> np.ndarray:
+    """Rotate 3D points around z axis with fixed center."""
+    c = float(np.cos(angle_rad))
+    s = float(np.sin(angle_rad))
+    x = points[:, 0] - float(center_xyz[0])
+    y = points[:, 1] - float(center_xyz[1])
+    z = points[:, 2]
+    xr = c * x - s * y + float(center_xyz[0])
+    yr = s * x + c * y + float(center_xyz[1])
+    return np.column_stack([xr, yr, z])
 
 
 def generate_controlled_drift_dataset(
@@ -237,6 +251,110 @@ def generate_controlled_drift_dataset(
 
         drift_global_all[:, ti, :] = global_drift[ti][None, :]
         drift_local_all[:, ti, :] = local
+
+    mode = str(local_mode)
+    if mode in {"rotation_drift", "piecewise_spatial_drift", "jump_events"}:
+        # Use a dedicated RNG stream for new non-rigid regimes so existing modes
+        # (`smooth`, `piecewise_smooth`, `piecewise_abrupt`) remain bitwise stable.
+        rng_non_rigid = np.random.default_rng(int(seed) + 9173)
+        ref_center = np.mean(x_true[:, 0, :], axis=0)
+        base_global = drift_global_all.copy()
+        base_local = drift_local_all.copy()
+
+        if mode == "rotation_drift":
+            total_deg = float(rng_non_rigid.uniform(1.0, 10.0))
+            total_rad = np.deg2rad(total_deg) * float(rng_non_rigid.choice([-1.0, 1.0]))
+            angle_base = np.linspace(0.0, total_rad, t_count, dtype=float)
+            angle_pert = _smooth_random_series(
+                rng_non_rigid,
+                t=t_count,
+                dim=1,
+                scale=1.0,
+                temporal_smoothness=temporal_smoothness,
+            )[:, 0]
+            angle_pert = 0.12 * total_rad * angle_pert
+            angles = angle_base + angle_pert - float(angle_pert[0])
+            trans = _smooth_random_series(
+                rng_non_rigid,
+                t=t_count,
+                dim=3,
+                scale=0.35,
+                temporal_smoothness=temporal_smoothness,
+            )
+            trans = np.cumsum(trans, axis=0)
+            trans *= np.array(global_drift_scale_xyz, dtype=float)[None, :] * 0.25
+            for ti in range(t_count):
+                p_t = x_true[:, ti, :]
+                p_rot = _rotate_about_z(p_t, ref_center, float(angles[ti]))
+                drift_local_all[:, ti, :] = p_rot - p_t
+                drift_global_all[:, ti, :] = trans[ti][None, :]
+
+        elif mode == "piecewise_spatial_drift":
+            n_regions = int(np.clip(piecewise_regions, 2, 4))
+            x_ref = x_true[:, 0, 0]
+            q = np.linspace(0.0, 1.0, n_regions + 1, dtype=float)
+            bounds = np.quantile(x_ref, q)
+            x_centers = 0.5 * (bounds[:-1] + bounds[1:])
+            region_traj = _smooth_random_series(
+                rng_non_rigid,
+                t=t_count,
+                dim=3 * n_regions,
+                scale=1.0,
+                temporal_smoothness=temporal_smoothness,
+            ).reshape(t_count, n_regions, 3)
+            region_traj *= float(local_drift_scale_um) * 1.9
+
+            # Keep a smaller global component while emphasizing region-wise divergence.
+            drift_global_all = base_global * 0.45
+            sig = max(float(piecewise_transition_um), 1e-6)
+            for ti in range(t_count):
+                p_t = x_true[:, ti, :]
+                dx = p_t[:, 0:1] - x_centers[None, :]
+                if sig <= 5.0:
+                    idx = np.argmin(np.abs(dx), axis=1)
+                    wr = np.zeros((p_t.shape[0], n_regions), dtype=float)
+                    wr[np.arange(p_t.shape[0]), idx] = 1.0
+                else:
+                    wr = np.exp(-(dx * dx) / (2.0 * sig * sig))
+                    wsum = np.sum(wr, axis=1, keepdims=True)
+                    wsum[wsum <= 1e-12] = 1.0
+                    wr = wr / wsum
+                reg_local = wr @ region_traj[ti]
+                z_norm = ((p_t[:, 2] - z_mid) / z_half)[:, None]
+                z_extra = z_norm * np.array([0.45, -0.15, 0.25])[None, :] * float(local_drift_scale_um)
+                drift_local_all[:, ti, :] = reg_local + 0.3 * base_local[:, ti, :] + z_extra
+
+        elif mode == "jump_events":
+            drift_local_all = 0.45 * base_local
+            jump_count = int(min(3, max(2, t_count // 7)))
+            jump_candidates = np.arange(2, max(3, t_count - 1), dtype=int)
+            if jump_candidates.size > 0:
+                jt = sorted(rng_non_rigid.choice(jump_candidates, size=min(jump_count, jump_candidates.size), replace=False).tolist())
+            else:
+                jt = []
+            jump_vec = rng_non_rigid.normal(
+                scale=np.array(global_drift_scale_xyz, dtype=float)[None, :] * 1.15,
+                size=(len(jt), 3),
+            )
+            jump_offset = np.zeros((t_count, 3), dtype=float)
+            acc = np.zeros((3,), dtype=float)
+            j = 0
+            for ti in range(t_count):
+                while j < len(jt) and ti >= int(jt[j]):
+                    acc = acc + jump_vec[j]
+                    j += 1
+                jump_offset[ti] = acc
+            drift_global_all = base_global + jump_offset[None, :, :]
+
+            # Optional small rotational jumps to create discontinuities beyond translation.
+            rot_steps = rng_non_rigid.normal(scale=np.deg2rad(0.25), size=t_count)
+            for t_jump in jt:
+                rot_steps[int(t_jump)] += rng_non_rigid.uniform(np.deg2rad(-1.8), np.deg2rad(1.8))
+            ang = np.cumsum(rot_steps)
+            for ti in range(t_count):
+                p_t = x_true[:, ti, :]
+                p_rot = _rotate_about_z(p_t, ref_center, float(ang[ti]))
+                drift_local_all[:, ti, :] += 0.6 * (p_rot - p_t)
 
     drift_total = drift_global_all + drift_local_all
     x_obs = x_true + drift_total + rng.normal(scale=float(measurement_noise_um), size=x_true.shape)

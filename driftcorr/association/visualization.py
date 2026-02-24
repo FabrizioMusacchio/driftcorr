@@ -1,0 +1,295 @@
+"""Visualization utilities for point-cloud association benchmarks.
+
+These plots are independent from the main driftcorr visualization module but
+keep a compatible matplotlib style.
+
+Author
+-------
+author: Fabrizio Musacchio
+date: Feb 2026
+"""
+# %% IMPORTS
+from __future__ import annotations
+
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+from .types import PointCloudFrame
+
+# %% FUNCTIONS
+def _frames_to_points_df(frames: list[PointCloudFrame]) -> pd.DataFrame:
+    rows: list[dict[str, float]] = []
+    for f in frames:
+        for i, p in enumerate(np.asarray(f.xyz, dtype=float)):
+            rows.append({"Time": float(f.time), "PointIndex": int(i), "x": float(p[0]), "y": float(p[1]), "z": float(p[2])})
+    return pd.DataFrame(rows)
+
+
+def _plot_tracks(ax, df: pd.DataFrame, color_col: str, xyz_cols: tuple[str, str, str], linewidth: float = 1.0, alpha: float = 0.7) -> None:
+    if df.empty or color_col not in df.columns:
+        return
+    ids = sorted(df[color_col].dropna().unique().tolist())
+    cmap = plt.get_cmap("tab20")
+    for idx, tid in enumerate(ids):
+        g = df[df[color_col] == tid].sort_values("Time")
+        if g.shape[0] < 2:
+            """ # Avoid dot-like singletons in track panels; these are not trajectories.
+            continue """
+            ax.plot(g[xyz_cols[0]].to_numpy(float),
+                g[xyz_cols[1]].to_numpy(float),
+                g[xyz_cols[2]].to_numpy(float),
+                linewidth=0, #alpha=alpha,
+                marker=".", markersize=2, c="black")
+        ax.plot(g[xyz_cols[0]].to_numpy(float),
+                g[xyz_cols[1]].to_numpy(float),
+                g[xyz_cols[2]].to_numpy(float),
+                color=cmap(idx % 20),
+                linewidth=linewidth,
+                alpha=alpha)
+
+
+def _canonical_track_df(df: pd.DataFrame | None, prefer_track_col: str = "TrackID") -> pd.DataFrame:
+    """Normalize track tables to columns `TrackID`, `Time`, `x`, `y`, `z`."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["TrackID", "Time", "x", "y", "z", "PointIndex"])
+    d = df.copy()
+
+    if prefer_track_col in d.columns:
+        d["TrackID"] = d[prefer_track_col]
+    elif "TrackID" in d.columns:
+        pass
+    elif "GT_TrackID" in d.columns:
+        d["TrackID"] = d["GT_TrackID"]
+    elif "INF_TrackID" in d.columns:
+        d["TrackID"] = d["INF_TrackID"]
+    else:
+        return pd.DataFrame(columns=["TrackID", "Time", "x", "y", "z", "PointIndex"])
+
+    if {"Position X", "Position Y", "Position Z"}.issubset(d.columns):
+        d["x"] = pd.to_numeric(d["Position X"], errors="coerce")
+        d["y"] = pd.to_numeric(d["Position Y"], errors="coerce")
+        d["z"] = pd.to_numeric(d["Position Z"], errors="coerce")
+    elif {"x", "y", "z"}.issubset(d.columns):
+        d["x"] = pd.to_numeric(d["x"], errors="coerce")
+        d["y"] = pd.to_numeric(d["y"], errors="coerce")
+        d["z"] = pd.to_numeric(d["z"], errors="coerce")
+    else:
+        return pd.DataFrame(columns=["TrackID", "Time", "x", "y", "z", "PointIndex"])
+
+    d["Time"] = pd.to_numeric(d["Time"], errors="coerce")
+    d["TrackID"] = pd.to_numeric(d["TrackID"], errors="coerce")
+    if "PointIndex" in d.columns:
+        d["PointIndex"] = pd.to_numeric(d["PointIndex"], errors="coerce")
+    else:
+        d["PointIndex"] = d.groupby("Time").cumcount()
+    d = d.dropna(subset=["TrackID", "Time", "x", "y", "z"]).copy()
+    return d[["TrackID", "Time", "x", "y", "z", "PointIndex"]]
+
+
+def plot_3d_frames_comparison(
+    frames_gt: list[PointCloudFrame] | None,
+    frames_blind: list[PointCloudFrame],
+    frames_inferred: list[PointCloudFrame] | None,
+    out_path: str | Path,
+    gt_tracks_df: pd.DataFrame | None = None,
+    inferred_tracks_df: pd.DataFrame | None = None,
+    title: str = "",
+) -> Path:
+    """Create 2x2 qualitative association figure.
+
+    Panels:
+    1) GT tracks
+    2) blind point clouds (time-colored scatter)
+    3) inferred tracks
+    4) GT vs inferred overlay
+    """
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    gt_pts = _frames_to_points_df(frames_gt) if frames_gt is not None else pd.DataFrame(columns=["Time", "PointIndex", "x", "y", "z"])
+    blind_pts = _frames_to_points_df(frames_blind)
+    inf_pts = _frames_to_points_df(frames_inferred) if frames_inferred is not None else pd.DataFrame(columns=["Time", "PointIndex", "x", "y", "z"])
+
+    if gt_tracks_df is None and not gt_pts.empty:
+        gt_tracks_df = gt_pts.copy()
+        gt_tracks_df["TrackID"] = gt_tracks_df.get("PointIndex", 0)
+    if inferred_tracks_df is None and not inf_pts.empty:
+        inferred_tracks_df = inf_pts.copy()
+        inferred_tracks_df["TrackID"] = inferred_tracks_df.get("PointIndex", 0)
+
+    gt_tracks = _canonical_track_df(gt_tracks_df, prefer_track_col="TrackID")
+    inf_tracks = _canonical_track_df(inferred_tracks_df, prefer_track_col="TrackID")
+
+    try:
+        fig = plt.figure(figsize=(14, 12))
+        ax1 = fig.add_subplot(221, projection="3d")
+        ax2 = fig.add_subplot(222, projection="3d")
+        ax3 = fig.add_subplot(223, projection="3d")
+        ax4 = fig.add_subplot(224, projection="3d")
+    except Exception:
+        fig, axs = plt.subplots(2, 2, figsize=(14, 12))
+        ax1, ax2, ax3, ax4 = axs.ravel()
+
+    # Panel 1: GT
+    if not gt_tracks.empty:
+        _plot_tracks(ax1, gt_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=1.2, alpha=0.75)
+    ax1.set_title("GT tracks")
+    ax1.set_xlabel("X")
+    ax1.set_ylabel("Y")
+    ax1.set_zlabel("Z")
+
+    # Panel 2: blind by time
+    if not blind_pts.empty:
+        times = blind_pts["Time"].to_numpy(float)
+        ax2.scatter(blind_pts["x"], blind_pts["y"], blind_pts["z"], c=times, cmap="viridis", s=6, alpha=0.55)
+    ax2.set_title("Blind point clouds")
+    ax2.set_xlabel("X")
+    ax2.set_ylabel("Y")
+    ax2.set_zlabel("Z")
+
+    # Panel 3: inferred
+    if not inf_tracks.empty:
+        _plot_tracks(ax3, inf_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=1.4, alpha=0.8)
+    ax3.set_title("Inferred pseudo tracks")
+    ax3.set_xlabel("X")
+    ax3.set_ylabel("Y")
+    ax3.set_zlabel("Z")
+
+    # Panel 4: overlay GT vs inferred
+    if not gt_tracks.empty:
+        _plot_tracks(ax4, gt_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=1.0, alpha=1.0)
+    if not inf_tracks.empty:
+        _plot_tracks(ax4, inf_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=2.0, alpha=0.5)
+    ax4.set_title("Overlay: GT tracks (thin) vs inferred tracks (thick)")
+    ax4.set_xlabel("X")
+    ax4.set_ylabel("Y")
+    ax4.set_zlabel("Z")
+
+    if title:
+        fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(out, dpi=300)
+    plt.close(fig)
+    return out
+
+
+def _infer_dominant_gt_map(gt_tracks_df: pd.DataFrame, inferred_tracks_df: pd.DataFrame) -> dict[float, float]:
+    gt = gt_tracks_df[["Time", "PointIndex", "TrackID"]].rename(columns={"TrackID": "GT_TrackID"}).copy()
+    inf = inferred_tracks_df[["Time", "PointIndex", "TrackID"]].rename(columns={"TrackID": "INF_TrackID"}).copy()
+    m = inf.merge(gt, on=["Time", "PointIndex"], how="inner")
+    if m.empty:
+        return {}
+    mp: dict[float, float] = {}
+    for tid, grp in m.groupby("INF_TrackID"):
+        mp[float(tid)] = float(grp["GT_TrackID"].value_counts().idxmax())
+    return mp
+
+
+def plot_rms_over_time(gt_tracks_df: pd.DataFrame, inferred_tracks_df: pd.DataFrame, out_path: str | Path) -> Path:
+    """Plot RMS position mismatch over time after dominant-ID remapping."""
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    g = gt_tracks_df.copy()
+    i = inferred_tracks_df.copy()
+    if {"Position X", "Position Y", "Position Z"}.issubset(g.columns):
+        g["x"] = g["Position X"]
+        g["y"] = g["Position Y"]
+        g["z"] = g["Position Z"]
+    if {"Position X", "Position Y", "Position Z"}.issubset(i.columns):
+        i["x"] = i["Position X"]
+        i["y"] = i["Position Y"]
+        i["z"] = i["Position Z"]
+
+    mp = _infer_dominant_gt_map(g, i)
+    i["GT_TrackID_mapped"] = i["TrackID"].map(mp)
+    mg = g[["Time", "TrackID", "x", "y", "z"]].rename(columns={"TrackID": "GT_TrackID"})
+    mi = i[["Time", "GT_TrackID_mapped", "x", "y", "z"]].rename(columns={"GT_TrackID_mapped": "GT_TrackID", "x": "x_inf", "y": "y_inf", "z": "z_inf"})
+    m = mg.merge(mi, on=["Time", "GT_TrackID"], how="inner")
+    if m.empty:
+        fig, ax = plt.subplots(figsize=(6.5, 4.5))
+        ax.set_title("RMS over time (no overlap)")
+        ax.set_xlabel("Time")
+        ax.set_ylabel("RMS")
+        fig.tight_layout()
+        fig.savefig(out, dpi=300)
+        plt.close(fig)
+        return out
+
+    err = np.sqrt((m["x"] - m["x_inf"]) ** 2 + (m["y"] - m["y_inf"]) ** 2 + (m["z"] - m["z_inf"]) ** 2)
+    tab = pd.DataFrame({"Time": m["Time"], "err": err})
+    rms = tab.groupby("Time", as_index=False)["err"].apply(lambda v: float(np.sqrt(np.mean(np.asarray(v, dtype=float) ** 2))))
+    rms = rms.rename(columns={"err": "rms"})
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    ax.plot(rms["Time"], rms["rms"], marker="o")
+    ax.set_title("RMS error over time")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("RMS")
+    ax.set_ylim(bottom=0.0)
+    fig.tight_layout()
+    fig.savefig(out, dpi=300)
+    plt.close(fig)
+    return out
+
+
+def plot_accuracy_over_time(gt_tracks_df: pd.DataFrame, inferred_tracks_df: pd.DataFrame, out_path: str | Path) -> Path:
+    """Plot per-time GT-ID-consistent association accuracy.
+
+    Accuracy is computed per GT TrackID at each time using a dominant global
+    GT->inferred mapping. This penalizes fragmentation and ID switches over
+    time rather than only local point overlap.
+    """
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    gt = gt_tracks_df[["Time", "PointIndex", "TrackID"]].rename(columns={"TrackID": "GT_TrackID"}).copy()
+    inf = inferred_tracks_df[["Time", "PointIndex", "TrackID"]].rename(columns={"TrackID": "INF_TrackID"}).copy()
+    m = inf.merge(gt, on=["Time", "PointIndex"], how="inner")
+
+    acc = pd.DataFrame(columns=["Time", "accuracy"])
+    if not m.empty:
+        # Dominant inferred TrackID per GT TrackID.
+        dom = (
+            m.groupby(["GT_TrackID", "INF_TrackID"], as_index=False)
+            .size()
+            .sort_values(["GT_TrackID", "size", "INF_TrackID"], ascending=[True, False, True])
+            .drop_duplicates(["GT_TrackID"], keep="first")
+            .rename(columns={"INF_TrackID": "INF_dom"})
+        )
+        dom_map = {float(r["GT_TrackID"]): float(r["INF_dom"]) for _, r in dom.iterrows()}
+        rows: list[dict[str, float]] = []
+        for t, gt_t in m.groupby("Time"):
+            tt = float(t)
+            gtid_present = sorted(set(pd.to_numeric(gt_t["GT_TrackID"], errors="coerce").dropna().to_numpy(float).tolist()))
+            if not gtid_present:
+                continue
+            correct = 0
+            for gtid in gtid_present:
+                inf_dom = dom_map.get(float(gtid))
+                if inf_dom is None:
+                    continue
+                # Correct at time t if dominant inferred track is assigned to
+                # the same GT identity at that time.
+                ok = np.any(
+                    (pd.to_numeric(gt_t["GT_TrackID"], errors="coerce").to_numpy(float) == float(gtid))
+                    & (pd.to_numeric(gt_t["INF_TrackID"], errors="coerce").to_numpy(float) == float(inf_dom))
+                )
+                if bool(ok):
+                    correct += 1
+            rows.append({"Time": tt, "accuracy": float(correct / max(len(gtid_present), 1))})
+        acc = pd.DataFrame(rows).sort_values("Time").reset_index(drop=True) if rows else acc
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    if not acc.empty:
+        ax.plot(acc["Time"], acc["accuracy"], marker="o")
+    ax.set_title("Association accuracy over time (GT-ID consistent)")
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Accuracy")
+    ax.set_ylim(0.0, 1.0)
+    fig.tight_layout()
+    fig.savefig(out, dpi=300)
+    plt.close(fig)
+    return out
+# %% END

@@ -33,6 +33,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 try:
     from driftcorr.association import (
         DriftModelAdapterRigidStep,
+        associate_hungarian_adaptive_maxdist_cv,
+        associate_hungarian_innovation_percentile_cv,
+        associate_hungarian_switch_penalty_cv,
+        associate_hungarian_two_stage_cv,
         associate_kalman_cv,
         associate_min_cost_flow,
         associate_nodrift,
@@ -60,6 +64,10 @@ except ModuleNotFoundError as exc:
     try:
         from driftcorr.association import (
             DriftModelAdapterRigidStep,
+            associate_hungarian_adaptive_maxdist_cv,
+            associate_hungarian_innovation_percentile_cv,
+            associate_hungarian_switch_penalty_cv,
+            associate_hungarian_two_stage_cv,
             associate_kalman_cv,
             associate_min_cost_flow,
             associate_nodrift,
@@ -103,6 +111,7 @@ DATA_ROOT = ASSOC_ROOT / "_blind_pairs"
 RUN_GENERATE_DATASETS = True
 RUN_NODRIFT_DX_SWEEP = True
 RUN_NODRIFT_PARAM_SWEEP = True
+RUN_HUNGARIAN_CV_VARIANTS_SWEEP = True
 RUN_DRIFT_STRATEGY_COMPARISON = False
 OVERWRITE_DATASETS = True
 
@@ -181,6 +190,49 @@ NODRIFT_PARAM_SWEEP_MAX_FILES = 1
 NODRIFT_PARAM_SWEEP_MAX_DIST_FACTORS = [2.0, 3.0, 4.0, 6.0]
 NODRIFT_PARAM_SWEEP_KEEP_PERCENTILES = [90, 95, 99]
 NODRIFT_PARAM_SWEEP_REFINE_ITERS = [0, 1, 2, 5]
+
+HCV_KEEP_PERCENTILE = 99
+HCV_MAX_DIST_FACTORS = [2.0, 3.0, 4.0, 6.0]
+HCV_REFINE_ITERS = [0, 1, 2, 5]
+HCV_DX_SCALES = DX_SCALES
+HCV_MAX_FILES = 1
+HUNGARIAN_CV_VARIANTS = [
+    {
+        "name": "hungarian_gating_cv",
+        "kind": "nodrift",
+        "method": "hungarian",
+        "motion_model": "constant_velocity",
+        "params": {"metric": "sqeuclidean"},
+    },
+    {
+        "name": "hungarian_adaptive_maxdist_cv",
+        "kind": "hungarian_cv_variant",
+        "variant": "adaptive_maxdist",
+        "motion_model": "constant_velocity",
+        "params": {"sigma_mad_clip": 3.0, "metric": "sqeuclidean", "use_dummy": True},
+    },
+    {
+        "name": "hungarian_innovation_percentile_cv",
+        "kind": "hungarian_cv_variant",
+        "variant": "innovation_percentile",
+        "motion_model": "constant_velocity",
+        "params": {"sigma_mad_clip": 3.0, "use_dummy": True},
+    },
+    {
+        "name": "hungarian_switch_penalty_cv",
+        "kind": "hungarian_cv_variant",
+        "variant": "switch_penalty",
+        "motion_model": "constant_velocity",
+        "params": {"lambda_switch": 0.2, "use_normalized": True, "metric": "sqeuclidean", "use_dummy": True},
+    },
+    {
+        "name": "hungarian_two_stage_cv",
+        "kind": "hungarian_cv_variant",
+        "variant": "two_stage",
+        "motion_model": "constant_velocity",
+        "params": {"stage1_factor": 0.5, "stage1_keep_percentile": 90.0, "stage2_keep_percentile": 99.0, "stage2_allow_unmatched": True, "metric": "sqeuclidean", "use_dummy": True},
+    },
+]
 # %% FUNCTIONS
 def _results_root(tag: str) -> Path:
     safe = str(tag).strip().replace(" ", "_").replace("-", "_")
@@ -296,6 +348,11 @@ def _dispatch_association_method(
         p_base.update(dict(method_cfg.get("params", {})))
     if params_override:
         p_base.update(dict(params_override))
+    if "dx_scale" not in p_base:
+        p_base["dx_scale"] = float(dx_scale)
+    if "max_dist_factor" not in p_base:
+        base_md = float(base_gating.get("max_dist", max(0.5, 4.0 * float(dx_scale))))
+        p_base["max_dist_factor"] = float(base_md / max(float(dx_scale), 1e-9))
 
     if kind == "min_cost_flow":
         return associate_min_cost_flow(
@@ -327,6 +384,17 @@ def _dispatch_association_method(
             gating=base_gating,
             params=p_base,
         )
+    if kind == "hungarian_cv_variant":
+        variant_name = str(method_cfg.get("variant", ""))
+        if variant_name == "adaptive_maxdist":
+            return associate_hungarian_adaptive_maxdist_cv(blind_frames, gating=base_gating, params=p_base)
+        if variant_name == "innovation_percentile":
+            return associate_hungarian_innovation_percentile_cv(blind_frames, gating=base_gating, params=p_base)
+        if variant_name == "switch_penalty":
+            return associate_hungarian_switch_penalty_cv(blind_frames, gating=base_gating, params=p_base)
+        if variant_name == "two_stage":
+            return associate_hungarian_two_stage_cv(blind_frames, gating=base_gating, params=p_base)
+        raise ValueError(f"Unknown hungarian_cv_variant '{variant_name}'")
     # default: pairwise nodrift
     return associate_nodrift(
         blind_frames,
@@ -790,6 +858,194 @@ def _plot_param_sweep_overview(out_root: Path) -> list[str]:
             generated.append(p.name)
 
     return generated
+
+
+def _plot_hcv_variants_overview(out_root: Path, agg: pd.DataFrame) -> list[str]:
+    """Create compact overview plots for Hungarian-CV variants sweep."""
+    generated: list[str] = []
+    if agg.empty:
+        return generated
+    cfg = _prepare_param_sweep_config_table(agg)
+    if cfg.empty:
+        return generated
+
+    metrics = [
+        m
+        for m in [
+            "link_f1_mean",
+            "rms_mean",
+            "id_switches_mean_per_track",
+            "fragmentation_rate",
+            "unmatched_rate_mean",
+        ]
+        if m in cfg.columns
+    ]
+
+    baseline_method = "hungarian_gating_cv"
+    best_variant_method: str | None = None
+    if "link_f1_mean" in cfg.columns:
+        best_by_dx_all = _best_config_by_metric(cfg, "link_f1_mean")
+        if not best_by_dx_all.empty:
+            perf = best_by_dx_all.groupby("method", as_index=False)["link_f1_mean"].mean().sort_values("link_f1_mean", ascending=False)
+            for m in perf["method"].astype(str).tolist():
+                if m != baseline_method:
+                    best_variant_method = m
+                    break
+
+    # Group 1: best achievable value heatmaps + selected parameters.
+    for metric in metrics:
+        best = _best_config_by_metric(cfg, metric)
+        if best.empty:
+            continue
+        piv_val = best.pivot_table(index="method", columns="dx_scale", values=metric, aggfunc="mean")
+        piv_val = piv_val.reindex(index=sorted([str(v) for v in piv_val.index.tolist()]), columns=sorted([float(v) for v in piv_val.columns.tolist()]))
+        p_val = out_root / f"best_value__{metric}.png"
+        if _plot_heatmap_from_pivot(
+            piv_val,
+            title=f"HCV variants: best {metric}",
+            cbar_label=metric,
+            out_path=p_val,
+        ):
+            generated.append(p_val.name)
+
+        for pname in ["max_dist_factor", "motion_refine_iters"]:
+            if pname not in best.columns:
+                continue
+            piv_p = best.pivot_table(index="method", columns="dx_scale", values=pname, aggfunc="mean")
+            piv_p = piv_p.reindex(index=sorted([str(v) for v in piv_p.index.tolist()]), columns=sorted([float(v) for v in piv_p.columns.tolist()]))
+            p = out_root / f"best_param__{metric}__{pname}.png"
+            if _plot_heatmap_from_pivot(
+                piv_p,
+                title=f"HCV variants: selected {pname} for best {metric}",
+                cbar_label=pname,
+                out_path=p,
+            ):
+                generated.append(p.name)
+
+    # Group 2: Pareto per dx using best-by-F1 configs.
+    if "link_f1_mean" in cfg.columns and "rms_mean" in cfg.columns:
+        for dx in sorted(pd.to_numeric(cfg["dx_scale"], errors="coerce").dropna().unique().tolist()):
+            sub = cfg[pd.to_numeric(cfg["dx_scale"], errors="coerce") == float(dx)].copy()
+            if sub.empty:
+                continue
+            sub["link_f1_mean"] = pd.to_numeric(sub["link_f1_mean"], errors="coerce")
+            sub["rms_mean"] = pd.to_numeric(sub["rms_mean"], errors="coerce")
+            sub = sub.dropna(subset=["method", "link_f1_mean", "rms_mean"])
+            if sub.empty:
+                continue
+            best_f1 = sub.sort_values(["method", "link_f1_mean", "rms_mean"], ascending=[True, False, True]).groupby("method", as_index=False).first()
+            fig, ax = plt.subplots(figsize=(7.0, 5.2))
+            ax.scatter(best_f1["rms_mean"].to_numpy(float), best_f1["link_f1_mean"].to_numpy(float), s=55.0)
+            for _, r in best_f1.iterrows():
+                ax.annotate(str(r["method"]), (float(r["rms_mean"]), float(r["link_f1_mean"])), xytext=(4, 4), textcoords="offset points", fontsize=8)
+            ax.set_xlabel("rms_mean")
+            ax.set_ylabel("link_f1_mean")
+            ax.set_ylim(0.0, 1.0)
+            ax.set_title(f"HCV variants Pareto (best by F1) | dx={float(dx):g}")
+            fig.tight_layout()
+            p = out_root / f"pareto_hcv_bestbyF1__dx{_fmt_token(float(dx))}.png"
+            fig.savefig(p, dpi=300)
+            plt.close(fig)
+            generated.append(p.name)
+
+    # Group 3: top-5 configs by F1 per dx.
+    if "link_f1_mean" in cfg.columns:
+        cols = [
+            c
+            for c in [
+                "method",
+                "max_dist_factor",
+                "motion_refine_iters",
+                "link_f1_mean",
+                "rms_mean",
+                "id_switches_mean_per_track",
+                "fragmentation_rate",
+                "unmatched_rate_mean",
+            ]
+            if c in cfg.columns
+        ]
+        for dx in sorted(pd.to_numeric(cfg["dx_scale"], errors="coerce").dropna().unique().tolist()):
+            sub = cfg[pd.to_numeric(cfg["dx_scale"], errors="coerce") == float(dx)].copy()
+            methods_subset = [baseline_method]
+            if best_variant_method is not None:
+                methods_subset.append(best_variant_method)
+            sub = sub[sub["method"].astype(str).isin(methods_subset)].copy()
+            if sub.empty:
+                continue
+            sub["link_f1_mean"] = pd.to_numeric(sub["link_f1_mean"], errors="coerce")
+            sub["rms_mean"] = pd.to_numeric(sub.get("rms_mean", np.nan), errors="coerce")
+            sub = sub.dropna(subset=["link_f1_mean"])
+            if sub.empty:
+                continue
+            top = sub.sort_values(["link_f1_mean", "rms_mean"], ascending=[False, True]).head(5).copy()
+            top = top[cols]
+            fig, ax = plt.subplots(figsize=(12.6, 2.7))
+            ax.axis("off")
+            cell_text: list[list[str]] = []
+            for _, r in top.iterrows():
+                row: list[str] = []
+                for c in cols:
+                    if c == "method":
+                        row.append(str(r[c]))
+                    else:
+                        v = pd.to_numeric(pd.Series([r[c]]), errors="coerce").iloc[0]
+                        row.append(f"{float(v):.4g}" if np.isfinite(v) else "nan")
+                cell_text.append(row)
+            tbl = ax.table(cellText=cell_text, colLabels=cols, loc="center")
+            tbl.auto_set_font_size(False)
+            tbl.set_fontsize(8)
+            tbl.scale(1.0, 1.2)
+            ax.set_title(f"HCV variants top-5 by F1 | dx={float(dx):g}", fontsize=10)
+            fig.tight_layout()
+            p = out_root / f"top5_hcv_byF1__dx{_fmt_token(float(dx))}.png"
+            fig.savefig(p, dpi=300)
+            plt.close(fig)
+            generated.append(p.name)
+
+    # Group 4: sensitivity for all tested methods with one line per dx.
+    dx_values = sorted(pd.to_numeric(cfg["dx_scale"], errors="coerce").dropna().unique().tolist())
+    if dx_values:
+        for method in sorted(cfg["method"].astype(str).unique().tolist()):
+            sub_m = cfg[cfg["method"].astype(str) == str(method)].copy()
+            if sub_m.empty:
+                continue
+            for metric in metrics:
+                if metric not in sub_m.columns:
+                    continue
+                fig, axs = plt.subplots(1, 2, figsize=(10.2, 3.9))
+                for ax, xcol in zip(axs, ["max_dist_factor", "motion_refine_iters"]):
+                    has_line = False
+                    for dx in dx_values:
+                        d = sub_m[np.isclose(pd.to_numeric(sub_m["dx_scale"], errors="coerce").to_numpy(float), float(dx))].copy()
+                        if d.empty:
+                            continue
+                        d[xcol] = pd.to_numeric(d[xcol], errors="coerce")
+                        d[metric] = pd.to_numeric(d[metric], errors="coerce")
+                        d = d.dropna(subset=[xcol, metric])
+                        if d.empty:
+                            continue
+                        st = d.groupby(xcol, as_index=False)[metric].mean().sort_values(xcol)
+                        if st.empty:
+                            continue
+                        ax.plot(st[xcol].to_numpy(float), st[metric].to_numpy(float), marker="o", label=f"dx={float(dx):g}")
+                        has_line = True
+                    ax.set_xlabel(xcol)
+                    ax.set_ylabel(metric)
+                    if metric == "link_f1_mean":
+                        ax.set_ylim(0.0, 1.0)
+                    else:
+                        ax.set_ylim(bottom=0.0)
+                    ax.set_title(xcol)
+                    if has_line:
+                        ax.legend(fontsize=8)
+                fig.suptitle(f"Sensitivity | {method} | all dx | {metric}")
+                fig.tight_layout()
+                p = out_root / f"sensitivity__{_fmt_method_token(method)}__all_dx__{metric}.png"
+                fig.savefig(p, dpi=300)
+                plt.close(fig)
+                generated.append(p.name)
+
+    return sorted(set(generated))
 
 def _gt_tracks_with_pointindex(gt_root: Path, regime: str, file_stem: str, mapping_df: pd.DataFrame) -> pd.DataFrame:
     gt_path = gt_root / regime / "_groundtruth" / f"{file_stem}_groundtruth.csv"
@@ -1267,6 +1523,146 @@ if RUN_NODRIFT_PARAM_SWEEP:
         generated = sorted(set(generated))
 
 
+# %% HUNGARIAN CV VARIANTS SWEEP
+"""Focused sweep: baseline Hungarian-CV versus four new Hungarian-CV variants.
+
+What is tested:
+- baseline: `hungarian_gating_cv`
+- new variants:
+  - adaptive max-distance
+  - innovation-normalized percentile gating
+  - switch-penalty in link cost
+  - two-stage Hungarian
+
+Why it matters:
+- isolates improvements around the current strongest method with controlled
+  runtime and fixed percentile gating.
+"""
+
+if RUN_HUNGARIAN_CV_VARIANTS_SWEEP:
+    out_root = _results_root("hungarian_cv_variants_sweep")
+    rows: list[dict[str, float | str]] = []
+
+    for dx in HCV_DX_SCALES:
+        tag = f"nodrift_dx_{_fmt_token(dx)}"
+        data_root = DATA_ROOT / tag
+        blind_reg_dir = data_root / "blind" / "nodrift_dx_sweep"
+        gt_reg_dir = data_root / "gt" / "nodrift_dx_sweep"
+        map_path = data_root / "unblinding.csv"
+        if not map_path.exists() or not blind_reg_dir.exists() or not gt_reg_dir.exists():
+            print(f"[WARN] Missing dataset for HCV sweep dx={dx}, skip: {data_root}")
+            continue
+
+        mapping_all = pd.read_csv(map_path)
+        blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))[: int(max(1, HCV_MAX_FILES))]
+
+        for blind_file in blind_files:
+            file_stem = blind_file.name.replace("_blind.csv", "")
+            map_sub = mapping_all[
+                (mapping_all["Regime"].astype(str) == "nodrift_dx_sweep")
+                & (mapping_all["File"].astype(str) == file_stem)].copy()
+            if map_sub.empty:
+                continue
+
+            blind_frames = load_blind_frames(blind_file)
+            gt_tracks = _gt_tracks_with_pointindex(data_root / "gt", "nodrift_dx_sweep", file_stem, mapping_all)
+
+            for m in HUNGARIAN_CV_VARIANTS:
+                for md_factor in HCV_MAX_DIST_FACTORS:
+                    for iters in HCV_REFINE_ITERS:
+                        gating_override = {
+                            "max_dist": float(max(0.5, float(md_factor) * float(dx))),
+                            "keep_percentile": float(HCV_KEEP_PERCENTILE),
+                        }
+                        params_override = {
+                            "motion_refine_iters": int(iters),
+                            "max_dist_factor": float(md_factor),
+                            "keep_percentile": float(HCV_KEEP_PERCENTILE),
+                            "dx_scale": float(dx),
+                            "sigma_init": float(dx),
+                        }
+                        assoc = _dispatch_association_method(
+                            blind_frames,
+                            m,
+                            dx_scale=float(dx),
+                            gating_override=gating_override,
+                            params_override=params_override,
+                        )
+                        cfg_id = f"md{_fmt_token(float(md_factor))}_kp{int(HCV_KEEP_PERCENTILE)}_it{int(iters)}"
+                        run_dir = out_root / f"dx_{_fmt_token(dx)}" / file_stem / str(m["name"]) / cfg_id
+                        row = _evaluate_and_save_run(
+                            out_dir=run_dir,
+                            assoc_result=assoc,
+                            gt_tracks_df=gt_tracks,
+                            mapping_df=map_sub,
+                            blind_frames=blind_frames,
+                            regime="nodrift_dx_sweep",
+                            file_stem=file_stem,
+                            method_name=str(m["name"]),
+                            extras={
+                                "dx_scale": float(dx),
+                                "config_id": cfg_id,
+                                "max_dist_factor": float(md_factor),
+                                "keep_percentile": float(HCV_KEEP_PERCENTILE),
+                                "motion_refine_iters": int(iters),
+                            },
+                        )
+                        rows.append(row)
+
+    if rows:
+        agg = pd.DataFrame(rows)
+        agg_path = out_root / "aggregated_hcv_variants.csv"
+        agg.to_csv(agg_path, index=False)
+
+        metric_cols = [
+            c
+            for c in [
+                "link_f1_mean",
+                "fragmentation_rate",
+                "id_switches_mean_per_track",
+                "rms_mean",
+                "unmatched_rate_mean",
+            ]
+            if c in agg.columns
+        ]
+        if metric_cols:
+            long = agg.melt(
+                id_vars=["method", "dx_scale", "max_dist_factor", "keep_percentile", "motion_refine_iters", "config_id"],
+                value_vars=metric_cols,
+                var_name="metric",
+                value_name="value",
+            )
+            stats = (
+                long.groupby(["method", "dx_scale", "max_dist_factor", "keep_percentile", "motion_refine_iters", "metric"], as_index=False)["value"]
+                .agg(mean="mean", std="std", n="count")
+                .sort_values(["metric", "method", "dx_scale", "max_dist_factor", "motion_refine_iters"])
+                .reset_index(drop=True)
+            )
+            stats_path = out_root / "aggregated_hcv_variants_stats.csv"
+            stats.to_csv(stats_path, index=False)
+        else:
+            stats_path = out_root / "aggregated_hcv_variants_stats.csv"
+            pd.DataFrame().to_csv(stats_path, index=False)
+
+        generated = _plot_hcv_variants_overview(out_root, agg)
+        (out_root / "README.txt").write_text(
+            "\n".join(
+                [
+                    f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                    f"dx_scales: {HCV_DX_SCALES}",
+                    f"max_dist_factors: {HCV_MAX_DIST_FACTORS}",
+                    f"motion_refine_iters: {HCV_REFINE_ITERS}",
+                    f"keep_percentile_fixed: {HCV_KEEP_PERCENTILE}",
+                    f"methods: {[m['name'] for m in HUNGARIAN_CV_VARIANTS]}",
+                    f"aggregated_csv: {agg_path.name}",
+                    f"aggregated_stats_csv: {stats_path.name}",
+                    "plots:",
+                    *[f"- {p}" for p in sorted(set(generated))],
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
 # %% DRIFT-PRESENT STRATEGY COMPARISON (OPTIONAL)
 """Compare strategy 1 vs strategy 2 under drift regimes.

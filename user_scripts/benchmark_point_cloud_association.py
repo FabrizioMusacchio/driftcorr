@@ -33,8 +33,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 try:
     from driftcorr.association import (
         DriftModelAdapterRigidStep,
+        associate_kalman_cv,
+        associate_min_cost_flow,
         associate_nodrift,
+        associate_tracklet_stitching,
         associate_with_registration,
+        compute_displacement_from_gt,
+        compute_nn_distance,
+        compute_rho,
         em_associate_and_driftfit,
         load_blind_frames,
         synthetic_generate_blind_pair,
@@ -54,8 +60,14 @@ except ModuleNotFoundError as exc:
     try:
         from driftcorr.association import (
             DriftModelAdapterRigidStep,
+            associate_kalman_cv,
+            associate_min_cost_flow,
             associate_nodrift,
+            associate_tracklet_stitching,
             associate_with_registration,
+            compute_displacement_from_gt,
+            compute_nn_distance,
+            compute_rho,
             em_associate_and_driftfit,
             load_blind_frames,
             synthetic_generate_blind_pair,
@@ -90,6 +102,7 @@ DATA_ROOT = ASSOC_ROOT / "_blind_pairs"
 
 RUN_GENERATE_DATASETS = True
 RUN_NODRIFT_DX_SWEEP = True
+RUN_NODRIFT_PARAM_SWEEP = True
 RUN_DRIFT_STRATEGY_COMPARISON = False
 OVERWRITE_DATASETS = True
 
@@ -118,10 +131,56 @@ NODRIFT_METHODS = [
         "method": "nearest",
         "motion_model": "constant_position",
     },
+    {
+        "name": "hungarian_dummy_unmatched_cp",
+        "kind": "nodrift",
+        "method": "hungarian",
+        "motion_model": "constant_position",
+        "params": {"use_dummy": True},
+    },
+    {
+        "name": "min_cost_flow_cp",
+        "kind": "min_cost_flow",
+        "motion_model": "constant_position",
+    },
+    {
+        "name": "min_cost_flow_cv",
+        "kind": "min_cost_flow",
+        "motion_model": "constant_velocity",
+        "params": {"allow_skip": True, "skip_cost_factor": 1.2},
+    },
+    {
+        "name": "tracklet_stitching_cv",
+        "kind": "tracklet_stitching",
+        "motion_model": "constant_velocity",
+    },
+    {
+        "name": "kalman_cv_innovation_gating",
+        "kind": "kalman",
+        "motion_model": "constant_velocity",
+    },
+    {
+        "name": "hungarian_huber_dummy_cp",
+        "kind": "nodrift",
+        "method": "hungarian",
+        "motion_model": "constant_position",
+        "params": {"metric": "huber", "use_dummy": True, "huber_delta": 2.0},
+    },
+    {
+        "name": "hungarian_mahalanobis_diag_cp",
+        "kind": "nodrift",
+        "method": "hungarian",
+        "motion_model": "constant_position",
+        "params": {"metric": "mahalanobis_diag", "use_dummy": True, "mahalanobis_scales": [2.0, 2.0, 2.0]},
+    },
 ]
 
 DRIFT_REGIMES = ["rotation_drift", "smooth"]
-
+NODRIFT_PARAM_SWEEP_DX = [0.2, 0.5, 1.0, 2.0, 4.0]
+NODRIFT_PARAM_SWEEP_MAX_FILES = 1
+NODRIFT_PARAM_SWEEP_MAX_DIST_FACTORS = [2.0, 3.0, 4.0, 6.0]
+NODRIFT_PARAM_SWEEP_KEEP_PERCENTILES = [90, 95, 99]
+NODRIFT_PARAM_SWEEP_REFINE_ITERS = [0, 1, 2, 5]
 # %% FUNCTIONS
 def _results_root(tag: str) -> Path:
     safe = str(tag).strip().replace(" ", "_").replace("-", "_")
@@ -150,6 +209,132 @@ def _plot_link_cost_over_time(links_df: pd.DataFrame, out_path: Path) -> None:
     fig.tight_layout()
     fig.savefig(out_path, dpi=300)
     plt.close(fig)
+
+def _plot_simple_series(tab: pd.DataFrame, x_col: str, y_col: str, title: str, y_label: str, out_path: Path) -> bool:
+    if tab.empty or x_col not in tab.columns or y_col not in tab.columns:
+        return False
+    d = tab.copy()
+    d[x_col] = pd.to_numeric(d[x_col], errors="coerce")
+    d[y_col] = pd.to_numeric(d[y_col], errors="coerce")
+    d = d.dropna(subset=[x_col, y_col])
+    if d.empty:
+        return False
+    fig, ax = plt.subplots(figsize=(6.6, 4.6))
+    ax.plot(d[x_col].to_numpy(float), d[y_col].to_numpy(float), marker="o")
+    ax.set_title(title)
+    ax.set_xlabel(x_col)
+    ax.set_ylabel(y_label)
+    ax.set_ylim(bottom=0.0)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+def _compute_and_save_diagnostics(
+    out_dir: Path,
+    blind_frames: list[PointCloudFrame],
+    gt_tracks_df: pd.DataFrame,
+) -> dict[str, float]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    nn_df = compute_nn_distance(blind_frames)
+    disp_df = compute_displacement_from_gt(gt_tracks_df)
+    rho_df = compute_rho(nn_df, disp_df)
+    nn_df.to_csv(out_dir / "diagnostics_nn_distance_over_time.csv", index=False)
+    disp_df.to_csv(out_dir / "diagnostics_displacement_over_time.csv", index=False)
+    rho_df.to_csv(out_dir / "diagnostics_rho_over_time.csv", index=False)
+
+    _plot_simple_series(
+        nn_df,
+        x_col="Time",
+        y_col="nn_median",
+        title="Nearest-neighbor distance over time",
+        y_label="median d_NN (um)",
+        out_path=out_dir / "plot_nn_distance_over_time.png",
+    )
+    _plot_simple_series(
+        disp_df,
+        x_col="Time",
+        y_col="disp_median",
+        title="GT displacement over time",
+        y_label="median Δx (um)",
+        out_path=out_dir / "plot_displacement_over_time.png",
+    )
+    _plot_simple_series(
+        rho_df,
+        x_col="Time",
+        y_col="rho_median",
+        title="Ambiguity ratio over time",
+        y_label="ρ = Δx / d_NN",
+        out_path=out_dir / "plot_rho_over_time.png",
+    )
+
+    return {
+        "diag_nn_median": float(np.nanmedian(pd.to_numeric(nn_df.get("nn_median", np.nan), errors="coerce"))),
+        "diag_disp_median": float(np.nanmedian(pd.to_numeric(disp_df.get("disp_median", np.nan), errors="coerce"))),
+        "diag_rho_median": float(np.nanmedian(pd.to_numeric(rho_df.get("rho_median", np.nan), errors="coerce"))),
+    }
+
+def _dispatch_association_method(
+    blind_frames: list[PointCloudFrame],
+    method_cfg: dict[str, object],
+    dx_scale: float,
+    gating_override: dict[str, object] | None = None,
+    params_override: dict[str, object] | None = None,
+):
+    """Run one association method config through the correct API."""
+    kind = str(method_cfg.get("kind", "nodrift"))
+    base_gating = {
+        "max_dist": float(max(0.5, 4.0 * float(dx_scale))),
+        "keep_percentile": 99.0,
+        "huber_delta": float(method_cfg.get("params", {}).get("huber_delta", 1.0)) if isinstance(method_cfg.get("params"), dict) else 1.0,
+    }
+    if gating_override:
+        base_gating.update(dict(gating_override))
+    p_base = {"metric": "sqeuclidean", "motion_refine_iters": 2}
+    if isinstance(method_cfg.get("params"), dict):
+        p_base.update(dict(method_cfg.get("params", {})))
+    if params_override:
+        p_base.update(dict(params_override))
+
+    if kind == "min_cost_flow":
+        return associate_min_cost_flow(
+            blind_frames,
+            gating=base_gating,
+            motion_model=str(method_cfg.get("motion_model", "constant_position")),
+            params=p_base,
+        )
+    if kind == "tracklet_stitching":
+        strict = {
+            "max_dist": float(base_gating.get("max_dist", 4.0)),
+            "keep_percentile": float(p_base.get("keep_percentile_strict", 90.0)),
+            "huber_delta": float(p_base.get("huber_delta", 1.0)),
+        }
+        loose = {
+            "max_dist": float(base_gating.get("max_dist", 4.0)),
+            "keep_percentile": float(base_gating.get("keep_percentile", 99.0)),
+        }
+        return associate_tracklet_stitching(
+            blind_frames,
+            gating_strict=strict,
+            gating_loose=loose,
+            motion_model=str(method_cfg.get("motion_model", "constant_velocity")),
+            params=p_base,
+        )
+    if kind == "kalman":
+        return associate_kalman_cv(
+            blind_frames,
+            gating=base_gating,
+            params=p_base,
+        )
+    # default: pairwise nodrift
+    return associate_nodrift(
+        blind_frames,
+        method=str(method_cfg.get("method", "hungarian")),
+        gating=base_gating,
+        motion_model=str(method_cfg.get("motion_model", "constant_position")),
+        params=p_base,
+    )
 
 def _plot_metric_vs_dx(agg: pd.DataFrame, metric: str, out_path: Path, title: str) -> bool:
     if agg.empty or metric not in agg.columns or "dx_scale" not in agg.columns or "method" not in agg.columns:
@@ -287,6 +472,325 @@ def _plot_metric_heatmap_regime_strategy(agg: pd.DataFrame, metric: str, out_pat
     plt.close(fig)
     return True
 
+def _plot_param_heatmap(
+    agg: pd.DataFrame,
+    metric: str,
+    method_name: str,
+    dx_scale: float,
+    motion_refine_iters: int,
+    out_path: Path,
+) -> bool:
+    req = {"method", "dx_scale", "max_dist_factor", "keep_percentile", "motion_refine_iters", metric}
+    if agg.empty or not req.issubset(set(agg.columns)):
+        return False
+    d = agg.copy()
+    d = d[d["method"].astype(str) == str(method_name)]
+    d["dx_scale"] = pd.to_numeric(d["dx_scale"], errors="coerce")
+    d = d[np.isclose(d["dx_scale"].to_numpy(float), float(dx_scale))]
+    d["motion_refine_iters"] = pd.to_numeric(d["motion_refine_iters"], errors="coerce")
+    d = d[d["motion_refine_iters"] == float(motion_refine_iters)]
+    if d.empty:
+        return False
+    d["max_dist_factor"] = pd.to_numeric(d["max_dist_factor"], errors="coerce")
+    d["keep_percentile"] = pd.to_numeric(d["keep_percentile"], errors="coerce")
+    d[metric] = pd.to_numeric(d[metric], errors="coerce")
+    d = d.dropna(subset=["max_dist_factor", "keep_percentile", metric])
+    if d.empty:
+        return False
+
+    x_vals = sorted(d["keep_percentile"].unique().tolist())
+    y_vals = sorted(d["max_dist_factor"].unique().tolist())
+    piv = d.pivot_table(index="max_dist_factor", columns="keep_percentile", values=metric, aggfunc="mean")
+    piv = piv.reindex(index=y_vals, columns=x_vals)
+    mat = piv.to_numpy(float)
+
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("#f0f0f0")
+    fig, ax = plt.subplots(figsize=(6.8, 4.8))
+    im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(metric)
+    ax.set_xticks(np.arange(len(x_vals)))
+    ax.set_xticklabels([str(int(v)) for v in x_vals])
+    ax.set_yticks(np.arange(len(y_vals)))
+    ax.set_yticklabels([f"{float(v):g}" for v in y_vals])
+    ax.set_xlabel("keep_percentile")
+    ax.set_ylabel("max_dist_factor")
+    ax.set_title(f"{method_name} | dx={dx_scale:g} | iters={int(motion_refine_iters)} | {metric}")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+def _metric_higher_is_better(metric: str) -> bool:
+    return str(metric) in {"link_f1_mean"}
+
+def _fmt_method_token(method: str) -> str:
+    return str(method).strip().replace(" ", "_").replace("-", "_")
+
+def _plot_heatmap_from_pivot(
+    pivot: pd.DataFrame,
+    title: str,
+    cbar_label: str,
+    out_path: Path,
+    cmap_name: str = "viridis",
+) -> bool:
+    if pivot.empty:
+        return False
+    mat = pivot.to_numpy(float)
+    if mat.size == 0:
+        return False
+    cmap = plt.get_cmap(cmap_name).copy()
+    cmap.set_bad("#f0f0f0")
+    fig_w = max(7.0, 1.2 * max(1, pivot.shape[1]))
+    fig_h = max(4.8, 0.45 * max(3, pivot.shape[0]))
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label(cbar_label)
+    ax.set_xticks(np.arange(pivot.shape[1]))
+    ax.set_xticklabels([str(v) for v in pivot.columns.tolist()])
+    ax.set_yticks(np.arange(pivot.shape[0]))
+    ax.set_yticklabels([str(v) for v in pivot.index.tolist()])
+    ax.set_xlabel("dx_scale")
+    ax.set_ylabel("method")
+    ax.set_title(title)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+def _prepare_param_sweep_config_table(agg: pd.DataFrame) -> pd.DataFrame:
+    req = ["method", "dx_scale", "max_dist_factor", "keep_percentile", "motion_refine_iters"]
+    if agg.empty or not set(req).issubset(set(agg.columns)):
+        return pd.DataFrame()
+    d = agg.copy()
+    for c in req:
+        if c in {"method"}:
+            d[c] = d[c].astype(str)
+        else:
+            d[c] = pd.to_numeric(d[c], errors="coerce")
+    if "config_id" not in d.columns:
+        d["config_id"] = d.apply(
+            lambda r: f"md{_fmt_token(float(r['max_dist_factor']))}_kp{int(r['keep_percentile'])}_it{int(r['motion_refine_iters'])}",
+            axis=1,
+        )
+    metric_cols = [
+        c
+        for c in [
+            "link_f1_mean",
+            "rms_mean",
+            "id_switches_mean_per_track",
+            "fragmentation_rate",
+            "unmatched_rate_mean",
+            "link_precision_mean",
+            "link_recall_mean",
+        ]
+        if c in d.columns
+    ]
+    for c in metric_cols:
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    gcols = ["method", "dx_scale", "config_id", "max_dist_factor", "keep_percentile", "motion_refine_iters"]
+    cfg = d.groupby(gcols, as_index=False)[metric_cols].mean(numeric_only=True)
+    cfg = cfg.sort_values(["method", "dx_scale", "max_dist_factor", "keep_percentile", "motion_refine_iters"]).reset_index(drop=True)
+    return cfg
+
+def _best_config_by_metric(cfg: pd.DataFrame, metric: str) -> pd.DataFrame:
+    if cfg.empty or metric not in cfg.columns:
+        return pd.DataFrame()
+    d = cfg.copy()
+    d[metric] = pd.to_numeric(d[metric], errors="coerce")
+    d = d.dropna(subset=[metric, "method", "dx_scale"])
+    if d.empty:
+        return pd.DataFrame()
+    higher = _metric_higher_is_better(metric)
+    d = d.sort_values(
+        ["method", "dx_scale", metric, "max_dist_factor", "keep_percentile", "motion_refine_iters"],
+        ascending=[True, True, not higher, True, True, True],
+    )
+    best = d.groupby(["method", "dx_scale"], as_index=False).first()
+    return best
+
+def _plot_param_sweep_overview(out_root: Path) -> list[str]:
+    generated: list[str] = []
+    agg_path = out_root / "aggregated_param_sweep.csv"
+    stats_path = out_root / "aggregated_param_sweep_stats.csv"
+    if not agg_path.exists():
+        return generated
+
+    agg = pd.read_csv(agg_path)
+    _ = pd.read_csv(stats_path) if stats_path.exists() else pd.DataFrame()
+    cfg = _prepare_param_sweep_config_table(agg)
+    if cfg.empty:
+        return generated
+
+    core_metrics = [
+        m
+        for m in [
+            "link_f1_mean",
+            "rms_mean",
+            "id_switches_mean_per_track",
+            "fragmentation_rate",
+            "unmatched_rate_mean",
+        ]
+        if m in cfg.columns
+    ]
+
+    # Plot 1 + Plot 2: best-by-metric value and selected params.
+    for metric in core_metrics:
+        best = _best_config_by_metric(cfg, metric)
+        if best.empty:
+            continue
+        piv_val = best.pivot_table(index="method", columns="dx_scale", values=metric, aggfunc="mean")
+        piv_val = piv_val.reindex(index=sorted(piv_val.index.astype(str).tolist()), columns=sorted([float(v) for v in piv_val.columns.tolist()]))
+        p_val = out_root / f"best_value__{metric}.png"
+        if _plot_heatmap_from_pivot(
+            piv_val,
+            title=f"Best value by method/dx: {metric}",
+            cbar_label=metric,
+            out_path=p_val,
+        ):
+            generated.append(p_val.name)
+
+        for param_name in ["max_dist_factor", "keep_percentile", "motion_refine_iters"]:
+            if param_name not in best.columns:
+                continue
+            piv_p = best.pivot_table(index="method", columns="dx_scale", values=param_name, aggfunc="mean")
+            piv_p = piv_p.reindex(index=sorted(piv_p.index.astype(str).tolist()), columns=sorted([float(v) for v in piv_p.columns.tolist()]))
+            p_param = out_root / f"best_param__{metric}__{param_name}.png"
+            if _plot_heatmap_from_pivot(
+                piv_p,
+                title=f"Selected {param_name} for best {metric}",
+                cbar_label=param_name,
+                out_path=p_param,
+            ):
+                generated.append(p_param.name)
+
+    # Plot 3: sensitivity curves per method/metric.
+    for method in sorted(cfg["method"].astype(str).unique().tolist()):
+        sub = cfg[cfg["method"].astype(str) == str(method)].copy()
+        if sub.empty:
+            continue
+        for metric in core_metrics:
+            if metric not in sub.columns:
+                continue
+            fig, axs = plt.subplots(1, 3, figsize=(12.0, 3.6))
+            panels = [
+                ("max_dist_factor", "max_dist_factor"),
+                ("keep_percentile", "keep_percentile"),
+                ("motion_refine_iters", "motion_refine_iters"),
+            ]
+            for ax, (col, xlab) in zip(axs, panels):
+                d = sub.copy()
+                d[col] = pd.to_numeric(d[col], errors="coerce")
+                d[metric] = pd.to_numeric(d[metric], errors="coerce")
+                d = d.dropna(subset=[col, metric])
+                if d.empty:
+                    ax.set_title(xlab)
+                    continue
+                stat = d.groupby(col, as_index=False)[metric].mean().sort_values(col)
+                ax.plot(stat[col].to_numpy(float), stat[metric].to_numpy(float), marker="o")
+                ax.set_xlabel(xlab)
+                ax.set_ylabel(metric)
+                if metric in {"link_f1_mean"}:
+                    ax.set_ylim(0.0, 1.0)
+                else:
+                    ax.set_ylim(bottom=0.0)
+                ax.set_title(xlab)
+            fig.suptitle(f"Sensitivity | {method} | {metric}")
+            fig.tight_layout()
+            p = out_root / f"sensitivity__{_fmt_method_token(method)}__{metric}.png"
+            fig.savefig(p, dpi=300)
+            plt.close(fig)
+            generated.append(p.name)
+
+    # Plot 4: Pareto (best by F1 per method/dx).
+    if "link_f1_mean" in cfg.columns and "rms_mean" in cfg.columns:
+        for dx in sorted(pd.to_numeric(cfg["dx_scale"], errors="coerce").dropna().unique().tolist()):
+            sub = cfg[pd.to_numeric(cfg["dx_scale"], errors="coerce") == float(dx)].copy()
+            if sub.empty:
+                continue
+            sub["link_f1_mean"] = pd.to_numeric(sub["link_f1_mean"], errors="coerce")
+            sub["rms_mean"] = pd.to_numeric(sub["rms_mean"], errors="coerce")
+            sub = sub.dropna(subset=["method", "link_f1_mean", "rms_mean"])
+            if sub.empty:
+                continue
+            sub = sub.sort_values(["method", "link_f1_mean", "rms_mean"], ascending=[True, False, True])
+            best_f1 = sub.groupby("method", as_index=False).first()
+            fig, ax = plt.subplots(figsize=(7.0, 5.2))
+            ax.scatter(best_f1["rms_mean"].to_numpy(float), best_f1["link_f1_mean"].to_numpy(float), s=50.0)
+            for _, r in best_f1.iterrows():
+                ax.annotate(str(r["method"]), (float(r["rms_mean"]), float(r["link_f1_mean"])), xytext=(4, 4), textcoords="offset points", fontsize=8)
+            ax.set_xlabel("rms_mean")
+            ax.set_ylabel("link_f1_mean")
+            ax.set_ylim(0.0, 1.0)
+            ax.set_title(f"Pareto (best by F1) | dx={float(dx):g}")
+            fig.tight_layout()
+            p = out_root / f"pareto_bestbyF1__dx{_fmt_token(float(dx))}.png"
+            fig.savefig(p, dpi=300)
+            plt.close(fig)
+            generated.append(p.name)
+
+    # Plot 5: top-5 table by F1 for each dx.
+    if "link_f1_mean" in cfg.columns:
+        show_cols = [
+            c
+            for c in [
+                "method",
+                "max_dist_factor",
+                "keep_percentile",
+                "motion_refine_iters",
+                "link_f1_mean",
+                "rms_mean",
+                "id_switches_mean_per_track",
+                "fragmentation_rate",
+            ]
+            if c in cfg.columns
+        ]
+        for dx in sorted(pd.to_numeric(cfg["dx_scale"], errors="coerce").dropna().unique().tolist()):
+            sub = cfg[pd.to_numeric(cfg["dx_scale"], errors="coerce") == float(dx)].copy()
+            if sub.empty:
+                continue
+            sub["link_f1_mean"] = pd.to_numeric(sub["link_f1_mean"], errors="coerce")
+            sub["rms_mean"] = pd.to_numeric(sub.get("rms_mean", np.nan), errors="coerce")
+            sub = sub.dropna(subset=["link_f1_mean"])
+            if sub.empty:
+                continue
+            top = sub.sort_values(["link_f1_mean", "rms_mean"], ascending=[False, True]).head(5).copy()
+            top = top[show_cols]
+            for c in top.columns:
+                if c != "method":
+                    top[c] = pd.to_numeric(top[c], errors="coerce")
+            fig, ax = plt.subplots(figsize=(13.5, 2.8))
+            ax.axis("off")
+            cell_text = []
+            for _, r in top.iterrows():
+                row = []
+                for c in show_cols:
+                    if c == "method":
+                        row.append(str(r[c]))
+                    else:
+                        v = r[c]
+                        if np.isfinite(v):
+                            row.append(f"{float(v):.4g}")
+                        else:
+                            row.append("nan")
+                cell_text.append(row)
+            table = ax.table(cellText=cell_text, colLabels=show_cols, loc="center")
+            table.auto_set_font_size(False)
+            table.set_fontsize(8)
+            table.scale(1.0, 1.2)
+            ax.set_title(f"Top-5 configs by link_f1_mean | dx={float(dx):g}", fontsize=10)
+            fig.tight_layout()
+            p = out_root / f"top5_byF1__dx{_fmt_token(float(dx))}.png"
+            fig.savefig(p, dpi=300)
+            plt.close(fig)
+            generated.append(p.name)
+
+    return generated
+
 def _gt_tracks_with_pointindex(gt_root: Path, regime: str, file_stem: str, mapping_df: pd.DataFrame) -> pd.DataFrame:
     gt_path = gt_root / regime / "_groundtruth" / f"{file_stem}_groundtruth.csv"
     gt = pd.read_csv(gt_path)
@@ -328,6 +832,7 @@ def _evaluate_and_save_run(
         links_df=links_df,
         gt_tracks_df=gt_tracks_df,
     )
+    diag_summary = _compute_and_save_diagnostics(out_dir, blind_frames, gt_tracks_df)
 
     tracks_df.to_csv(out_dir / f"{file_stem}_tracks_inferred_{method_name}.csv", index=False)
     links_df.to_csv(out_dir / f"{file_stem}_links_{method_name}.csv", index=False)
@@ -363,6 +868,7 @@ def _evaluate_and_save_run(
         **{k: float(v) if isinstance(v, (int, float, np.floating)) else str(v) for k, v in extras.items()},
     }
     row.update({k: float(v) if np.isscalar(v) and isinstance(v, (int, float, np.floating)) else v for k, v in summary_gt.items()})
+    row.update({k: float(v) for k, v in diag_summary.items()})
     for k, v in assoc_result.quality.items():
         if isinstance(v, (int, float, np.floating)):
             row[f"assoc_{k}"] = float(v)
@@ -453,6 +959,7 @@ Interpretation:
 if RUN_NODRIFT_DX_SWEEP:
     out_root = _results_root("nodrift_dx_sweep")
     rows: list[dict[str, float | str]] = []
+    diag_file_rows: list[dict[str, float | str]] = []
 
     for dx in DX_SCALES:
         tag = f"nodrift_dx_{_fmt_token(dx)}"
@@ -478,16 +985,18 @@ if RUN_NODRIFT_DX_SWEEP:
 
             blind_frames = load_blind_frames(blind_file)
             gt_tracks = _gt_tracks_with_pointindex(data_root / "gt", "nodrift_dx_sweep", file_stem, mapping_all)
+            file_diag_dir = out_root / f"dx_{_fmt_token(dx)}" / file_stem / "_diagnostics"
+            file_diag = _compute_and_save_diagnostics(file_diag_dir, blind_frames, gt_tracks)
+            diag_file_rows.append(
+                {
+                    "dx_scale": float(dx),
+                    "file_stem": str(file_stem),
+                    **{k: float(v) for k, v in file_diag.items()},
+                }
+            )
 
             for m in NODRIFT_METHODS:
-                gating = {"max_dist": float(max(0.5, 4.0 * float(dx))), "keep_percentile": 99.0}
-                assoc = associate_nodrift(
-                    blind_frames,
-                    method=str(m["method"]),
-                    gating=gating,
-                    motion_model=str(m["motion_model"]),
-                    params={"metric": "sqeuclidean", "motion_refine_iters": 2},
-                )
+                assoc = _dispatch_association_method(blind_frames, m, dx_scale=float(dx))
                 run_dir = out_root / f"dx_{_fmt_token(dx)}" / file_stem / str(m["name"])
                 row = _evaluate_and_save_run(
                     out_dir=run_dir,
@@ -571,6 +1080,193 @@ if RUN_NODRIFT_DX_SWEEP:
             + "\n",
             encoding="utf-8",
         )
+
+    if diag_file_rows:
+        diag = pd.DataFrame(diag_file_rows)
+        diag.to_csv(out_root / "aggregated_diagnostics_by_file.csv", index=False)
+        diag_summary = (
+            diag.groupby("dx_scale", as_index=False)[["diag_nn_median", "diag_disp_median", "diag_rho_median"]]
+            .agg(["mean", "std", "count"])
+        )
+        # Flatten multi-index columns.
+        diag_summary.columns = [
+            "dx_scale"
+            if c[0] == "dx_scale"
+            else f"{c[0]}_{c[1]}"
+            for c in diag_summary.columns.to_flat_index()
+        ]
+        diag_summary.to_csv(out_root / "aggregated_diagnostics_by_dx.csv", index=False)
+        _plot_simple_series(
+            diag.groupby("dx_scale", as_index=False)["diag_nn_median"].mean(),
+            x_col="dx_scale",
+            y_col="diag_nn_median",
+            title="Median nearest-neighbor distance vs dx",
+            y_label="median d_NN (um)",
+            out_path=out_root / "plot_diagnostics_median_dnn_vs_dx.png",
+        )
+        _plot_simple_series(
+            diag.groupby("dx_scale", as_index=False)["diag_disp_median"].mean(),
+            x_col="dx_scale",
+            y_col="diag_disp_median",
+            title="Median displacement vs dx",
+            y_label="median Δx (um)",
+            out_path=out_root / "plot_diagnostics_median_dx_vs_dx.png",
+        )
+        _plot_simple_series(
+            diag.groupby("dx_scale", as_index=False)["diag_rho_median"].mean(),
+            x_col="dx_scale",
+            y_col="diag_rho_median",
+            title="Median ambiguity ratio vs dx",
+            y_label="median ρ",
+            out_path=out_root / "plot_diagnostics_median_rho_vs_dx.png",
+        )
+
+# %% NO-DRIFT PARAMETER SWEEP
+"""Sweep gating and refinement parameters on a reduced no-drift subset.
+
+What is tested:
+- max-distance gating factor,
+- percentile gating,
+- motion refinement iterations (for methods supporting it).
+
+Why it matters:
+- Gives interpretable settings tradeoffs without rerunning full benchmarks.
+"""
+
+if RUN_NODRIFT_PARAM_SWEEP:
+    out_root = _results_root("nodrift_param_sweep")
+    rows: list[dict[str, float | str]] = []
+
+    for dx in NODRIFT_PARAM_SWEEP_DX:
+        tag = f"nodrift_dx_{_fmt_token(dx)}"
+        data_root = DATA_ROOT / tag
+        blind_reg_dir = data_root / "blind" / "nodrift_dx_sweep"
+        gt_reg_dir = data_root / "gt" / "nodrift_dx_sweep"
+        map_path = data_root / "unblinding.csv"
+        if not map_path.exists() or not blind_reg_dir.exists() or not gt_reg_dir.exists():
+            print(f"[WARN] Missing dataset for param sweep dx={dx}, skip: {data_root}")
+            continue
+        mapping_all = pd.read_csv(map_path)
+        blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))[: int(max(1, NODRIFT_PARAM_SWEEP_MAX_FILES))]
+
+        for blind_file in blind_files:
+            file_stem = blind_file.name.replace("_blind.csv", "")
+            map_sub = mapping_all[
+                (mapping_all["Regime"].astype(str) == "nodrift_dx_sweep")
+                & (mapping_all["File"].astype(str) == file_stem)
+            ].copy()
+            if map_sub.empty:
+                continue
+            blind_frames = load_blind_frames(blind_file)
+            gt_tracks = _gt_tracks_with_pointindex(data_root / "gt", "nodrift_dx_sweep", file_stem, mapping_all)
+
+            for m in NODRIFT_METHODS:
+                kind = str(m.get("kind", "nodrift"))
+                iter_list = NODRIFT_PARAM_SWEEP_REFINE_ITERS if kind == "nodrift" else [0]
+                for md_factor in NODRIFT_PARAM_SWEEP_MAX_DIST_FACTORS:
+                    for kp in NODRIFT_PARAM_SWEEP_KEEP_PERCENTILES:
+                        for iters in iter_list:
+                            gating_override = {
+                                "max_dist": float(max(0.5, float(md_factor) * float(dx))),
+                                "keep_percentile": float(kp),
+                            }
+                            params_override = {"motion_refine_iters": int(iters)}
+                            assoc = _dispatch_association_method(
+                                blind_frames,
+                                m,
+                                dx_scale=float(dx),
+                                gating_override=gating_override,
+                                params_override=params_override,
+                            )
+                            cfg_id = f"md{_fmt_token(float(md_factor))}_kp{int(kp)}_it{int(iters)}"
+                            run_dir = out_root / f"dx_{_fmt_token(dx)}" / file_stem / str(m["name"]) / cfg_id
+                            row = _evaluate_and_save_run(
+                                out_dir=run_dir,
+                                assoc_result=assoc,
+                                gt_tracks_df=gt_tracks,
+                                mapping_df=map_sub,
+                                blind_frames=blind_frames,
+                                regime="nodrift_dx_sweep",
+                                file_stem=file_stem,
+                                method_name=str(m["name"]),
+                                extras={
+                                    "dx_scale": float(dx),
+                                    "config_id": cfg_id,
+                                    "max_dist_factor": float(md_factor),
+                                    "keep_percentile": float(kp),
+                                    "motion_refine_iters": int(iters),
+                                },
+                            )
+                            rows.append(row)
+
+    if rows:
+        agg = pd.DataFrame(rows)
+        agg.to_csv(out_root / "aggregated_param_sweep.csv", index=False)
+
+        metric_cols = [
+            c
+            for c in [
+                "link_precision_mean",
+                "link_recall_mean",
+                "link_f1_mean",
+                "fragmentation_rate",
+                "id_switches_mean_per_track",
+                "rms_mean",
+                "unmatched_rate_mean",
+            ]
+            if c in agg.columns
+        ]
+        if metric_cols:
+            long = agg.melt(
+                id_vars=[
+                    "method",
+                    "dx_scale",
+                    "max_dist_factor",
+                    "keep_percentile",
+                    "motion_refine_iters",
+                    "config_id",
+                ],
+                value_vars=metric_cols,
+                var_name="metric",
+                value_name="value",
+            )
+            stats = (
+                long.groupby(
+                    ["method", "dx_scale", "max_dist_factor", "keep_percentile", "motion_refine_iters", "metric"],
+                    as_index=False,
+                )["value"]
+                .agg(mean="mean", std="std", n="count")
+                .sort_values(["metric", "method", "dx_scale", "motion_refine_iters", "max_dist_factor", "keep_percentile"])
+                .reset_index(drop=True)
+            )
+            stats.to_csv(out_root / "aggregated_param_sweep_stats.csv", index=False)
+
+        generated: list[str] = []
+        out_root_single_heatmap = out_root / "heatmaps"
+        out_root_single_heatmap.mkdir(parents=True, exist_ok=True)
+        for metric in [m for m in ["rms_mean", "link_f1_mean"] if m in agg.columns]:
+            for method in sorted(agg["method"].astype(str).unique().tolist()):
+                for dxv in sorted(pd.to_numeric(agg["dx_scale"], errors="coerce").dropna().unique().tolist()):
+                    sub = agg[(agg["method"].astype(str) == str(method)) & (pd.to_numeric(agg["dx_scale"], errors="coerce") == float(dxv))]
+                    if sub.empty:
+                        continue
+                    for it in sorted(pd.to_numeric(sub["motion_refine_iters"], errors="coerce").dropna().astype(int).unique().tolist()):
+                        outp = out_root_single_heatmap / f"plot_param_sweep_{metric}__{method}__dx{_fmt_token(float(dxv))}__it{int(it)}.png"
+                        if _plot_param_heatmap(
+                            agg,
+                            metric=metric,
+                            method_name=method,
+                            dx_scale=float(dxv),
+                            motion_refine_iters=int(it),
+                            out_path=outp,
+                        ):
+                            generated.append(outp.name)
+
+        # Overall compact publication-style overview from aggregated CSV outputs.
+        generated.extend(_plot_param_sweep_overview(out_root))
+        generated = sorted(set(generated))
+
+
 
 # %% DRIFT-PRESENT STRATEGY COMPARISON (OPTIONAL)
 """Compare strategy 1 vs strategy 2 under drift regimes.

@@ -28,6 +28,10 @@ from .runner import (
     frames_to_tracks_df,
     tracks_df_to_frames,
 )
+from .kalman import associate_kalman_cv
+from .min_cost_flow import associate_min_cost_flow
+from .tracklets import associate_tracklet_stitching
+from .diagnostics import compute_displacement_from_gt, compute_nn_distance, compute_rho
 from .synthetic import load_blind_frames, load_groundtruth_mapping, synthetic_generate_blind_pair
 from .types import AssociationResult, GroundTruthMapping, PointCloudFrame
 
@@ -38,6 +42,9 @@ __all__ = [
     "associate_nodrift",
     "associate_with_registration",
     "em_associate_and_driftfit",
+    "associate_min_cost_flow",
+    "associate_tracklet_stitching",
+    "associate_kalman_cv",
     "DriftModelAdapterRigidStep",
     "DriftModelAdapterRbfToReference",
     "DriftModelAdapterSpacetimeRbf",
@@ -47,4 +54,7 @@ __all__ = [
     "load_blind_frames",
     "load_groundtruth_mapping",
     "synthetic_generate_blind_pair",
+    "compute_nn_distance",
+    "compute_displacement_from_gt",
+    "compute_rho",
 ]

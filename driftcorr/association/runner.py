@@ -141,10 +141,12 @@ def _run_pairwise_assignments(
     metric: str,
     gating: dict[str, Any] | None,
     velocity_map: dict[tuple[float, int], np.ndarray] | None = None,
+    assignment_options: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Compute assignments for all consecutive frame pairs."""
     fr = sorted(frames, key=lambda f: float(f.time))
     gating = dict(gating or {})
+    aopts = dict(assignment_options or {})
     out: list[dict[str, Any]] = []
 
     for ti in range(len(fr) - 1):
@@ -167,19 +169,32 @@ def _run_pairwise_assignments(
             metric=metric,
             cov=gating.get("cov"),
             huber_delta=float(gating.get("huber_delta", 1.0)),
+            mahalanobis_scales=gating.get("mahalanobis_scales"),
         )
         gate_mask = apply_gating(
             cost,
             max_dist=gating.get("max_dist"),
             max_cost=gating.get("max_cost"),
             keep_percentile=gating.get("keep_percentile"),
-            assume_squared_cost=(metric == "sqeuclidean"),
+            assume_squared_cost=(str(metric).lower() == "sqeuclidean"),
         )
 
         if str(assignment_method).lower() == "nearest":
-            a = nearest_neighbor_assignment(cost, gating_mask=gate_mask)
+            a = nearest_neighbor_assignment(
+                cost,
+                gating_mask=gate_mask,
+                use_dummy=bool(aopts.get("use_dummy", False)),
+                miss_cost=aopts.get("miss_cost"),
+            )
         else:
-            a = hungarian_assignment(cost, gating_mask=gate_mask)
+            a = hungarian_assignment(
+                cost,
+                gating_mask=gate_mask,
+                use_dummy=bool(aopts.get("use_dummy", False)),
+                miss_cost=aopts.get("miss_cost"),
+                birth_cost=aopts.get("birth_cost"),
+                death_cost=aopts.get("death_cost"),
+            )
 
         a["t"] = float(f0.time)
         a["t_next"] = float(f1.time)
@@ -264,6 +279,12 @@ def associate_nodrift(
     p = dict(params or {})
     metric = str(p.get("metric", "sqeuclidean"))
     n_refine = int(p.get("motion_refine_iters", 2 if str(motion_model) == "constant_velocity" else 1))
+    assignment_options = {
+        "use_dummy": bool(p.get("use_dummy", False)),
+        "miss_cost": p.get("miss_cost"),
+        "birth_cost": p.get("birth_cost"),
+        "death_cost": p.get("death_cost"),
+    }
 
     vel_map: dict[tuple[float, int], np.ndarray] | None = None
     assignments: list[dict[str, Any]] = []
@@ -275,6 +296,7 @@ def associate_nodrift(
             metric=metric,
             gating=gating,
             velocity_map=vel_map if str(motion_model) == "constant_velocity" else None,
+            assignment_options=assignment_options,
         )
         result = _build_result(fr, assignments, params={"method": method, "motion_model": motion_model, **p})
         if str(motion_model) == "constant_velocity":
@@ -326,12 +348,24 @@ def associate_with_registration(
             max_dist=gating.get("max_dist"),
             max_cost=gating.get("max_cost"),
             keep_percentile=gating.get("keep_percentile"),
-            assume_squared_cost=(metric == "sqeuclidean"),
+            assume_squared_cost=(str(metric).lower() == "sqeuclidean"),
         )
         if str(then_assignment).lower() == "nearest":
-            a = nearest_neighbor_assignment(cost, gating_mask=gate_mask)
+            a = nearest_neighbor_assignment(
+                cost,
+                gating_mask=gate_mask,
+                use_dummy=bool(p.get("use_dummy", False)),
+                miss_cost=p.get("miss_cost"),
+            )
         else:
-            a = hungarian_assignment(cost, gating_mask=gate_mask)
+            a = hungarian_assignment(
+                cost,
+                gating_mask=gate_mask,
+                use_dummy=bool(p.get("use_dummy", False)),
+                miss_cost=p.get("miss_cost"),
+                birth_cost=p.get("birth_cost"),
+                death_cost=p.get("death_cost"),
+            )
 
         a["t"] = float(f0.time)
         a["t_next"] = float(f1.time)

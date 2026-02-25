@@ -112,6 +112,10 @@ def generate_controlled_drift_dataset(
     dx_scale_um: float = 0.8,
     dx_distribution: str = "gaussian",
     dx_track_smoothness: float = 0.7,
+    dx_mode: str = "fixed",
+    dx_min_um: float = 0.2,
+    dx_max_um: float = 4.0,
+    dx_varying_distribution: str = "uniform",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Generate 3D tracks with known drift and known no-drift groundtruth.
 
@@ -155,6 +159,8 @@ def generate_controlled_drift_dataset(
     cell_type[idx_stationary] = "stationary"
     cell_type[idx_migrating] = "migrating"
     mode = str(local_mode)
+    dx_schedule = np.full((n, t_count), float(dx_scale_um), dtype=float)
+    dx_source_all = np.full((n, t_count), "fixed", dtype=object)
 
     x_true = np.zeros((n, t_count, 3), dtype=float)
     x_true[:, 0, :] = p0
@@ -173,21 +179,44 @@ def generate_controlled_drift_dataset(
     for ti in range(1, t_count):
         x_true[:, ti, :] = x_true[:, ti - 1, :] + vel + rw_step[:, ti, :]
 
-    if mode == "nodrift_dx_sweep":
-        # Association-only regime: no imaging drift, controlled per-frame motion magnitude.
-        rng_dx = np.random.default_rng(int(seed) + 19013)
+    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx"}:
+        # Association-only regimes: no imaging drift with controlled motion
+        # amplitudes. "nodrift_varying_dx" uses heteroscedastic dx schedules.
+        rng_offset = 19013 if mode == "nodrift_dx_sweep" else 29013
+        rng_dx = np.random.default_rng(int(seed) + int(rng_offset))
         x_true = np.zeros((n, t_count, 3), dtype=float)
         x_true[:, 0, :] = p0
         a = float(np.clip(dx_track_smoothness, 0.0, 0.98))
-        sxy = float(max(dx_scale_um, 1e-6))
-        sz = 0.6 * sxy
+
+        if mode == "nodrift_varying_dx":
+            dx_mode_l = str(dx_mode).lower()
+            dx_lo = float(min(dx_min_um, dx_max_um))
+            dx_hi = float(max(dx_min_um, dx_max_um))
+            if dx_mode_l == "varying_per_track":
+                dx_track = rng_dx.uniform(dx_lo, dx_hi, size=(n, 1))
+                dx_schedule = np.repeat(dx_track, t_count, axis=1)
+                dx_source_all[:, :] = "varying_per_track"
+            elif dx_mode_l == "fixed":
+                dx_schedule = np.full((n, t_count), float(max(dx_scale_um, 1e-6)), dtype=float)
+                dx_source_all[:, :] = "fixed"
+            else:
+                if str(dx_varying_distribution).lower() == "uniform":
+                    dx_schedule = rng_dx.uniform(dx_lo, dx_hi, size=(n, t_count))
+                else:
+                    # Fallback to uniform until more varying distributions are added.
+                    dx_schedule = rng_dx.uniform(dx_lo, dx_hi, size=(n, t_count))
+                dx_source_all[:, :] = "varying_per_track_time"
+            dx_schedule = np.clip(dx_schedule, dx_lo, dx_hi)
+        else:
+            dx_schedule = np.full((n, t_count), float(max(dx_scale_um, 1e-6)), dtype=float)
+            dx_source_all[:, :] = "fixed"
 
         # Persistent per-track drift-free motion direction and speed.
         base_dir = rng_dx.normal(size=(n, 3))
         base_norm = np.linalg.norm(base_dir, axis=1, keepdims=True)
         base_norm[base_norm <= 1e-9] = 1.0
         base_dir = base_dir / base_norm
-        speed = rng_dx.uniform(0.8, 1.8, size=(n, 1)) * (2.8 * sxy)
+        speed = rng_dx.uniform(0.8, 1.8, size=(n, 1))
         base_vel = base_dir * speed
 
         # Smooth oscillatory component for curvature / non-linear trajectories.
@@ -195,26 +224,41 @@ def generate_controlled_drift_dataset(
         phase_z = rng_dx.uniform(0.0, 2.0 * np.pi, size=(n, 1))
         freq_xy = rng_dx.uniform(0.15, 0.65, size=(n, 1))
         freq_z = rng_dx.uniform(0.10, 0.45, size=(n, 1))
-        osc_amp_xy = rng_dx.uniform(0.25, 0.55, size=(n, 1)) * (2.2 * sxy)
-        osc_amp_z = rng_dx.uniform(0.15, 0.40, size=(n, 1)) * (1.2 * sxy)
+        osc_amp_xy = rng_dx.uniform(0.25, 0.55, size=(n, 1)) * 2.2
+        osc_amp_z = rng_dx.uniform(0.15, 0.40, size=(n, 1)) * 1.2
 
-        v_prev = base_vel.copy()
+        v_prev = base_vel * (2.8 * dx_schedule[:, [0]])
         for ti in range(1, t_count):
+            step_scale = dx_schedule[:, [ti]]
+            sxy = step_scale
+            sz = 0.6 * step_scale
             if str(dx_distribution).lower() == "bounded_uniform":
-                noise = rng_dx.uniform(low=[-sxy, -sxy, -sz], high=[sxy, sxy, sz], size=(n, 3))
+                if mode == "nodrift_dx_sweep":
+                    # Preserve legacy nodrift_dx_sweep behavior for reproducibility.
+                    sxy0 = float(step_scale[0, 0])
+                    sz0 = float(0.6 * sxy0)
+                    noise = rng_dx.uniform(low=[-sxy0, -sxy0, -sz0], high=[sxy0, sxy0, sz0], size=(n, 3))
+                else:
+                    noise = np.column_stack(
+                        [
+                            rng_dx.uniform(low=-sxy[:, 0], high=sxy[:, 0], size=n),
+                            rng_dx.uniform(low=-sxy[:, 0], high=sxy[:, 0], size=n),
+                            rng_dx.uniform(low=-sz[:, 0], high=sz[:, 0], size=n),
+                        ]
+                    )
             else:
-                noise = rng_dx.normal(scale=np.array([sxy, sxy, sz]), size=(n, 3))
+                noise = rng_dx.normal(size=(n, 3)) * np.column_stack([sxy[:, 0], sxy[:, 0], sz[:, 0]])
 
             # AR(1) velocity with stationary std approx equal to noise std.
             innovation = np.sqrt(max(1e-9, 1.0 - a * a)) * noise
-            v_prev = a * v_prev + innovation + (1.0 - a) * 0.35 * base_vel
+            v_prev = a * v_prev + innovation + (1.0 - a) * 0.35 * (2.8 * step_scale * base_vel)
 
             tt = float(ti)
             osc = np.column_stack(
                 [
-                    (osc_amp_xy[:, 0] * np.sin(freq_xy[:, 0] * tt + phase_xy[:, 0])),
-                    (osc_amp_xy[:, 0] * np.cos(freq_xy[:, 0] * tt + phase_xy[:, 0])),
-                    (osc_amp_z[:, 0] * np.sin(freq_z[:, 0] * tt + phase_z[:, 0])),
+                    (osc_amp_xy[:, 0] * step_scale[:, 0] * np.sin(freq_xy[:, 0] * tt + phase_xy[:, 0])),
+                    (osc_amp_xy[:, 0] * step_scale[:, 0] * np.cos(freq_xy[:, 0] * tt + phase_xy[:, 0])),
+                    (osc_amp_z[:, 0] * step_scale[:, 0] * np.sin(freq_z[:, 0] * tt + phase_z[:, 0])),
                 ]
             )
             # Small frame-to-frame zigzag component.
@@ -412,7 +456,7 @@ def generate_controlled_drift_dataset(
                 p_rot = _rotate_about_z(p_t, ref_center, float(ang[ti]))
                 drift_local_all[:, ti, :] += 0.6 * (p_rot - p_t)
 
-    if mode == "nodrift_dx_sweep":
+    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx"}:
         drift_global_all = np.zeros_like(x_true)
         drift_local_all = np.zeros_like(x_true)
 
@@ -467,6 +511,8 @@ def generate_controlled_drift_dataset(
                     "drift_x_total": float(dtot[0]),
                     "drift_y_total": float(dtot[1]),
                     "drift_z_total": float(dtot[2]),
+                    "dx_scale_um": float(dx_schedule[i, ti]),
+                    "dx_scale_source": str(dx_source_all[i, ti]),
                     "CellType": str(cell_type[i]),
                 }
             )
@@ -516,6 +562,10 @@ def generate_synthetic_imaris_folder(
     dx_scale_um: float = 0.8,
     dx_distribution: str = "gaussian",
     dx_track_smoothness: float = 0.7,
+    dx_mode: str = "fixed",
+    dx_min_um: float = 0.2,
+    dx_max_um: float = 4.0,
+    dx_varying_distribution: str = "uniform",
 ) -> dict[str, Any]:
     """Create a synthetic IMARIS folder plus ground-truth sidecar files."""
     out_dir = Path(out_dir)
@@ -544,6 +594,10 @@ def generate_synthetic_imaris_folder(
             dx_scale_um=dx_scale_um,
             dx_distribution=dx_distribution,
             dx_track_smoothness=dx_track_smoothness,
+            dx_mode=dx_mode,
+            dx_min_um=dx_min_um,
+            dx_max_um=dx_max_um,
+            dx_varying_distribution=dx_varying_distribution,
         )
 
         base = f"synthetic_drift_{i + 1:03d}"
@@ -552,6 +606,36 @@ def generate_synthetic_imaris_folder(
 
         df_gt.to_csv(gt_dir / f"{base}_groundtruth.csv", index=False)
         df_drift.to_csv(gt_dir / f"{base}_drift_field_groundtruth.csv", index=False)
+        if "dx_scale_um" in df_drift.columns:
+            cols = ["Time", "TrackID", "dx_scale_um"]
+            if "dx_scale_source" in df_drift.columns:
+                cols.append("dx_scale_source")
+            dx_schedule = df_drift[cols].copy()
+            dx_schedule.to_csv(gt_dir / f"{base}_dx_schedule.csv", index=False)
+
+            dx_time = (
+                dx_schedule.groupby("Time", as_index=False)["dx_scale_um"]
+                .agg(
+                    dx_q10=lambda x: float(np.quantile(np.asarray(x, dtype=float), 0.10)),
+                    dx_q50=lambda x: float(np.quantile(np.asarray(x, dtype=float), 0.50)),
+                    dx_q90=lambda x: float(np.quantile(np.asarray(x, dtype=float), 0.90)),
+                    dx_mean=lambda x: float(np.mean(np.asarray(x, dtype=float))),
+                )
+                .sort_values("Time")
+                .reset_index(drop=True)
+            )
+            dx_time.to_csv(gt_dir / f"{base}_dx_schedule_summary_time.csv", index=False)
+
+            dx_track = (
+                dx_schedule.groupby("TrackID", as_index=False)["dx_scale_um"]
+                .agg(
+                    dx_median=lambda x: float(np.median(np.asarray(x, dtype=float))),
+                    dx_std=lambda x: float(np.std(np.asarray(x, dtype=float))),
+                )
+                .sort_values("TrackID")
+                .reset_index(drop=True)
+            )
+            dx_track.to_csv(gt_dir / f"{base}_dx_schedule_summary_track.csv", index=False)
 
         meta = {
             "seed": file_seed,
@@ -573,6 +657,10 @@ def generate_synthetic_imaris_folder(
             "dx_scale_um": float(dx_scale_um),
             "dx_distribution": str(dx_distribution),
             "dx_track_smoothness": float(dx_track_smoothness),
+            "dx_mode": str(dx_mode),
+            "dx_min_um": float(dx_min_um),
+            "dx_max_um": float(dx_max_um),
+            "dx_varying_distribution": str(dx_varying_distribution),
         }
         pd.DataFrame([meta]).to_csv(gt_dir / f"{base}_meta.csv", index=False)
         written_files.append(xlsx_path)

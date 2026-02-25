@@ -118,3 +118,24 @@ def test_hungarian_two_stage_nis_cv_smoke():
         },
     )
     _assert_basic_result(res)
+
+
+def test_hungarian_nis_gating_nn_based_sigma_init_logs_params():
+    frames = _make_frames()
+    res = associate_hungarian_nis_gating_cv(
+        frames,
+        gating={"keep_percentile": 99.0},
+        params={
+            "motion_refine_iters": 2,
+            "gating_mode": "nis",
+            "nis_alpha": 0.997,
+            "sigma_init_mode": "nn_based",
+            "nn_scale_factor": 0.3,
+        },
+    )
+    _assert_basic_result(res)
+    assert res.params.get("sigma_init_mode") == "nn_based"
+    assert "initial_sigma_estimate" in res.params
+    assert np.isfinite(float(res.params["initial_sigma_estimate"]))
+    assert "median_sigma_over_time" in res.params
+    assert np.isfinite(float(res.params["median_sigma_over_time"]))

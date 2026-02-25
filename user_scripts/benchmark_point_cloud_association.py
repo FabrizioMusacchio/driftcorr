@@ -119,6 +119,7 @@ RUN_NODRIFT_DX_SWEEP = True
 RUN_NODRIFT_PARAM_SWEEP = True
 RUN_HUNGARIAN_CV_VARIANTS_SWEEP = True
 RUN_HCV_NIS_GATING_COMPARISON = True
+RUN_HCV_NIS_DX_BLIND_SWEEP = True
 RUN_DRIFT_STRATEGY_COMPARISON = False
 OVERWRITE_DATASETS = True
 
@@ -242,6 +243,7 @@ HUNGARIAN_CV_VARIANTS = [
 ]
 HCV_NIS_KEEP_PERCENTILE = 99.0
 HCV_NIS_FIXED_MAX_DIST_FACTOR = 6.0
+HCV_NIS_DX_BLIND_NN_SCALE_FACTORS = [0.2, 0.3, 0.4]
 HCV_NIS_METHODS = [
     {
         "name": "hungarian_gating_cv",
@@ -1200,6 +1202,42 @@ def _plot_nis_gate_diagnostics(out_root: Path, agg: pd.DataFrame) -> list[str]:
         generated.append(p.name)
     return sorted(set(generated))
 
+
+def _plot_nis_overlay_r_eq_vs_dx(dx_based_root: Path, nn_based_root: Path, out_path: Path) -> bool:
+    """Overlay r_eq-vs-dx curves for dx-based and nn-based NIS runs."""
+    a_path = dx_based_root / "nis_gate_r_eq_summary.csv"
+    b_path = nn_based_root / "nis_gate_r_eq_summary.csv"
+    if not a_path.exists() or not b_path.exists():
+        return False
+    a = pd.read_csv(a_path)
+    b = pd.read_csv(b_path)
+    if a.empty or b.empty:
+        return False
+    for df in [a, b]:
+        df["dx_scale"] = pd.to_numeric(df.get("dx_scale", np.nan), errors="coerce")
+        df["r_eq_median_over_time"] = pd.to_numeric(df.get("r_eq_median_over_time", np.nan), errors="coerce")
+
+    aa = a.dropna(subset=["dx_scale", "r_eq_median_over_time"]).groupby("dx_scale", as_index=False)["r_eq_median_over_time"].median()
+    bb = b.dropna(subset=["dx_scale", "r_eq_median_over_time"]).groupby("dx_scale", as_index=False)["r_eq_median_over_time"].median()
+    if aa.empty or bb.empty:
+        return False
+
+    fig, ax = plt.subplots(figsize=(7.0, 4.8))
+    aa = aa.sort_values("dx_scale")
+    bb = bb.sort_values("dx_scale")
+    ax.plot(aa["dx_scale"].to_numpy(float), aa["r_eq_median_over_time"].to_numpy(float), marker="o", label="NIS dx-based init")
+    ax.plot(bb["dx_scale"].to_numpy(float), bb["r_eq_median_over_time"].to_numpy(float), marker="o", label="NIS nn-based init")
+    ax.set_title("NIS equivalent gate radius vs dx: dx-init vs nn-init")
+    ax.set_xlabel("dx_scale")
+    ax.set_ylabel("median r_eq")
+    ax.set_ylim(bottom=0.0)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
 def _gt_tracks_with_pointindex(gt_root: Path, regime: str, file_stem: str, mapping_df: pd.DataFrame) -> pd.DataFrame:
     gt_path = gt_root / regime / "_groundtruth" / f"{file_stem}_groundtruth.csv"
     gt = pd.read_csv(gt_path)
@@ -1281,6 +1319,15 @@ def _evaluate_and_save_run(
     }
     row.update({k: float(v) if np.isscalar(v) and isinstance(v, (int, float, np.floating)) else v for k, v in summary_gt.items()})
     row.update({k: float(v) for k, v in diag_summary.items()})
+    # Include selected method params explicitly for downstream analysis tables.
+    for pkey in ["sigma_init_mode", "nn_scale_factor", "initial_sigma_estimate", "median_sigma_over_time"]:
+        if pkey in assoc_result.params:
+            pv = assoc_result.params.get(pkey)
+            if isinstance(pv, str):
+                row[pkey] = pv
+            else:
+                pvn = pd.to_numeric(pd.Series([pv]), errors="coerce").iloc[0]
+                row[pkey] = float(pvn) if np.isfinite(pvn) else np.nan
     for k, v in assoc_result.quality.items():
         if isinstance(v, (int, float, np.floating)):
             row[f"assoc_{k}"] = float(v)
@@ -1828,7 +1875,8 @@ For Euclidean baselines, a single fixed `max_dist_factor` is used.
 """
 
 if RUN_HCV_NIS_GATING_COMPARISON:
-    out_root = _results_root("hungarian_cv_variants_sweep") / "nis_gating_comparison"
+    #out_root = _results_root("hungarian_cv_variants_sweep") / "nis_gating_comparison"
+    out_root = ASSOC_ROOT / "hungarian_cv_variants_sweep_nis"
     out_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, float | str]] = []
 
@@ -1956,6 +2004,138 @@ if RUN_HCV_NIS_GATING_COMPARISON:
             + "\n",
             encoding="utf-8",
         )
+
+# %% HCV_NIS_DX_BLIND_SWEEP
+"""Duplicate NIS comparison with dx-blind (nn-based) sigma initialization.
+
+This sweep keeps percentile fixed and does not sweep max-distance or sigma_init.
+For NIS methods, sigma is initialized from nearest-neighbor spacing in frame 1.
+"""
+
+if RUN_HCV_NIS_DX_BLIND_SWEEP:
+    out_root = ASSOC_ROOT / "hungarian_cv_variants_sweep_nis_dx_blind"
+    out_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, float | str]] = []
+
+    for dx in HCV_DX_SCALES:
+        tag = f"nodrift_dx_{_fmt_token(dx)}"
+        data_root = DATA_ROOT / tag
+        blind_reg_dir = data_root / "blind" / "nodrift_dx_sweep"
+        gt_reg_dir = data_root / "gt" / "nodrift_dx_sweep"
+        map_path = data_root / "unblinding.csv"
+        if not map_path.exists() or not blind_reg_dir.exists() or not gt_reg_dir.exists():
+            print(f"[WARN] Missing dataset for HCV nn-based sweep dx={dx}, skip: {data_root}")
+            continue
+
+        mapping_all = pd.read_csv(map_path)
+        blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))[: int(max(1, HCV_MAX_FILES))]
+
+        for blind_file in blind_files:
+            file_stem = blind_file.name.replace("_blind.csv", "")
+            map_sub = mapping_all[
+                (mapping_all["Regime"].astype(str) == "nodrift_dx_sweep")
+                & (mapping_all["File"].astype(str) == file_stem)
+            ].copy()
+            if map_sub.empty:
+                continue
+
+            blind_frames = load_blind_frames(blind_file)
+            gt_tracks = _gt_tracks_with_pointindex(data_root / "gt", "nodrift_dx_sweep", file_stem, mapping_all)
+
+            for m in HCV_NIS_METHODS:
+                method_name = str(m.get("name", ""))
+                nn_scales = HCV_NIS_DX_BLIND_NN_SCALE_FACTORS if "_nis_" in method_name else [0.3]
+                for nn_scale in nn_scales:
+                    for iters in HCV_REFINE_ITERS:
+                        gating_override = {
+                            "max_dist": float(max(0.5, float(HCV_NIS_FIXED_MAX_DIST_FACTOR) * float(dx))),
+                            "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                        }
+                        params_override = {
+                            "motion_refine_iters": int(iters),
+                            "max_dist_factor": float(HCV_NIS_FIXED_MAX_DIST_FACTOR),
+                            "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                            "dx_scale": float(dx),
+                            "sigma_init_mode": "nn_based" if "_nis_" in method_name else "dx",
+                            "nn_scale_factor": float(nn_scale),
+                        }
+                        assoc = _dispatch_association_method(
+                            blind_frames,
+                            m,
+                            dx_scale=float(dx),
+                            gating_override=gating_override,
+                            params_override=params_override,
+                        )
+                        cfg_id = f"md{_fmt_token(float(HCV_NIS_FIXED_MAX_DIST_FACTOR))}_kp{int(HCV_NIS_KEEP_PERCENTILE)}_it{int(iters)}_nn{_fmt_token(float(nn_scale))}"
+                        run_dir = out_root / f"dx_{_fmt_token(dx)}" / file_stem / method_name / cfg_id
+                        row = _evaluate_and_save_run(
+                            out_dir=run_dir,
+                            assoc_result=assoc,
+                            gt_tracks_df=gt_tracks,
+                            mapping_df=map_sub,
+                            blind_frames=blind_frames,
+                            regime="nodrift_dx_sweep",
+                            file_stem=file_stem,
+                            method_name=method_name,
+                            extras={
+                                "dx_scale": float(dx),
+                                "config_id": cfg_id,
+                                "max_dist_factor": float(HCV_NIS_FIXED_MAX_DIST_FACTOR),
+                                "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                                "motion_refine_iters": int(iters),
+                                "nn_scale_factor": float(nn_scale),
+                                "sigma_init_mode": "nn_based" if "_nis_" in method_name else "dx",
+                            },
+                        )
+                        rows.append(row)
+
+    if rows:
+        agg = pd.DataFrame(rows)
+        agg_path = out_root / "aggregated_hcv_nis_dx_blind.csv"
+        agg.to_csv(agg_path, index=False)
+
+        metric_cols = [
+            c
+            for c in [
+                "link_f1_mean",
+                "fragmentation_rate",
+                "id_switches_mean_per_track",
+                "rms_mean",
+                "unmatched_rate_mean",
+            ]
+            if c in agg.columns
+        ]
+        if metric_cols:
+            long = agg.melt(
+                id_vars=["method", "dx_scale", "max_dist_factor", "keep_percentile", "motion_refine_iters", "config_id", "nn_scale_factor", "sigma_init_mode"],
+                value_vars=metric_cols,
+                var_name="metric",
+                value_name="value",
+            )
+            stats = (
+                long.groupby(
+                    ["method", "dx_scale", "max_dist_factor", "keep_percentile", "motion_refine_iters", "nn_scale_factor", "sigma_init_mode", "metric"],
+                    as_index=False,
+                )["value"]
+                .agg(mean="mean", std="std", n="count")
+                .sort_values(["metric", "method", "dx_scale", "nn_scale_factor", "motion_refine_iters"])
+                .reset_index(drop=True)
+            )
+            stats_path = out_root / "aggregated_hcv_nis_dx_blind_stats.csv"
+            stats.to_csv(stats_path, index=False)
+        else:
+            stats_path = out_root / "aggregated_hcv_nis_dx_blind_stats.csv"
+            pd.DataFrame().to_csv(stats_path, index=False)
+
+        generated = _plot_hcv_variants_overview(out_root, agg)
+        generated.extend(_plot_nis_gate_diagnostics(out_root, agg))
+
+        dx_based_root = _results_root("hungarian_cv_variants_sweep") / "nis_gating_comparison"
+        overlay_path = out_root / "nis_gate_r_eq_vs_dx_overlay_dx_vs_nn.png"
+        if _plot_nis_overlay_r_eq_vs_dx(dx_based_root, out_root, overlay_path):
+            generated.append(overlay_path.name)
+        generated = sorted(set(generated))
+
 
 # %% DRIFT-PRESENT STRATEGY COMPARISON (OPTIONAL)
 """Compare strategy 1 vs strategy 2 under drift regimes.

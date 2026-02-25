@@ -42,6 +42,18 @@ from .scoring import global_association_metrics, score_links_df
 from .types import AssociationResult, PointCloudFrame
 
 
+def _median_nn_distance(xyz: np.ndarray) -> float:
+    """Compute median nearest-neighbor distance for one frame."""
+    x = np.asarray(xyz, dtype=float)
+    if x.ndim != 2 or x.shape[1] != 3 or x.shape[0] < 2:
+        return float("nan")
+    diff = x[:, None, :] - x[None, :, :]
+    d2 = np.sum(diff * diff, axis=2)
+    np.fill_diagonal(d2, np.inf)
+    nn = np.sqrt(np.min(d2, axis=1))
+    return float(np.nanmedian(nn)) if nn.size else float("nan")
+
+
 def _estimate_velocity_by_observation(tracks_df: pd.DataFrame) -> dict[tuple[float, int], np.ndarray]:
     """Estimate per-observation velocity from inferred track trajectories."""
     if tracks_df.empty:
@@ -158,7 +170,23 @@ def _run_variant_pairwise(
     fr = sorted(frames, key=lambda f: float(f.time))
     out: list[dict[str, Any]] = []
 
-    sigma_init = float(params.get("sigma_init", dx_scale if np.isfinite(dx_scale) and dx_scale > 0 else 1.0))
+    sigma_init_mode = str(params.get("sigma_init_mode", "dx")).lower()
+    nn_scale_factor = float(params.get("nn_scale_factor", 0.3))
+    d_nn_median_initial = float("nan")
+    if sigma_init_mode == "fixed":
+        sigma_init = float(params.get("fixed_sigma_value", params.get("sigma_init", 1.0)))
+    elif sigma_init_mode == "nn_based":
+        d_nn_median_initial = _median_nn_distance(np.asarray(fr[0].xyz, dtype=float))
+        if np.isfinite(d_nn_median_initial):
+            sigma_init = float(nn_scale_factor * d_nn_median_initial)
+        else:
+            sigma_init = float(params.get("fixed_sigma_value", params.get("sigma_init", 1.0)))
+    else:
+        # "dx" (current behavior): initialize from dx-scale.
+        sigma_init = float(params.get("sigma_init", dx_scale if np.isfinite(dx_scale) and dx_scale > 0 else 1.0))
+        sigma_init_mode = "dx"
+    sigma_init = max(float(sigma_init), 1e-6)
+
     sigma_mad_clip = float(params.get("sigma_mad_clip", 3.0))
     sigma_vec = np.array([sigma_init, sigma_init, sigma_init], dtype=float)
 
@@ -410,6 +438,11 @@ def _run_variant_pairwise(
     diag: dict[str, Any] = {
         "sigma_median": float(np.nanmedian(np.asarray(sigma_hist, dtype=float))) if sigma_hist else float("nan"),
         "sigma_mean": float(np.nanmean(np.asarray(sigma_hist, dtype=float))) if sigma_hist else float("nan"),
+        "sigma_init_mode": str(sigma_init_mode),
+        "nn_scale_factor": float(nn_scale_factor),
+        "initial_sigma_estimate": float(sigma_init),
+        "d_nn_median_initial": float(d_nn_median_initial),
+        "median_sigma_over_time": float(np.nanmedian(np.asarray(sigma_hist, dtype=float))) if sigma_hist else float("nan"),
     }
     if r_eq_hist:
         diag["r_eq_median"] = float(np.nanmedian(np.asarray(r_eq_hist, dtype=float)))
@@ -463,8 +496,11 @@ def _associate_variant(
     for k, v in final_diag.items():
         if k == "nis_gate_diagnostics_rows":
             final_result.params[k] = v
+        elif isinstance(v, str):
+            final_result.params[k] = str(v)
         elif isinstance(v, (int, float, np.floating)) and np.isfinite(v):
             final_result.quality[f"variant_{k}"] = float(v)
+            final_result.params[k] = float(v)
             final_result.params[f"variant_{k}"] = float(v)
     return final_result
 

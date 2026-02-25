@@ -35,7 +35,10 @@ from .diagnostics import compute_displacement_from_gt, compute_nn_distance, comp
 from .hungarian_cv_variants import (
     associate_hungarian_adaptive_maxdist_cv,
     associate_hungarian_innovation_percentile_cv,
+    associate_hungarian_nis_gating_cv,
+    associate_hungarian_switch_penalty_nis_cv,
     associate_hungarian_switch_penalty_cv,
+    associate_hungarian_two_stage_nis_cv,
     associate_hungarian_two_stage_cv,
 )
 from .synthetic import load_blind_frames, load_groundtruth_mapping, synthetic_generate_blind_pair
@@ -53,8 +56,11 @@ __all__ = [
     "associate_kalman_cv",
     "associate_hungarian_adaptive_maxdist_cv",
     "associate_hungarian_innovation_percentile_cv",
+    "associate_hungarian_nis_gating_cv",
     "associate_hungarian_switch_penalty_cv",
+    "associate_hungarian_switch_penalty_nis_cv",
     "associate_hungarian_two_stage_cv",
+    "associate_hungarian_two_stage_nis_cv",
     "DriftModelAdapterRigidStep",
     "DriftModelAdapterRbfToReference",
     "DriftModelAdapterSpacetimeRbf",

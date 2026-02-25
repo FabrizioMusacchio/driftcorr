@@ -3,7 +3,10 @@ import numpy as np
 from driftcorr.association.hungarian_cv_variants import (
     associate_hungarian_adaptive_maxdist_cv,
     associate_hungarian_innovation_percentile_cv,
+    associate_hungarian_nis_gating_cv,
+    associate_hungarian_switch_penalty_nis_cv,
     associate_hungarian_switch_penalty_cv,
+    associate_hungarian_two_stage_nis_cv,
     associate_hungarian_two_stage_cv,
 )
 from driftcorr.association.types import PointCloudFrame
@@ -71,6 +74,44 @@ def test_hungarian_two_stage_cv_smoke():
             "motion_refine_iters": 2,
             "dx_scale": 1.0,
             "max_dist_factor": 3.0,
+            "stage1_factor": 0.5,
+            "stage1_keep_percentile": 90.0,
+            "stage2_keep_percentile": 99.0,
+        },
+    )
+    _assert_basic_result(res)
+
+
+def test_hungarian_nis_gating_cv_smoke():
+    frames = _make_frames()
+    res = associate_hungarian_nis_gating_cv(
+        frames,
+        gating={"keep_percentile": 99.0},
+        params={"motion_refine_iters": 2, "dx_scale": 1.0, "gating_mode": "nis", "nis_alpha": 0.997},
+    )
+    _assert_basic_result(res)
+
+
+def test_hungarian_switch_penalty_nis_cv_smoke():
+    frames = _make_frames()
+    res = associate_hungarian_switch_penalty_nis_cv(
+        frames,
+        gating={"keep_percentile": 99.0},
+        params={"motion_refine_iters": 2, "dx_scale": 1.0, "gating_mode": "nis", "nis_alpha": 0.997, "lambda_switch": 0.2},
+    )
+    _assert_basic_result(res)
+
+
+def test_hungarian_two_stage_nis_cv_smoke():
+    frames = _make_frames()
+    res = associate_hungarian_two_stage_nis_cv(
+        frames,
+        gating={"keep_percentile": 99.0},
+        params={
+            "motion_refine_iters": 2,
+            "dx_scale": 1.0,
+            "gating_mode": "nis",
+            "nis_alpha": 0.997,
             "stage1_factor": 0.5,
             "stage1_keep_percentile": 90.0,
             "stage2_keep_percentile": 99.0,

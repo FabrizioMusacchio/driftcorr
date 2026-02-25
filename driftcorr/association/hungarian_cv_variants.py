@@ -1,13 +1,20 @@
 """Hungarian constant-velocity variants for point-cloud association.
 
-This module implements four focused Hungarian+CV variants:
-- adaptive max-distance gating from innovation scale,
-- innovation-normalized percentile gating,
-- switch-penalty augmented cost,
-- two-stage Hungarian (strict then residual pass).
+This module implements focused Hungarian+CV variants and supports two gating
+spaces:
+- Euclidean gating in coordinate space,
+- NIS gating in innovation space (Mahalanobis distance).
 
-All functions return `AssociationResult` compatible with the existing module-1
-pipeline and evaluation code.
+Implemented public variants:
+- `associate_hungarian_adaptive_maxdist_cv`
+- `associate_hungarian_innovation_percentile_cv`
+- `associate_hungarian_switch_penalty_cv`
+- `associate_hungarian_two_stage_cv`
+- `associate_hungarian_nis_gating_cv`
+- `associate_hungarian_switch_penalty_nis_cv`
+- `associate_hungarian_two_stage_nis_cv`
+
+All functions return `AssociationResult` compatible with module-1 benchmarking.
 
 Author
 -------
@@ -21,8 +28,15 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from scipy.stats import chi2
 
-from .assignment import apply_gating, build_cost_matrix, hungarian_assignment
+from .assignment import (
+    apply_gating,
+    build_cost_matrix,
+    compute_nis_cost_matrix,
+    gate_by_nis,
+    hungarian_assignment,
+)
 from .linking import link_assignments_to_tracks
 from .scoring import global_association_metrics, score_links_df
 from .types import AssociationResult, PointCloudFrame
@@ -53,8 +67,7 @@ def _estimate_velocity_by_observation(tracks_df: pd.DataFrame) -> dict[tuple[flo
             dt = float(tt[k] - tt[k - 1])
             if not np.isfinite(dt) or dt <= 0.0:
                 continue
-            v = (xyz[k] - xyz[k - 1]) / dt
-            vel[(float(tt[k]), int(pi[k]))] = np.asarray(v, dtype=float)
+            vel[(float(tt[k]), int(pi[k]))] = (xyz[k] - xyz[k - 1]) / dt
     return vel
 
 
@@ -97,8 +110,31 @@ def _robust_sigma_from_residuals(
     hi = max(float(sigma_init) * clip, lo)
     sigma = np.clip(sigma, lo, hi)
     sigma = np.where(np.isfinite(sigma), sigma, sigma_prev)
-    sigma = np.maximum(np.asarray(sigma, dtype=float), 1e-6)
-    return sigma
+    return np.maximum(np.asarray(sigma, dtype=float), 1e-6)
+
+
+def _parse_noise_diag(val: Any, default: float = 0.05) -> np.ndarray:
+    """Parse noise parameter to a positive 3-vector of variances."""
+    if val is None:
+        return np.array([default, default, default], dtype=float)
+    arr = np.asarray(val, dtype=float)
+    if arr.ndim == 0:
+        v = max(float(arr), 1e-9)
+        return np.array([v, v, v], dtype=float)
+    if arr.shape == (3,):
+        return np.maximum(arr.astype(float), 1e-9)
+    if arr.shape == (3, 3):
+        d = np.diag(arr).astype(float)
+        return np.maximum(d, 1e-9)
+    raise ValueError(f"Noise parameter must be scalar, (3,), or (3,3), got shape {arr.shape}")
+
+
+def _chi2_threshold(params: dict[str, Any]) -> float:
+    if params.get("nis_chi2_thresh") is not None:
+        return float(params.get("nis_chi2_thresh"))
+    alpha = float(params.get("nis_alpha", 0.997))
+    alpha = float(np.clip(alpha, 1e-6, 1 - 1e-9))
+    return float(chi2.ppf(alpha, df=3))
 
 
 def _combine_masks(mask_a: np.ndarray, mask_b: np.ndarray | None = None) -> np.ndarray:
@@ -118,14 +154,13 @@ def _run_variant_pairwise(
     params: dict[str, Any],
     velocity_map: dict[tuple[float, int], np.ndarray] | None,
     dx_scale: float,
-) -> tuple[list[dict[str, Any]], dict[str, float]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     fr = sorted(frames, key=lambda f: float(f.time))
     out: list[dict[str, Any]] = []
 
     sigma_init = float(params.get("sigma_init", dx_scale if np.isfinite(dx_scale) and dx_scale > 0 else 1.0))
     sigma_mad_clip = float(params.get("sigma_mad_clip", 3.0))
     sigma_vec = np.array([sigma_init, sigma_init, sigma_init], dtype=float)
-    sigma_hist: list[float] = []
 
     max_dist_factor = float(params.get("max_dist_factor", 1.0))
     keep_percentile = gating.get("keep_percentile")
@@ -133,6 +168,18 @@ def _run_variant_pairwise(
     miss_cost = params.get("miss_cost")
     birth_cost = params.get("birth_cost")
     death_cost = params.get("death_cost")
+
+    gating_mode = str(params.get("gating_mode", "euclidean")).lower()
+    if variant in {"nis_gating", "switch_penalty_nis", "two_stage_nis"}:
+        gating_mode = "nis"
+
+    r_diag = _parse_noise_diag(params.get("measurement_noise_R"), default=0.05)
+    q_diag = _parse_noise_diag(params.get("process_noise_Q"), default=0.02)
+    chi2_thresh = _chi2_threshold(params)
+    nis_diag_rows: list[dict[str, float]] = []
+
+    sigma_hist: list[float] = []
+    r_eq_hist: list[float] = []
 
     for ti in range(len(fr) - 1):
         f0 = fr[ti]
@@ -154,8 +201,7 @@ def _run_variant_pairwise(
                         v_src[i] = vv
                         x_pred[i] = x0[i] + dt * vv
 
-        # Residual tensor: src x dst x 3
-        res = x1[None, :, :] - x_pred[:, None, :]
+        res = x1[None, :, :] - x_pred[:, None, :]  # (N,M,3)
         dist = np.sqrt(np.maximum(np.sum(res * res, axis=2), 0.0))
         sigma_safe = np.maximum(sigma_vec, 1e-6)
         d_norm = np.sqrt(
@@ -167,99 +213,36 @@ def _run_variant_pairwise(
             )
         )
 
-        if variant == "adaptive_maxdist":
-            # Max distance in micron units, adapted from innovation scale.
-            adaptive_max_dist = max(0.5, float(max_dist_factor) * float(np.nanmean(sigma_safe)))
-            cm = build_cost_matrix(
-                x_pred,
-                x1,
-                metric=str(params.get("metric", "sqeuclidean")),
-                cov=gating.get("cov"),
-                huber_delta=float(gating.get("huber_delta", 1.0)),
-                mahalanobis_scales=gating.get("mahalanobis_scales"),
-            )
-            mask_dist = np.isfinite(dist) & (dist <= adaptive_max_dist)
+        # Track-wise innovation covariance (diagonal approximation).
+        v_norm = np.sqrt(np.maximum(np.sum(v_src * v_src, axis=1), 0.0))
+        speed_scale = (1.0 + 0.1 * v_norm)[:, None]
+        s_diag = speed_scale * ((sigma_safe[None, :] ** 2) + r_diag[None, :] + (q_diag[None, :] * (dt * dt)))
+        s_diag = np.maximum(s_diag, 1e-9)
+        s_inv = np.zeros((x_pred.shape[0], 3, 3), dtype=float)
+        for i in range(x_pred.shape[0]):
+            s_inv[i] = np.diag(1.0 / s_diag[i])
+        nis_cost = compute_nis_cost_matrix(x_pred, x1, s_inv=s_inv)
+
+        sigma_xyz_median = np.sqrt(np.nanmedian(s_diag, axis=0)) if s_diag.size else np.array([np.nan, np.nan, np.nan], dtype=float)
+        median_sigma_scalar = float(np.nanmedian(np.sqrt(np.nanmean(s_diag, axis=1)))) if s_diag.size else float("nan")
+        r_eq = float(np.sqrt(max(chi2_thresh, 0.0)) * median_sigma_scalar) if np.isfinite(median_sigma_scalar) else float("nan")
+
+        if gating_mode == "nis":
+            mask_nis = gate_by_nis(nis_cost, chi2_thresh=chi2_thresh)
             mask_pct = apply_gating(
-                dist,
+                nis_cost,
                 max_dist=None,
                 max_cost=None,
                 keep_percentile=keep_percentile,
                 assume_squared_cost=False,
             )
-            gate = _combine_masks(mask_dist, mask_pct)
-            a = hungarian_assignment(
-                cm,
-                gating_mask=gate,
-                use_dummy=use_dummy,
-                miss_cost=miss_cost,
-                birth_cost=birth_cost,
-                death_cost=death_cost,
-            )
-            matched_res = res[a["row_ind"], a["col_ind"], :] if a["row_ind"].size else np.empty((0, 3), dtype=float)
-            sigma_vec = _robust_sigma_from_residuals(matched_res, sigma_vec, sigma_init, sigma_mad_clip)
-            sigma_hist.append(float(np.nanmean(sigma_vec)))
+            gate_nis = _combine_masks(mask_nis, mask_pct)
+            base_cost_nis = nis_cost.copy()
+        else:
+            gate_nis = np.ones_like(dist, dtype=bool)
+            base_cost_nis = nis_cost
 
-        elif variant == "innovation_percentile":
-            # max_dist interpreted in normalized innovation units.
-            cm = d_norm * d_norm
-            norm_max = float(max_dist_factor)
-            gate = apply_gating(
-                d_norm,
-                max_dist=norm_max,
-                max_cost=None,
-                keep_percentile=keep_percentile,
-                assume_squared_cost=False,
-            )
-            a = hungarian_assignment(
-                cm,
-                gating_mask=gate,
-                use_dummy=use_dummy,
-                miss_cost=miss_cost,
-                birth_cost=birth_cost,
-                death_cost=death_cost,
-            )
-            matched_res = res[a["row_ind"], a["col_ind"], :] if a["row_ind"].size else np.empty((0, 3), dtype=float)
-            sigma_vec = _robust_sigma_from_residuals(matched_res, sigma_vec, sigma_init, sigma_mad_clip)
-            sigma_hist.append(float(np.nanmean(sigma_vec)))
-
-        elif variant == "switch_penalty":
-            use_norm = bool(params.get("use_normalized", True))
-            lam = float(params.get("lambda_switch", 0.2))
-            if use_norm:
-                cm = d_norm * d_norm
-            else:
-                cm = dist * dist
-            eps = 1e-9
-            v_norm = np.sqrt(np.sum(v_src * v_src, axis=1))
-            for i in range(cm.shape[0]):
-                if v_norm[i] <= eps:
-                    continue
-                vi = v_src[i]
-                r = res[i]  # (M,3)
-                r_norm = np.sqrt(np.maximum(np.sum(r * r, axis=1), 0.0))
-                denom = np.maximum(v_norm[i] * r_norm, eps)
-                cosang = np.sum(r * vi[None, :], axis=1) / denom
-                penalty = lam * np.maximum(0.0, -cosang)
-                cm[i, :] = cm[i, :] + penalty
-            base_max = float(gating.get("max_dist", max(0.5, max_dist_factor * dx_scale)))
-            gate = apply_gating(
-                dist,
-                max_dist=base_max,
-                max_cost=None,
-                keep_percentile=keep_percentile,
-                assume_squared_cost=False,
-            )
-            a = hungarian_assignment(
-                cm,
-                gating_mask=gate,
-                use_dummy=use_dummy,
-                miss_cost=miss_cost,
-                birth_cost=birth_cost,
-                death_cost=death_cost,
-            )
-
-        elif variant == "two_stage":
-            base_max = float(gating.get("max_dist", max(0.5, max_dist_factor * dx_scale)))
+        if variant == "adaptive_maxdist":
             cm = build_cost_matrix(
                 x_pred,
                 x1,
@@ -268,56 +251,102 @@ def _run_variant_pairwise(
                 huber_delta=float(gating.get("huber_delta", 1.0)),
                 mahalanobis_scales=gating.get("mahalanobis_scales"),
             )
+            if gating_mode == "nis":
+                gate = gate_nis
+                cm = base_cost_nis
+            else:
+                adaptive_max_dist = max(0.5, float(max_dist_factor) * float(np.nanmean(sigma_safe)))
+                mask_dist = np.isfinite(dist) & (dist <= adaptive_max_dist)
+                mask_pct = apply_gating(dist, max_dist=None, max_cost=None, keep_percentile=keep_percentile, assume_squared_cost=False)
+                gate = _combine_masks(mask_dist, mask_pct)
+            a = hungarian_assignment(cm, gating_mask=gate, use_dummy=use_dummy, miss_cost=miss_cost, birth_cost=birth_cost, death_cost=death_cost)
+
+        elif variant in {"innovation_percentile", "nis_gating"}:
+            if gating_mode == "nis" or variant == "nis_gating":
+                cm = base_cost_nis
+                gate = gate_nis
+            else:
+                cm = d_norm * d_norm
+                norm_max = float(max_dist_factor)
+                gate = apply_gating(d_norm, max_dist=norm_max, max_cost=None, keep_percentile=keep_percentile, assume_squared_cost=False)
+            a = hungarian_assignment(cm, gating_mask=gate, use_dummy=use_dummy, miss_cost=miss_cost, birth_cost=birth_cost, death_cost=death_cost)
+
+        elif variant in {"switch_penalty", "switch_penalty_nis"}:
+            use_norm = bool(params.get("use_normalized", True))
+            lam = float(params.get("lambda_switch", 0.2))
+            if gating_mode == "nis" or variant == "switch_penalty_nis":
+                cm = base_cost_nis
+                gate = gate_nis
+            else:
+                cm = (d_norm * d_norm) if use_norm else (dist * dist)
+                base_max = float(gating.get("max_dist", max(0.5, max_dist_factor * dx_scale)))
+                gate = apply_gating(dist, max_dist=base_max, max_cost=None, keep_percentile=keep_percentile, assume_squared_cost=False)
+
+            eps = 1e-9
+            for i in range(cm.shape[0]):
+                if v_norm[i] <= eps:
+                    continue
+                vi = v_src[i]
+                r = res[i]
+                r_norm = np.sqrt(np.maximum(np.sum(r * r, axis=1), 0.0))
+                denom = np.maximum(v_norm[i] * r_norm, eps)
+                cosang = np.sum(r * vi[None, :], axis=1) / denom
+                penalty = lam * np.maximum(0.0, -cosang)
+                cm[i, :] = cm[i, :] + penalty
+
+            a = hungarian_assignment(cm, gating_mask=gate, use_dummy=use_dummy, miss_cost=miss_cost, birth_cost=birth_cost, death_cost=death_cost)
+
+        elif variant in {"two_stage", "two_stage_nis"}:
             stage1_factor = float(params.get("stage1_factor", 0.5))
             stage1_keep = float(params.get("stage1_keep_percentile", 90.0))
             stage2_keep = float(params.get("stage2_keep_percentile", 99.0))
             stage2_allow_unmatched = bool(params.get("stage2_allow_unmatched", True))
 
-            gate1 = apply_gating(
-                dist,
-                max_dist=max(0.25, stage1_factor * base_max),
-                max_cost=None,
-                keep_percentile=stage1_keep,
-                assume_squared_cost=False,
-            )
-            a1 = hungarian_assignment(
-                cm,
-                gating_mask=gate1,
-                use_dummy=True,
-                miss_cost=miss_cost,
-                birth_cost=birth_cost,
-                death_cost=death_cost,
-            )
-            matched_r1 = np.asarray(a1["row_ind"], dtype=int)
-            matched_c1 = np.asarray(a1["col_ind"], dtype=int)
+            if gating_mode == "nis" or variant == "two_stage_nis":
+                cm = base_cost_nis
+                gate1_base = gate_by_nis(nis_cost, chi2_thresh=max(1e-6, stage1_factor * chi2_thresh))
+                gate1_pct = apply_gating(nis_cost, max_dist=None, max_cost=None, keep_percentile=stage1_keep, assume_squared_cost=False)
+                gate1 = _combine_masks(gate1_base, gate1_pct)
+            else:
+                cm = build_cost_matrix(
+                    x_pred,
+                    x1,
+                    metric=str(params.get("metric", "sqeuclidean")),
+                    cov=gating.get("cov"),
+                    huber_delta=float(gating.get("huber_delta", 1.0)),
+                    mahalanobis_scales=gating.get("mahalanobis_scales"),
+                )
+                base_max = float(gating.get("max_dist", max(0.5, max_dist_factor * dx_scale)))
+                gate1 = apply_gating(dist, max_dist=max(0.25, stage1_factor * base_max), max_cost=None, keep_percentile=stage1_keep, assume_squared_cost=False)
+
+            a1 = hungarian_assignment(cm, gating_mask=gate1, use_dummy=True, miss_cost=miss_cost, birth_cost=birth_cost, death_cost=death_cost)
+            rr1 = np.asarray(a1["row_ind"], dtype=int)
+            cc1 = np.asarray(a1["col_ind"], dtype=int)
 
             rows_all = np.arange(cm.shape[0], dtype=int)
             cols_all = np.arange(cm.shape[1], dtype=int)
-            rem_r = np.setdiff1d(rows_all, matched_r1, assume_unique=False)
-            rem_c = np.setdiff1d(cols_all, matched_c1, assume_unique=False)
+            rem_r = np.setdiff1d(rows_all, rr1, assume_unique=False)
+            rem_c = np.setdiff1d(cols_all, cc1, assume_unique=False)
 
-            matched_r = matched_r1.tolist()
-            matched_c = matched_c1.tolist()
-            matched_costs = cm[matched_r1, matched_c1].tolist() if matched_r1.size else []
+            matched_r = rr1.tolist()
+            matched_c = cc1.tolist()
+            matched_costs = cm[rr1, cc1].tolist() if rr1.size else []
 
             if rem_r.size and rem_c.size:
                 cm2 = cm[np.ix_(rem_r, rem_c)]
-                dist2 = dist[np.ix_(rem_r, rem_c)]
-                gate2 = apply_gating(
-                    dist2,
-                    max_dist=base_max,
-                    max_cost=None,
-                    keep_percentile=stage2_keep,
-                    assume_squared_cost=False,
-                )
-                a2 = hungarian_assignment(
-                    cm2,
-                    gating_mask=gate2,
-                    use_dummy=stage2_allow_unmatched,
-                    miss_cost=miss_cost,
-                    birth_cost=birth_cost,
-                    death_cost=death_cost,
-                )
+                if gating_mode == "nis" or variant == "two_stage_nis":
+                    nis2 = nis_cost[np.ix_(rem_r, rem_c)]
+                    gate2 = gate_by_nis(nis2, chi2_thresh=chi2_thresh)
+                    gate2 = _combine_masks(
+                        gate2,
+                        apply_gating(nis2, max_dist=None, max_cost=None, keep_percentile=stage2_keep, assume_squared_cost=False),
+                    )
+                else:
+                    dist2 = dist[np.ix_(rem_r, rem_c)]
+                    base_max = float(gating.get("max_dist", max(0.5, max_dist_factor * dx_scale)))
+                    gate2 = apply_gating(dist2, max_dist=base_max, max_cost=None, keep_percentile=stage2_keep, assume_squared_cost=False)
+
+                a2 = hungarian_assignment(cm2, gating_mask=gate2, use_dummy=stage2_allow_unmatched, miss_cost=miss_cost, birth_cost=birth_cost, death_cost=death_cost)
                 if a2["row_ind"].size:
                     rr2 = rem_r[np.asarray(a2["row_ind"], dtype=int)]
                     cc2 = rem_c[np.asarray(a2["col_ind"], dtype=int)]
@@ -355,14 +384,37 @@ def _run_variant_pairwise(
         else:
             raise ValueError(f"Unknown Hungarian CV variant '{variant}'")
 
+        # Update innovation scale from accepted matches.
+        matched_res = res[np.asarray(a["row_ind"], dtype=int), np.asarray(a["col_ind"], dtype=int), :] if np.asarray(a["row_ind"]).size else np.empty((0, 3), dtype=float)
+        sigma_vec = _robust_sigma_from_residuals(matched_res, sigma_vec, sigma_init, sigma_mad_clip)
+        sigma_hist.append(float(np.nanmean(sigma_vec)))
+        if np.isfinite(r_eq):
+            r_eq_hist.append(float(r_eq))
+
+        if gating_mode == "nis":
+            nis_diag_rows.append(
+                {
+                    "Time": float(f1.time),
+                    "chi2_thresh": float(chi2_thresh),
+                    "sigma_x_median": float(sigma_xyz_median[0]),
+                    "sigma_y_median": float(sigma_xyz_median[1]),
+                    "sigma_z_median": float(sigma_xyz_median[2]),
+                    "r_eq_median": float(r_eq),
+                }
+            )
+
         a["t"] = float(f0.time)
         a["t_next"] = float(f1.time)
         out.append(a)
 
-    diag = {
+    diag: dict[str, Any] = {
         "sigma_median": float(np.nanmedian(np.asarray(sigma_hist, dtype=float))) if sigma_hist else float("nan"),
         "sigma_mean": float(np.nanmean(np.asarray(sigma_hist, dtype=float))) if sigma_hist else float("nan"),
     }
+    if r_eq_hist:
+        diag["r_eq_median"] = float(np.nanmedian(np.asarray(r_eq_hist, dtype=float)))
+    if nis_diag_rows:
+        diag["nis_gate_diagnostics_rows"] = nis_diag_rows
     return out, diag
 
 
@@ -385,12 +437,14 @@ def _associate_variant(
 
     g = dict(gating or {})
     p = dict(params or {})
+    if variant in {"nis_gating", "switch_penalty_nis", "two_stage_nis"} and "gating_mode" not in p:
+        p["gating_mode"] = "nis"
     n_refine = int(p.get("motion_refine_iters", 2))
     dx_scale = float(p.get("dx_scale", g.get("dx_scale", 1.0)))
 
     vel_map: dict[tuple[float, int], np.ndarray] | None = None
     final_result: AssociationResult | None = None
-    final_diag: dict[str, float] = {}
+    final_diag: dict[str, Any] = {}
     for _ in range(max(1, n_refine)):
         assigns, diag = _run_variant_pairwise(
             fr,
@@ -407,8 +461,11 @@ def _associate_variant(
 
     assert final_result is not None
     for k, v in final_diag.items():
-        if np.isfinite(v):
+        if k == "nis_gate_diagnostics_rows":
+            final_result.params[k] = v
+        elif isinstance(v, (int, float, np.floating)) and np.isfinite(v):
             final_result.quality[f"variant_{k}"] = float(v)
+            final_result.params[f"variant_{k}"] = float(v)
     return final_result
 
 
@@ -417,12 +474,7 @@ def associate_hungarian_adaptive_maxdist_cv(
     gating: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
 ) -> AssociationResult:
-    """Hungarian CV with adaptive max-distance from innovation scale.
-
-    Gating threshold is set to:
-    ``max_dist = max_dist_factor * sigma_pred``,
-    where ``sigma_pred`` is estimated robustly from recent matched innovations.
-    """
+    """Hungarian CV with adaptive max-distance from innovation scale."""
     return _associate_variant(frames, variant="adaptive_maxdist", gating=gating, params=params)
 
 
@@ -431,10 +483,7 @@ def associate_hungarian_innovation_percentile_cv(
     gating: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
 ) -> AssociationResult:
-    """Hungarian CV with percentile gating on normalized innovation.
-
-    `gating.max_dist` is interpreted in normalized innovation units.
-    """
+    """Hungarian CV with percentile gating on normalized innovation."""
     return _associate_variant(frames, variant="innovation_percentile", gating=gating, params=params)
 
 
@@ -443,11 +492,7 @@ def associate_hungarian_switch_penalty_cv(
     gating: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
 ) -> AssociationResult:
-    """Hungarian CV with directional switch penalty in the link cost.
-
-    Adds a penalty when candidate residual direction opposes the current track
-    velocity direction.
-    """
+    """Hungarian CV with directional switch penalty in Euclidean-gated mode."""
     return _associate_variant(frames, variant="switch_penalty", gating=gating, params=params)
 
 
@@ -456,9 +501,38 @@ def associate_hungarian_two_stage_cv(
     gating: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
 ) -> AssociationResult:
-    """Hungarian CV in two stages: strict pass then residual pass.
-
-    Stage 1 accepts high-confidence links using tighter gates.
-    Stage 2 links remaining unmatched detections with looser gates.
-    """
+    """Hungarian CV in two stages (strict pass then residual pass)."""
     return _associate_variant(frames, variant="two_stage", gating=gating, params=params)
+
+
+def associate_hungarian_nis_gating_cv(
+    frames: list[PointCloudFrame],
+    gating: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+) -> AssociationResult:
+    """Hungarian CV with NIS gating and NIS cost in innovation space."""
+    p = dict(params or {})
+    p.setdefault("gating_mode", "nis")
+    return _associate_variant(frames, variant="nis_gating", gating=gating, params=p)
+
+
+def associate_hungarian_switch_penalty_nis_cv(
+    frames: list[PointCloudFrame],
+    gating: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+) -> AssociationResult:
+    """Hungarian CV with NIS gating plus directional switch penalty."""
+    p = dict(params or {})
+    p.setdefault("gating_mode", "nis")
+    return _associate_variant(frames, variant="switch_penalty_nis", gating=gating, params=p)
+
+
+def associate_hungarian_two_stage_nis_cv(
+    frames: list[PointCloudFrame],
+    gating: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+) -> AssociationResult:
+    """Two-stage Hungarian CV with NIS gating in both stages."""
+    p = dict(params or {})
+    p.setdefault("gating_mode", "nis")
+    return _associate_variant(frames, variant="two_stage_nis", gating=gating, params=p)

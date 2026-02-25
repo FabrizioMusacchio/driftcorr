@@ -78,6 +78,73 @@ def apply_gating(
     return np.asarray(g if g is not None else np.ones_like(c, dtype=bool), dtype=bool)
 
 
+def compute_nis_cost_matrix(
+    pred_xyz: np.ndarray,
+    det_xyz: np.ndarray,
+    s_inv: np.ndarray | None = None,
+    s: np.ndarray | None = None,
+) -> np.ndarray:
+    """Compute normalized innovation squared (NIS) costs.
+
+    Parameters
+    ----------
+    pred_xyz:
+        Predicted observation positions with shape (N, 3).
+    det_xyz:
+        Candidate detections with shape (M, 3).
+    s_inv:
+        Innovation covariance inverse. Supported shapes:
+        - (3, 3): global inverse covariance for all tracks
+        - (N, 3, 3): per-track inverse covariance
+    s:
+        Innovation covariance. Same supported shapes as `s_inv`.
+        If both are provided, `s_inv` takes precedence.
+
+    Returns
+    -------
+    np.ndarray
+        NIS cost matrix with shape (N, M), where
+        ``C[i,j] = (z_j - zhat_i)^T S_i^{-1} (z_j - zhat_i)``.
+    """
+    p = np.asarray(pred_xyz, dtype=float)
+    z = np.asarray(det_xyz, dtype=float)
+    if p.ndim != 2 or z.ndim != 2 or p.shape[1] != 3 or z.shape[1] != 3:
+        raise ValueError("pred_xyz and det_xyz must have shape (N,3)/(M,3)")
+
+    n = p.shape[0]
+    residual = z[None, :, :] - p[:, None, :]  # (N,M,3)
+
+    inv = None
+    if s_inv is not None:
+        inv = np.asarray(s_inv, dtype=float)
+    elif s is not None:
+        cov = np.asarray(s, dtype=float)
+        if cov.shape == (3, 3):
+            inv = np.linalg.pinv(cov)
+        elif cov.ndim == 3 and cov.shape[1:] == (3, 3):
+            inv = np.asarray([np.linalg.pinv(cov[i]) for i in range(cov.shape[0])], dtype=float)
+        else:
+            raise ValueError(f"s must have shape (3,3) or (N,3,3), got {cov.shape}")
+    else:
+        inv = np.eye(3, dtype=float)
+
+    inv = np.asarray(inv, dtype=float)
+    if inv.shape == (3, 3):
+        return np.einsum("nmi,ij,nmj->nm", residual, inv, residual)
+    if inv.ndim == 3 and inv.shape[1:] == (3, 3):
+        if inv.shape[0] != n:
+            raise ValueError(f"Per-track s_inv first dimension must match N={n}, got {inv.shape[0]}")
+        return np.einsum("nmi,nij,nmj->nm", residual, inv, residual)
+    raise ValueError(f"s_inv must have shape (3,3) or (N,3,3), got {inv.shape}")
+
+
+def gate_by_nis(cost_matrix_nis: np.ndarray, chi2_thresh: float) -> np.ndarray:
+    """Gate candidate edges by NIS threshold."""
+    c = np.asarray(cost_matrix_nis, dtype=float)
+    thr = float(chi2_thresh)
+    return np.isfinite(c) & (c <= thr)
+
+
 def _default_forbidden_cost(cost_matrix: np.ndarray) -> float:
     c = np.asarray(cost_matrix, dtype=float)
     finite = c[np.isfinite(c)]

@@ -1,6 +1,12 @@
 import numpy as np
 
-from driftcorr.association.assignment import apply_gating, build_cost_matrix, hungarian_assignment
+from driftcorr.association.assignment import (
+    apply_gating,
+    build_cost_matrix,
+    compute_nis_cost_matrix,
+    gate_by_nis,
+    hungarian_assignment,
+)
 from driftcorr.association.linking import link_assignments_to_tracks
 from driftcorr.association.registration import icp_rigid
 from driftcorr.association.types import PointCloudFrame
@@ -94,3 +100,14 @@ def test_hungarian_dummy_can_leave_points_unmatched():
     )
     assert out["row_ind"].size <= 2
     assert out["unmatched_t"].size + out["row_ind"].size >= 2
+
+
+def test_nis_cost_matrix_and_gate_shapes():
+    pred = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=float)
+    det = np.array([[0.1, 0.0, 0.0], [3.0, 3.0, 3.0]], dtype=float)
+    s_inv = np.array([np.eye(3), np.eye(3)], dtype=float)
+    nis = compute_nis_cost_matrix(pred, det, s_inv=s_inv)
+    assert nis.shape == (2, 2)
+    gate = gate_by_nis(nis, chi2_thresh=7.815)  # approx 95% for df=3
+    assert gate.shape == (2, 2)
+    assert gate.dtype == bool

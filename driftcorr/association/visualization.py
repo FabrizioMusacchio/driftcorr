@@ -89,6 +89,105 @@ def _canonical_track_df(df: pd.DataFrame | None, prefer_track_col: str = "TrackI
     return d[["TrackID", "Time", "x", "y", "z", "PointIndex"]]
 
 
+def _extract_regime_and_file_stem(title: str, out_path: Path) -> tuple[str, str]:
+    """Infer regime and file stem from panel title or output filename."""
+    regime = ""
+    file_stem = ""
+    parts = [p.strip() for p in str(title).split("|")]
+    if len(parts) >= 2:
+        regime = parts[0]
+        file_stem = parts[1]
+    stem = out_path.stem
+    if not file_stem and "_panel_3d_" in stem:
+        file_stem = stem.split("_panel_3d_")[0]
+    return str(regime), str(file_stem)
+
+
+def _find_drift_schedule_path(out_path: Path, file_stem: str) -> Path | None:
+    """Find drift schedule CSV near output path, preferring run-local copies."""
+    if file_stem:
+        local = out_path.parent / f"{file_stem}_drift_schedule.csv"
+        if local.exists():
+            return local
+    for anc in [out_path.parent, *list(out_path.parents)[:6]]:
+        p1 = anc / f"{file_stem}_drift_schedule.csv" if file_stem else None
+        p2 = anc / "drift_schedule.csv"
+        if p1 is not None and p1.exists():
+            return p1
+        if p2.exists():
+            return p2
+    return None
+
+
+def _apply_drift_schedule_to_gt(gt_tracks: pd.DataFrame, drift_tab: pd.DataFrame) -> pd.DataFrame:
+    """Apply per-time rigid drift (rotation around z + translation) to GT tracks.
+
+    Expected drift columns:
+    - preferred: `drift_tx`, `drift_ty`, `drift_tz`, `drift_rot_deg`
+    - fallback aliases: `Tx`, `Ty`, `Tz`, `rot_deg`
+    """
+    if gt_tracks.empty or drift_tab.empty:
+        return gt_tracks
+    d = gt_tracks.copy()
+    s = drift_tab.copy()
+    s["Time"] = pd.to_numeric(s.get("Time", np.nan), errors="coerce")
+    s = s.dropna(subset=["Time"]).copy()
+    if s.empty:
+        return d
+
+    def _col(tab: pd.DataFrame, names: list[str], default: float = 0.0) -> np.ndarray:
+        for n in names:
+            if n in tab.columns:
+                return pd.to_numeric(tab[n], errors="coerce").fillna(default).to_numpy(float)
+        return np.full((tab.shape[0],), float(default), dtype=float)
+
+    s = s.sort_values("Time").drop_duplicates("Time", keep="last").reset_index(drop=True)
+    tx = _col(s, ["drift_tx", "Tx", "tx"], 0.0)
+    ty = _col(s, ["drift_ty", "Ty", "ty"], 0.0)
+    tz = _col(s, ["drift_tz", "Tz", "tz"], 0.0)
+    rot_deg = _col(s, ["drift_rot_deg", "rot_deg", "rotation_deg"], 0.0)
+    sched = pd.DataFrame(
+        {
+            "Time": s["Time"].to_numpy(float),
+            "_tx": tx,
+            "_ty": ty,
+            "_tz": tz,
+            "_rot_deg": rot_deg,
+        }
+    )
+
+    merged = d.merge(sched, on="Time", how="left")
+    merged["_tx"] = pd.to_numeric(merged["_tx"], errors="coerce").fillna(0.0)
+    merged["_ty"] = pd.to_numeric(merged["_ty"], errors="coerce").fillna(0.0)
+    merged["_tz"] = pd.to_numeric(merged["_tz"], errors="coerce").fillna(0.0)
+    merged["_rot_deg"] = pd.to_numeric(merged["_rot_deg"], errors="coerce").fillna(0.0)
+
+    # Use a fixed center from first observed GT time, matching generation intent.
+    t0 = float(pd.to_numeric(merged["Time"], errors="coerce").min())
+    m0 = merged[pd.to_numeric(merged["Time"], errors="coerce") == t0]
+    if m0.shape[0] > 0:
+        cx = float(pd.to_numeric(m0["x"], errors="coerce").mean())
+        cy = float(pd.to_numeric(m0["y"], errors="coerce").mean())
+    else:
+        cx = float(pd.to_numeric(merged["x"], errors="coerce").mean())
+        cy = float(pd.to_numeric(merged["y"], errors="coerce").mean())
+
+    x = pd.to_numeric(merged["x"], errors="coerce").to_numpy(float)
+    y = pd.to_numeric(merged["y"], errors="coerce").to_numpy(float)
+    z = pd.to_numeric(merged["z"], errors="coerce").to_numpy(float)
+    ang = np.deg2rad(pd.to_numeric(merged["_rot_deg"], errors="coerce").to_numpy(float))
+    c = np.cos(ang)
+    sng = np.sin(ang)
+    xr = c * (x - cx) - sng * (y - cy) + cx
+    yr = sng * (x - cx) + c * (y - cy) + cy
+    zr = z
+
+    merged["x"] = xr + pd.to_numeric(merged["_tx"], errors="coerce").to_numpy(float)
+    merged["y"] = yr + pd.to_numeric(merged["_ty"], errors="coerce").to_numpy(float)
+    merged["z"] = zr + pd.to_numeric(merged["_tz"], errors="coerce").to_numpy(float)
+    return merged[["TrackID", "Time", "x", "y", "z", "PointIndex"]]
+
+
 def plot_3d_frames_comparison(
     frames_gt: list[PointCloudFrame] | None,
     frames_blind: list[PointCloudFrame],
@@ -122,6 +221,16 @@ def plot_3d_frames_comparison(
 
     gt_tracks = _canonical_track_df(gt_tracks_df, prefer_track_col="TrackID")
     inf_tracks = _canonical_track_df(inferred_tracks_df, prefer_track_col="TrackID")
+    regime_name, file_stem = _extract_regime_and_file_stem(title=title, out_path=out)
+    if "with_drift" in regime_name.lower():
+        drift_path = _find_drift_schedule_path(out_path=out, file_stem=file_stem)
+        if drift_path is not None and drift_path.exists():
+            try:
+                drift_tab = pd.read_csv(drift_path)
+                gt_tracks = _apply_drift_schedule_to_gt(gt_tracks, drift_tab)
+            except Exception:
+                # Keep backward-compatible behavior if drift schedule cannot be parsed.
+                pass
 
     try:
         fig = plt.figure(figsize=(14, 12))

@@ -116,6 +116,14 @@ def generate_controlled_drift_dataset(
     dx_min_um: float = 0.2,
     dx_max_um: float = 4.0,
     dx_varying_distribution: str = "uniform",
+    birthdeath_enable: bool = False,
+    p_birth_late: float = 0.35,
+    p_death_early: float = 0.35,
+    min_life_frames: int = 5,
+    p_birth_random: float = 0.5,
+    birth_near_dist_min_um: float = 0.2,
+    birth_near_dist_max_um: float = 4.0,
+    birth_near_pick: str = "uniform_over_active_tracks",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Generate 3D tracks with known drift and known no-drift groundtruth.
 
@@ -179,16 +187,21 @@ def generate_controlled_drift_dataset(
     for ti in range(1, t_count):
         x_true[:, ti, :] = x_true[:, ti - 1, :] + vel + rw_step[:, ti, :]
 
-    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx"}:
+    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx", "nodrift_dx_varying_birthdeath"}:
         # Association-only regimes: no imaging drift with controlled motion
         # amplitudes. "nodrift_varying_dx" uses heteroscedastic dx schedules.
-        rng_offset = 19013 if mode == "nodrift_dx_sweep" else 29013
+        if mode == "nodrift_dx_sweep":
+            rng_offset = 19013
+        elif mode == "nodrift_varying_dx":
+            rng_offset = 29013
+        else:
+            rng_offset = 39013
         rng_dx = np.random.default_rng(int(seed) + int(rng_offset))
         x_true = np.zeros((n, t_count, 3), dtype=float)
         x_true[:, 0, :] = p0
         a = float(np.clip(dx_track_smoothness, 0.0, 0.98))
 
-        if mode == "nodrift_varying_dx":
+        if mode in {"nodrift_varying_dx", "nodrift_dx_varying_birthdeath"}:
             dx_mode_l = str(dx_mode).lower()
             dx_lo = float(min(dx_min_um, dx_max_um))
             dx_hi = float(max(dx_min_um, dx_max_um))
@@ -269,6 +282,84 @@ def generate_controlled_drift_dataset(
             step[mask_stationary] *= 0.05
             step[mask_slow] *= 0.55
             x_true[:, ti, :] = x_true[:, ti - 1, :] + step
+
+    # Optional birth/death process for association-focused heteroscedastic regime.
+    t_birth_idx = np.zeros((n,), dtype=int)
+    t_death_idx = np.full((n,), t_count - 1, dtype=int)
+    birth_mode = np.full((n,), "initial", dtype=object)
+    parent_track_id = np.full((n,), np.nan, dtype=float)
+    init_dist_to_parent = np.full((n,), np.nan, dtype=float)
+
+    birthdeath_active = bool(birthdeath_enable) or (mode == "nodrift_dx_varying_birthdeath")
+    if birthdeath_active:
+        rng_bd = np.random.default_rng(int(seed) + 49013)
+        min_life = int(max(2, min(int(min_life_frames), t_count)))
+        birth_prob = float(np.clip(p_birth_late, 0.0, 1.0))
+        death_prob = float(np.clip(p_death_early, 0.0, 1.0))
+        p_random = float(np.clip(p_birth_random, 0.0, 1.0))
+        near_d_lo = float(min(birth_near_dist_min_um, birth_near_dist_max_um))
+        near_d_hi = float(max(birth_near_dist_min_um, birth_near_dist_max_um))
+
+        # 1) Sample lifetimes.
+        for i in range(n):
+            if t_count - min_life >= 1 and rng_bd.random() < birth_prob:
+                t_birth_idx[i] = int(rng_bd.integers(1, t_count - min_life + 1))
+            else:
+                t_birth_idx[i] = 0
+
+            td_min = int(t_birth_idx[i] + min_life - 1)
+            td_min = int(min(max(td_min, t_birth_idx[i]), t_count - 1))
+            if td_min < (t_count - 1) and rng_bd.random() < death_prob:
+                t_death_idx[i] = int(rng_bd.integers(td_min, t_count))
+            else:
+                t_death_idx[i] = t_count - 1
+
+        # 2) Re-anchor tracks that start later than first frame.
+        step_delta = x_true[:, 1:, :] - x_true[:, :-1, :]
+        late_idx = np.flatnonzero(t_birth_idx > 0)
+        late_idx = late_idx[np.argsort(t_birth_idx[late_idx])]
+
+        for i in late_idx:
+            tb = int(t_birth_idx[i])
+            candidates = np.flatnonzero((t_birth_idx < tb) & (t_death_idx >= tb) & (np.arange(n) != i))
+            pick_near = (rng_bd.random() > p_random) and (candidates.size > 0)
+
+            if pick_near:
+                if str(birth_near_pick).lower() == "uniform_over_active_tracks":
+                    parent = int(rng_bd.choice(candidates))
+                else:
+                    parent = int(rng_bd.choice(candidates))
+                parent_tid = float(track_ids[parent])
+                parent_pos = x_true[parent, tb, :].copy()
+                dir_vec = rng_bd.normal(size=3)
+                dn = float(np.linalg.norm(dir_vec))
+                if dn <= 1e-12:
+                    dir_vec = np.array([1.0, 0.0, 0.0], dtype=float)
+                else:
+                    dir_vec = dir_vec / dn
+                dist = float(rng_bd.uniform(near_d_lo, near_d_hi))
+                init_pos = parent_pos + dist * dir_vec
+                birth_mode[i] = "near"
+                parent_track_id[i] = parent_tid
+                init_dist_to_parent[i] = dist
+            else:
+                init_pos = np.array(
+                    [
+                        rng_bd.uniform(x_rng[0], x_rng[1]),
+                        rng_bd.uniform(y_rng[0], y_rng[1]),
+                        rng_bd.uniform(z_rng[0], z_rng[1]),
+                    ],
+                    dtype=float,
+                )
+                birth_mode[i] = "random"
+
+            x_true[i, tb, :] = init_pos
+            for ti in range(tb + 1, t_count):
+                x_true[i, ti, :] = x_true[i, ti - 1, :] + step_delta[i, ti - 1, :]
+
+            # Keep pre-birth positions out-of-range-safe; these rows will be dropped.
+            for ti in range(0, tb):
+                x_true[i, ti, :] = init_pos
 
     x_true[:, :, 0] = np.clip(x_true[:, :, 0], x_rng[0], x_rng[1])
     x_true[:, :, 1] = np.clip(x_true[:, :, 1], y_rng[0], y_rng[1])
@@ -456,7 +547,7 @@ def generate_controlled_drift_dataset(
                 p_rot = _rotate_about_z(p_t, ref_center, float(ang[ti]))
                 drift_local_all[:, ti, :] += 0.6 * (p_rot - p_t)
 
-    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx"}:
+    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx", "nodrift_dx_varying_birthdeath"}:
         drift_global_all = np.zeros_like(x_true)
         drift_local_all = np.zeros_like(x_true)
 
@@ -469,7 +560,11 @@ def generate_controlled_drift_dataset(
 
     row_id = 1
     for i, tid in enumerate(track_ids):
+        tb_i = int(t_birth_idx[i])
+        td_i = int(t_death_idx[i])
         for ti, t in enumerate(times):
+            if ti < tb_i or ti > td_i:
+                continue
             xo = x_obs[i, ti]
             xg = x_true[i, ti]
             dg = drift_global_all[i, ti]
@@ -485,6 +580,11 @@ def generate_controlled_drift_dataset(
                     "TrackID": float(tid),
                     "ID": int(row_id),
                     "CellType": str(cell_type[i]),
+                    "t_birth_time": float(times[tb_i]),
+                    "t_death_time": float(times[td_i]),
+                    "birth_mode": str(birth_mode[i]),
+                    "parent_track_id": float(parent_track_id[i]) if np.isfinite(parent_track_id[i]) else np.nan,
+                    "init_dist_to_parent": float(init_dist_to_parent[i]) if np.isfinite(init_dist_to_parent[i]) else np.nan,
                 }
             )
             rows_gt.append(
@@ -496,6 +596,11 @@ def generate_controlled_drift_dataset(
                     "TrackID": float(tid),
                     "ID": int(row_id),
                     "CellType": str(cell_type[i]),
+                    "t_birth_time": float(times[tb_i]),
+                    "t_death_time": float(times[td_i]),
+                    "birth_mode": str(birth_mode[i]),
+                    "parent_track_id": float(parent_track_id[i]) if np.isfinite(parent_track_id[i]) else np.nan,
+                    "init_dist_to_parent": float(init_dist_to_parent[i]) if np.isfinite(init_dist_to_parent[i]) else np.nan,
                 }
             )
             rows_drift.append(
@@ -514,6 +619,11 @@ def generate_controlled_drift_dataset(
                     "dx_scale_um": float(dx_schedule[i, ti]),
                     "dx_scale_source": str(dx_source_all[i, ti]),
                     "CellType": str(cell_type[i]),
+                    "t_birth_time": float(times[tb_i]),
+                    "t_death_time": float(times[td_i]),
+                    "birth_mode": str(birth_mode[i]),
+                    "parent_track_id": float(parent_track_id[i]) if np.isfinite(parent_track_id[i]) else np.nan,
+                    "init_dist_to_parent": float(init_dist_to_parent[i]) if np.isfinite(init_dist_to_parent[i]) else np.nan,
                 }
             )
             row_id += 1
@@ -566,6 +676,14 @@ def generate_synthetic_imaris_folder(
     dx_min_um: float = 0.2,
     dx_max_um: float = 4.0,
     dx_varying_distribution: str = "uniform",
+    birthdeath_enable: bool = False,
+    p_birth_late: float = 0.35,
+    p_death_early: float = 0.35,
+    min_life_frames: int = 5,
+    p_birth_random: float = 0.5,
+    birth_near_dist_min_um: float = 0.2,
+    birth_near_dist_max_um: float = 4.0,
+    birth_near_pick: str = "uniform_over_active_tracks",
 ) -> dict[str, Any]:
     """Create a synthetic IMARIS folder plus ground-truth sidecar files."""
     out_dir = Path(out_dir)
@@ -574,6 +692,8 @@ def generate_synthetic_imaris_folder(
     gt_dir.mkdir(parents=True, exist_ok=True)
 
     written_files: list[Path] = []
+    birthdeath_track_rows: list[pd.DataFrame] = []
+    active_per_time_rows: list[pd.DataFrame] = []
     for i in range(int(n_files)):
         file_seed = int(seed + i * 37)
         df_orig, df_gt, df_drift = generate_controlled_drift_dataset(
@@ -598,6 +718,14 @@ def generate_synthetic_imaris_folder(
             dx_min_um=dx_min_um,
             dx_max_um=dx_max_um,
             dx_varying_distribution=dx_varying_distribution,
+            birthdeath_enable=birthdeath_enable,
+            p_birth_late=p_birth_late,
+            p_death_early=p_death_early,
+            min_life_frames=min_life_frames,
+            p_birth_random=p_birth_random,
+            birth_near_dist_min_um=birth_near_dist_min_um,
+            birth_near_dist_max_um=birth_near_dist_max_um,
+            birth_near_pick=birth_near_pick,
         )
 
         base = f"synthetic_drift_{i + 1:03d}"
@@ -637,6 +765,47 @@ def generate_synthetic_imaris_folder(
             )
             dx_track.to_csv(gt_dir / f"{base}_dx_schedule_summary_track.csv", index=False)
 
+        if {"t_birth_time", "t_death_time", "birth_mode"}.issubset(df_gt.columns):
+            track_life = (
+                df_gt[
+                    [
+                        "TrackID",
+                        "t_birth_time",
+                        "t_death_time",
+                        "birth_mode",
+                        "parent_track_id",
+                        "init_dist_to_parent",
+                    ]
+                ]
+                .drop_duplicates("TrackID")
+                .copy()
+            )
+            track_life["File"] = str(base)
+            track_life = track_life[
+                [
+                    "File",
+                    "TrackID",
+                    "t_birth_time",
+                    "t_death_time",
+                    "birth_mode",
+                    "parent_track_id",
+                    "init_dist_to_parent",
+                ]
+            ]
+            birthdeath_track_rows.append(track_life)
+            track_life.to_csv(gt_dir / f"{base}_track_birthdeath_summary.csv", index=False)
+
+            active_tab = (
+                df_gt.groupby("Time", as_index=False)["TrackID"]
+                .nunique()
+                .rename(columns={"TrackID": "active_tracks"})
+                .sort_values("Time")
+                .reset_index(drop=True)
+            )
+            active_tab["File"] = str(base)
+            active_per_time_rows.append(active_tab[["File", "Time", "active_tracks"]])
+            active_tab.to_csv(gt_dir / f"{base}_active_tracks_per_time.csv", index=False)
+
         meta = {
             "seed": file_seed,
             "n_tracks": int(n_tracks),
@@ -661,9 +830,24 @@ def generate_synthetic_imaris_folder(
             "dx_min_um": float(dx_min_um),
             "dx_max_um": float(dx_max_um),
             "dx_varying_distribution": str(dx_varying_distribution),
+            "birthdeath_enable": bool(birthdeath_enable),
+            "p_birth_late": float(p_birth_late),
+            "p_death_early": float(p_death_early),
+            "min_life_frames": int(min_life_frames),
+            "p_birth_random": float(p_birth_random),
+            "birth_near_dist_min_um": float(birth_near_dist_min_um),
+            "birth_near_dist_max_um": float(birth_near_dist_max_um),
+            "birth_near_pick": str(birth_near_pick),
         }
         pd.DataFrame([meta]).to_csv(gt_dir / f"{base}_meta.csv", index=False)
         written_files.append(xlsx_path)
+
+    if birthdeath_track_rows:
+        track_summary = pd.concat(birthdeath_track_rows, ignore_index=True)
+        track_summary.to_csv(gt_dir / "track_birthdeath_summary.csv", index=False)
+    if active_per_time_rows:
+        active_summary = pd.concat(active_per_time_rows, ignore_index=True)
+        active_summary.to_csv(gt_dir / "active_tracks_per_time.csv", index=False)
 
     return {"imaris_dir": out_dir, "groundtruth_dir": gt_dir, "files": written_files}
 

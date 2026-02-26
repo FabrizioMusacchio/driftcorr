@@ -41,7 +41,12 @@ from .hungarian_cv_variants import (
     associate_hungarian_two_stage_nis_cv,
     associate_hungarian_two_stage_cv,
 )
-from .synthetic import load_blind_frames, load_groundtruth_mapping, synthetic_generate_blind_pair
+from .synthetic import (
+    load_blind_frames,
+    load_groundtruth_mapping,
+    synthetic_generate_blind_pair,
+    synthetic_generate_blind_pair_varying_dx_birthdeath_drift,
+)
 from .types import AssociationResult, GroundTruthMapping, PointCloudFrame
 
 __all__ = [
@@ -70,6 +75,7 @@ __all__ = [
     "load_blind_frames",
     "load_groundtruth_mapping",
     "synthetic_generate_blind_pair",
+    "synthetic_generate_blind_pair_varying_dx_birthdeath_drift",
     "compute_nn_distance",
     "compute_displacement_from_gt",
     "compute_rho",

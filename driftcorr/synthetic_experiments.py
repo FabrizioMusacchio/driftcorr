@@ -124,6 +124,8 @@ def generate_controlled_drift_dataset(
     birth_near_dist_min_um: float = 0.2,
     birth_near_dist_max_um: float = 4.0,
     birth_near_pick: str = "uniform_over_active_tracks",
+    drift_rotation_enable: bool = True,
+    drift_rotation_deg_scale: float = 2.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Generate 3D tracks with known drift and known no-drift groundtruth.
 
@@ -187,21 +189,23 @@ def generate_controlled_drift_dataset(
     for ti in range(1, t_count):
         x_true[:, ti, :] = x_true[:, ti - 1, :] + vel + rw_step[:, ti, :]
 
-    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx", "nodrift_dx_varying_birthdeath"}:
+    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx", "nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_with_drift"}:
         # Association-only regimes: no imaging drift with controlled motion
         # amplitudes. "nodrift_varying_dx" uses heteroscedastic dx schedules.
         if mode == "nodrift_dx_sweep":
             rng_offset = 19013
         elif mode == "nodrift_varying_dx":
             rng_offset = 29013
-        else:
+        elif mode == "nodrift_dx_varying_birthdeath":
             rng_offset = 39013
+        else:
+            rng_offset = 59013
         rng_dx = np.random.default_rng(int(seed) + int(rng_offset))
         x_true = np.zeros((n, t_count, 3), dtype=float)
         x_true[:, 0, :] = p0
         a = float(np.clip(dx_track_smoothness, 0.0, 0.98))
 
-        if mode in {"nodrift_varying_dx", "nodrift_dx_varying_birthdeath"}:
+        if mode in {"nodrift_varying_dx", "nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_with_drift"}:
             dx_mode_l = str(dx_mode).lower()
             dx_lo = float(min(dx_min_um, dx_max_um))
             dx_hi = float(max(dx_min_um, dx_max_um))
@@ -239,6 +243,26 @@ def generate_controlled_drift_dataset(
         freq_z = rng_dx.uniform(0.10, 0.45, size=(n, 1))
         osc_amp_xy = rng_dx.uniform(0.25, 0.55, size=(n, 1)) * 2.2
         osc_amp_z = rng_dx.uniform(0.15, 0.40, size=(n, 1)) * 1.2
+
+        coh_centers = None
+        coh_flow = None
+        if mode == "varying_dx_birthdeath_with_drift":
+            n_coh = 4
+            coh_centers = np.column_stack(
+                [
+                    rng_dx.uniform(x_rng[0], x_rng[1], size=n_coh),
+                    rng_dx.uniform(y_rng[0], y_rng[1], size=n_coh),
+                    rng_dx.uniform(z_rng[0], z_rng[1], size=n_coh),
+                ]
+            )
+            coh_flow = _smooth_random_series(
+                rng_dx,
+                t=t_count,
+                dim=3 * n_coh,
+                scale=1.0,
+                temporal_smoothness=temporal_smoothness,
+            ).reshape(t_count, n_coh, 3)
+            coh_flow *= 0.65
 
         v_prev = base_vel * (2.8 * dx_schedule[:, [0]])
         for ti in range(1, t_count):
@@ -279,6 +303,10 @@ def generate_controlled_drift_dataset(
             zig = zig_sign * 0.22 * noise
 
             step = v_prev + osc + zig
+            if coh_centers is not None and coh_flow is not None:
+                kc = _rbf_kernel(x_true[:, ti - 1, :], centers=coh_centers, lengthscale=180.0)
+                cstep = kc @ coh_flow[ti]
+                step[mask_slow] += (step_scale[mask_slow] * cstep[mask_slow])
             step[mask_stationary] *= 0.05
             step[mask_slow] *= 0.55
             x_true[:, ti, :] = x_true[:, ti - 1, :] + step
@@ -290,7 +318,7 @@ def generate_controlled_drift_dataset(
     parent_track_id = np.full((n,), np.nan, dtype=float)
     init_dist_to_parent = np.full((n,), np.nan, dtype=float)
 
-    birthdeath_active = bool(birthdeath_enable) or (mode == "nodrift_dx_varying_birthdeath")
+    birthdeath_active = bool(birthdeath_enable) or (mode in {"nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_with_drift"})
     if birthdeath_active:
         rng_bd = np.random.default_rng(int(seed) + 49013)
         min_life = int(max(2, min(int(min_life_frames), t_count)))
@@ -413,6 +441,10 @@ def generate_controlled_drift_dataset(
 
     drift_global_all = np.zeros_like(x_true)
     drift_local_all = np.zeros_like(x_true)
+    drift_tx = np.zeros((t_count,), dtype=float)
+    drift_ty = np.zeros((t_count,), dtype=float)
+    drift_tz = np.zeros((t_count,), dtype=float)
+    drift_rot_deg = np.zeros((t_count,), dtype=float)
 
     z_mid = 0.5 * (z_rng[0] + z_rng[1])
     z_half = max(1e-6, 0.5 * (z_rng[1] - z_rng[0]))
@@ -443,6 +475,9 @@ def generate_controlled_drift_dataset(
 
         drift_global_all[:, ti, :] = global_drift[ti][None, :]
         drift_local_all[:, ti, :] = local
+        drift_tx[ti] = float(global_drift[ti, 0])
+        drift_ty[ti] = float(global_drift[ti, 1])
+        drift_tz[ti] = float(global_drift[ti, 2])
 
     if mode in {"rotation_drift", "piecewise_spatial_drift", "jump_events"}:
         # Use a dedicated RNG stream for new non-rigid regimes so existing modes
@@ -479,6 +514,10 @@ def generate_controlled_drift_dataset(
                 p_rot = _rotate_about_z(p_t, ref_center, float(angles[ti]))
                 drift_local_all[:, ti, :] = p_rot - p_t
                 drift_global_all[:, ti, :] = trans[ti][None, :]
+                drift_tx[ti] = float(trans[ti, 0])
+                drift_ty[ti] = float(trans[ti, 1])
+                drift_tz[ti] = float(trans[ti, 2])
+                drift_rot_deg[ti] = float(np.rad2deg(angles[ti]))
 
         elif mode == "piecewise_spatial_drift":
             n_regions = int(np.clip(piecewise_regions, 2, 4))
@@ -514,6 +553,10 @@ def generate_controlled_drift_dataset(
                 z_norm = ((p_t[:, 2] - z_mid) / z_half)[:, None]
                 z_extra = z_norm * np.array([0.45, -0.15, 0.25])[None, :] * float(local_drift_scale_um)
                 drift_local_all[:, ti, :] = reg_local + 0.3 * base_local[:, ti, :] + z_extra
+                drift_tx[ti] = float(drift_global_all[0, ti, 0])
+                drift_ty[ti] = float(drift_global_all[0, ti, 1])
+                drift_tz[ti] = float(drift_global_all[0, ti, 2])
+                drift_rot_deg[ti] = 0.0
 
         elif mode == "jump_events":
             drift_local_all = 0.45 * base_local
@@ -546,10 +589,60 @@ def generate_controlled_drift_dataset(
                 p_t = x_true[:, ti, :]
                 p_rot = _rotate_about_z(p_t, ref_center, float(ang[ti]))
                 drift_local_all[:, ti, :] += 0.6 * (p_rot - p_t)
+                drift_tx[ti] = float(drift_global_all[0, ti, 0])
+                drift_ty[ti] = float(drift_global_all[0, ti, 1])
+                drift_tz[ti] = float(drift_global_all[0, ti, 2])
+                drift_rot_deg[ti] = float(np.rad2deg(ang[ti]))
+
+    if mode == "varying_dx_birthdeath_with_drift":
+        # Apply global rigid-like drift after intrinsic motion generation.
+        rng_drift = np.random.default_rng(int(seed) + 69013)
+        trans_step = _smooth_random_series(
+            rng_drift,
+            t=t_count,
+            dim=3,
+            scale=1.0,
+            temporal_smoothness=temporal_smoothness,
+        )
+        trans = np.cumsum(trans_step, axis=0)
+        trans *= np.array(global_drift_scale_xyz, dtype=float)[None, :] * 0.85
+
+        if bool(drift_rotation_enable):
+            rot_steps = _smooth_random_series(
+                rng_drift,
+                t=t_count,
+                dim=1,
+                scale=1.0,
+                temporal_smoothness=temporal_smoothness,
+            )[:, 0]
+            rot_steps = np.cumsum(rot_steps)
+            max_abs = float(np.max(np.abs(rot_steps))) if rot_steps.size else 1.0
+            if max_abs <= 1e-9:
+                max_abs = 1.0
+            rot_deg = (rot_steps / max_abs) * float(max(0.0, drift_rotation_deg_scale))
+            rot_rad = np.deg2rad(rot_deg)
+        else:
+            rot_deg = np.zeros((t_count,), dtype=float)
+            rot_rad = np.zeros((t_count,), dtype=float)
+
+        ref_center = np.mean(x_true[:, 0, :], axis=0)
+        for ti in range(t_count):
+            p_t = x_true[:, ti, :]
+            p_rot = _rotate_about_z(p_t, ref_center, float(rot_rad[ti]))
+            drift_local_all[:, ti, :] = p_rot - p_t
+            drift_global_all[:, ti, :] = trans[ti][None, :]
+            drift_tx[ti] = float(trans[ti, 0])
+            drift_ty[ti] = float(trans[ti, 1])
+            drift_tz[ti] = float(trans[ti, 2])
+            drift_rot_deg[ti] = float(rot_deg[ti])
 
     if mode in {"nodrift_dx_sweep", "nodrift_varying_dx", "nodrift_dx_varying_birthdeath"}:
         drift_global_all = np.zeros_like(x_true)
         drift_local_all = np.zeros_like(x_true)
+        drift_tx[:] = 0.0
+        drift_ty[:] = 0.0
+        drift_tz[:] = 0.0
+        drift_rot_deg[:] = 0.0
 
     drift_total = drift_global_all + drift_local_all
     x_obs = x_true + drift_total + rng.normal(scale=float(measurement_noise_um), size=x_true.shape)
@@ -616,6 +709,11 @@ def generate_controlled_drift_dataset(
                     "drift_x_total": float(dtot[0]),
                     "drift_y_total": float(dtot[1]),
                     "drift_z_total": float(dtot[2]),
+                    "drift_tx": float(drift_tx[ti]),
+                    "drift_ty": float(drift_ty[ti]),
+                    "drift_tz": float(drift_tz[ti]),
+                    "drift_trans_norm": float(np.sqrt(drift_tx[ti] ** 2 + drift_ty[ti] ** 2 + drift_tz[ti] ** 2)),
+                    "drift_rot_deg": float(drift_rot_deg[ti]),
                     "dx_scale_um": float(dx_schedule[i, ti]),
                     "dx_scale_source": str(dx_source_all[i, ti]),
                     "CellType": str(cell_type[i]),
@@ -684,6 +782,8 @@ def generate_synthetic_imaris_folder(
     birth_near_dist_min_um: float = 0.2,
     birth_near_dist_max_um: float = 4.0,
     birth_near_pick: str = "uniform_over_active_tracks",
+    drift_rotation_enable: bool = True,
+    drift_rotation_deg_scale: float = 2.0,
 ) -> dict[str, Any]:
     """Create a synthetic IMARIS folder plus ground-truth sidecar files."""
     out_dir = Path(out_dir)
@@ -694,6 +794,7 @@ def generate_synthetic_imaris_folder(
     written_files: list[Path] = []
     birthdeath_track_rows: list[pd.DataFrame] = []
     active_per_time_rows: list[pd.DataFrame] = []
+    drift_schedule_rows: list[pd.DataFrame] = []
     for i in range(int(n_files)):
         file_seed = int(seed + i * 37)
         df_orig, df_gt, df_drift = generate_controlled_drift_dataset(
@@ -726,6 +827,8 @@ def generate_synthetic_imaris_folder(
             birth_near_dist_min_um=birth_near_dist_min_um,
             birth_near_dist_max_um=birth_near_dist_max_um,
             birth_near_pick=birth_near_pick,
+            drift_rotation_enable=drift_rotation_enable,
+            drift_rotation_deg_scale=drift_rotation_deg_scale,
         )
 
         base = f"synthetic_drift_{i + 1:03d}"
@@ -764,6 +867,35 @@ def generate_synthetic_imaris_folder(
                 .reset_index(drop=True)
             )
             dx_track.to_csv(gt_dir / f"{base}_dx_schedule_summary_track.csv", index=False)
+
+        if {"drift_tx", "drift_ty", "drift_tz", "drift_trans_norm", "drift_rot_deg"}.issubset(df_drift.columns):
+            drift_tab = (
+                df_drift.groupby("Time", as_index=False)
+                .agg(
+                    drift_tx=("drift_tx", "median"),
+                    drift_ty=("drift_ty", "median"),
+                    drift_tz=("drift_tz", "median"),
+                    drift_trans_norm=("drift_trans_norm", "median"),
+                    drift_rot_deg=("drift_rot_deg", "median"),
+                )
+                .sort_values("Time")
+                .reset_index(drop=True)
+            )
+            drift_tab.to_csv(gt_dir / f"{base}_drift_schedule.csv", index=False)
+            drift_tab["File"] = str(base)
+            drift_schedule_rows.append(
+                drift_tab[
+                    [
+                        "File",
+                        "Time",
+                        "drift_tx",
+                        "drift_ty",
+                        "drift_tz",
+                        "drift_trans_norm",
+                        "drift_rot_deg",
+                    ]
+                ]
+            )
 
         if {"t_birth_time", "t_death_time", "birth_mode"}.issubset(df_gt.columns):
             track_life = (
@@ -838,6 +970,8 @@ def generate_synthetic_imaris_folder(
             "birth_near_dist_min_um": float(birth_near_dist_min_um),
             "birth_near_dist_max_um": float(birth_near_dist_max_um),
             "birth_near_pick": str(birth_near_pick),
+            "drift_rotation_enable": bool(drift_rotation_enable),
+            "drift_rotation_deg_scale": float(drift_rotation_deg_scale),
         }
         pd.DataFrame([meta]).to_csv(gt_dir / f"{base}_meta.csv", index=False)
         written_files.append(xlsx_path)
@@ -848,6 +982,9 @@ def generate_synthetic_imaris_folder(
     if active_per_time_rows:
         active_summary = pd.concat(active_per_time_rows, ignore_index=True)
         active_summary.to_csv(gt_dir / "active_tracks_per_time.csv", index=False)
+    if drift_schedule_rows:
+        drift_summary = pd.concat(drift_schedule_rows, ignore_index=True)
+        drift_summary.to_csv(gt_dir / "drift_schedule.csv", index=False)
 
     return {"imaris_dir": out_dir, "groundtruth_dir": gt_dir, "files": written_files}
 

@@ -119,6 +119,7 @@ DATA_ROOT = ASSOC_ROOT / "_blind_pairs"
 DATA_ROOT_VARYING_DX = ASSOC_ROOT / "_blind_pairs_varying_dx"
 DATA_ROOT_VARYING_DX_BIRTHDEATH = ASSOC_ROOT / "_blind_pairs_varying_dx_birthdeath"
 DATA_ROOT_VARYING_DX_BIRTHDEATH_DRIFT = ASSOC_ROOT / "_blind_pairs_varying_dx_birthdeath_drift"
+DATA_ROOT_VARYING_DX_STATIONARY = ASSOC_ROOT / "_blind_pairs_varying_dx_stationary"
 NODRIFT_VARYING_DX_REGIME = "nodrift_varying_dx"
 NODRIFT_VARYING_DX_TAG = "varying_dx_0p20_4p00"
 NODRIFT_VARYING_DX_NOMINAL_SCALE = 1.0
@@ -128,6 +129,10 @@ NODRIFT_VARYING_DX_BIRTHDEATH_NOMINAL_SCALE = 1.0
 NODRIFT_VARYING_DX_BIRTHDEATH_DRIFT_REGIME = "varying_dx_birthdeath_with_drift"
 NODRIFT_VARYING_DX_BIRTHDEATH_DRIFT_TAG = "varying_dx_birthdeath_with_drift"
 NODRIFT_VARYING_DX_BIRTHDEATH_DRIFT_NOMINAL_SCALE = 1.0
+NODRIFT_VARYING_DX_STATIONARY_REGIME = "varying_dx_birthdeath_stationary"
+NODRIFT_VARYING_DX_STATIONARY_TAG = "varying_dx_birthdeath_stationary"
+NODRIFT_VARYING_DX_STATIONARY_NOMINAL_SCALE = 1.0
+NODRIFT_VARYING_DX_STATIONARY_STATIONARY_FRACTION = 0.25
 DRIFT_PARAMS_BIRTHDEATH = {
     "global_drift_scale_xyz": (2.8, 2.2, 1.1),
     "local_drift_scale_um": 0.0,
@@ -152,6 +157,7 @@ RUN_HCV_NIS_DX_BLIND_SWEEP = True
 RUN_HCV_NIS_DX_BLIND_SWEEP_VARYING_DX = True
 RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH = True
 RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_DRIFT = True
+RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_STATIONARY = True
 RUN_DRIFT_STRATEGY_COMPARISON = False
 OVERWRITE_DATASETS = True
 
@@ -279,6 +285,7 @@ HCV_NIS_DX_BLIND_NN_SCALE_FACTORS = [0.2, 0.3, 0.4]
 HCV_MAX_FILES_VARYING_DX = 1 # defines how many files to generate and run per dx_scale in the varying dx sweep
 HCV_MAX_FILES_BIRTHDEATH = 1
 HCV_MAX_FILES_BIRTHDEATH_DRIFT = 1
+HCV_MAX_FILES_BIRTHDEATH_STATIONARY = 1
 HCV_NIS_METHODS = [
     {
         "name": "hungarian_gating_cv",
@@ -1382,6 +1389,32 @@ def _drift_stats_for_file(data_root: Path, regime: str, file_stem: str) -> dict[
     return out
 
 
+def _stationary_stats_from_dx_schedule(dx_schedule_path: Path) -> dict[str, float]:
+    """Derive stationary-track stats from dx schedule (all dx==0 across time)."""
+    out = {
+        "stationary_fraction_actual": float("nan"),
+        "stationary_tracks_count": float("nan"),
+    }
+    if not dx_schedule_path.exists():
+        return out
+    try:
+        dx_tab = pd.read_csv(dx_schedule_path)
+    except Exception:
+        return out
+    if not {"TrackID", "dx_scale_um"}.issubset(dx_tab.columns):
+        return out
+    g = (
+        dx_tab.groupby("TrackID", as_index=False)["dx_scale_um"]
+        .agg(dx_abs_max=lambda x: float(np.max(np.abs(pd.to_numeric(x, errors="coerce").fillna(0.0).to_numpy(float)))))
+    )
+    if g.shape[0] == 0:
+        return out
+    sta = g["dx_abs_max"].to_numpy(float) <= 1e-12
+    out["stationary_tracks_count"] = float(np.sum(sta))
+    out["stationary_fraction_actual"] = float(np.mean(sta))
+    return out
+
+
 def _frames_from_gt_tracks(gt_tracks: pd.DataFrame) -> list[PointCloudFrame]:
     frames: list[PointCloudFrame] = []
     for t, grp in gt_tracks.groupby("Time"):
@@ -1570,6 +1603,56 @@ if RUN_GENERATE_DATASETS:
         unblinding_path=varying_bd_root / "unblinding.csv",
         overwrite=bool(OVERWRITE_DATASETS),
     )
+
+    # Generate varying-dx + birth/death + stationary subset (no drift).
+    varying_sta_root = DATA_ROOT_VARYING_DX_STATIONARY / NODRIFT_VARYING_DX_STATIONARY_TAG
+    synthetic_generate_blind_pair(
+        synthetic_dir=varying_sta_root,
+        seed=BASE_SEED,
+        n_files=N_FILES,
+        n_tracks=N_TRACKS,
+        n_times=N_TIMES,
+        regimes=[NODRIFT_VARYING_DX_STATIONARY_REGIME],
+        drift_params={},
+        motion_params={
+            "stationary_fraction": float(NODRIFT_VARYING_DX_STATIONARY_STATIONARY_FRACTION),
+            "migrating_fraction": 0.75,
+            "temporal_smoothness": 0.9,
+            "dx_scale_um": float(NODRIFT_VARYING_DX_STATIONARY_NOMINAL_SCALE),
+            "dx_distribution": "gaussian",
+            "dx_track_smoothness": 0.7,
+            "dx_mode": "varying_per_track_time",
+            "dx_min_um": 0.2,
+            "dx_max_um": 4.0,
+            "dx_varying_distribution": "uniform",
+            "birthdeath_enable": True,
+            "p_birth_late": 0.35,
+            "p_death_early": 0.35,
+            "min_life_frames": 5,
+            "p_birth_random": 0.5,
+            "birth_near_dist_min_um": 0.2,
+            "birth_near_dist_max_um": 4.0,
+            "birth_near_pick": "uniform_over_active_tracks",
+            "stationary_mode": "hard_zero",
+            "stationary_apply_to": "all_tracks",
+        },
+        out_blind_dir=varying_sta_root / "blind",
+        out_gt_dir=varying_sta_root / "gt",
+        unblinding_path=varying_sta_root / "unblinding.csv",
+        overwrite=bool(OVERWRITE_DATASETS),
+    )
+    # Unit sanity printout for achieved stationary fraction.
+    gt_sta_root = varying_sta_root / "gt" / NODRIFT_VARYING_DX_STATIONARY_REGIME / "_groundtruth"
+    for p in sorted(gt_sta_root.glob("*_dx_schedule.csv")):
+        st = _stationary_stats_from_dx_schedule(p)
+        print(
+            "[stationary-sanity]",
+            p.name,
+            "stationary_tracks_count=",
+            int(st["stationary_tracks_count"]) if np.isfinite(st["stationary_tracks_count"]) else "nan",
+            "stationary_fraction_actual=",
+            round(float(st["stationary_fraction_actual"]), 4) if np.isfinite(st["stationary_fraction_actual"]) else "nan",
+        )
 
     # Generate heteroscedastic varying-dx + birth/death + global-drift dataset.
     varying_bd_drift_root = DATA_ROOT_VARYING_DX_BIRTHDEATH_DRIFT / NODRIFT_VARYING_DX_BIRTHDEATH_DRIFT_TAG
@@ -2992,6 +3075,210 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_DRIFT:
                     "extra_aggregated_columns: active_tracks_mean,birth_events_total,death_events_total,birth_near_fraction,birth_near_dist_mean,drift_trans_median,drift_trans_q90,drift_rot_median_deg,drift_rot_q90_deg",
                     "dx_schedule_csv_pattern: <file_stem>_dx_schedule.csv (copied into each run dir when present)",
                     "drift_schedule_csv_pattern: <file_stem>_drift_schedule.csv (copied into each run dir when present)",
+                    "nis_diag_csv_pattern: <file_stem>_<method>_nis_gate_diagnostics.csv",
+                    "plots:",
+                    *[f"- {p}" for p in generated],
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+# %% HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_STATIONARY
+"""Run NIS dx-blind sweep on varying-dx + birth/death + stationary subset dataset.
+
+What is tested:
+- Same method family as HCV_NIS_DX_BLIND sweeps, with explicit stationary tracks
+  (dx=0) mixed with varying-dx moving tracks and births/deaths.
+"""
+
+if RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_STATIONARY:
+    out_root = _results_root("hungarian_cv_variants_sweep_nis_dx_blind_birthdeath_stationary")
+    out_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, float | str]] = []
+
+    data_root = DATA_ROOT_VARYING_DX_STATIONARY / NODRIFT_VARYING_DX_STATIONARY_TAG
+    blind_reg_dir = data_root / "blind" / NODRIFT_VARYING_DX_STATIONARY_REGIME
+    gt_reg_dir = data_root / "gt" / NODRIFT_VARYING_DX_STATIONARY_REGIME
+    map_path = data_root / "unblinding.csv"
+    if not map_path.exists() or not blind_reg_dir.exists() or not gt_reg_dir.exists():
+        print(f"[WARN] Missing varying-dx birthdeath+stationary dataset, skip: {data_root}")
+    else:
+        mapping_all = pd.read_csv(map_path)
+        blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))[: int(max(1, HCV_MAX_FILES_BIRTHDEATH_STATIONARY))]
+
+        for blind_file in blind_files:
+            file_stem = blind_file.name.replace("_blind.csv", "")
+            map_sub = mapping_all[
+                (mapping_all["Regime"].astype(str) == NODRIFT_VARYING_DX_STATIONARY_REGIME)
+                & (mapping_all["File"].astype(str) == file_stem)
+            ].copy()
+            if map_sub.empty:
+                continue
+
+            dx_schedule_path = data_root / "gt" / NODRIFT_VARYING_DX_STATIONARY_REGIME / "_groundtruth" / f"{file_stem}_dx_schedule.csv"
+            dx_stats: dict[str, float] = {}
+            if dx_schedule_path.exists():
+                try:
+                    dx_tab = pd.read_csv(dx_schedule_path)
+                    dx_vals = pd.to_numeric(dx_tab.get("dx_scale_um", np.nan), errors="coerce").dropna().to_numpy(float)
+                    if dx_vals.size:
+                        dx_stats = {
+                            "dx_actual_q10": float(np.quantile(dx_vals, 0.10)),
+                            "dx_actual_q50": float(np.quantile(dx_vals, 0.50)),
+                            "dx_actual_q90": float(np.quantile(dx_vals, 0.90)),
+                            "dx_actual_mean": float(np.mean(dx_vals)),
+                            "dx_actual_std": float(np.std(dx_vals)),
+                        }
+                except Exception as exc:
+                    print(f"[WARN] Could not read dx schedule stats: {dx_schedule_path} ({exc})")
+
+            bd_stats = _birthdeath_stats_for_file(data_root, NODRIFT_VARYING_DX_STATIONARY_REGIME, file_stem)
+            stationary_stats = _stationary_stats_from_dx_schedule(dx_schedule_path)
+
+            blind_frames = load_blind_frames(blind_file)
+            gt_tracks = _gt_tracks_with_pointindex(data_root / "gt", NODRIFT_VARYING_DX_STATIONARY_REGIME, file_stem, mapping_all)
+
+            for m in HCV_NIS_METHODS:
+                method_name = str(m.get("name", ""))
+                nn_scales = HCV_NIS_DX_BLIND_NN_SCALE_FACTORS if "_nis_" in method_name else [0.3]
+                for nn_scale in nn_scales:
+                    for iters in HCV_REFINE_ITERS:
+                        gating_override = {
+                            "max_dist": float(max(0.5, float(HCV_NIS_FIXED_MAX_DIST_FACTOR) * float(NODRIFT_VARYING_DX_STATIONARY_NOMINAL_SCALE))),
+                            "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                        }
+                        params_override = {
+                            "motion_refine_iters": int(iters),
+                            "max_dist_factor": float(HCV_NIS_FIXED_MAX_DIST_FACTOR),
+                            "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                            "dx_scale": float(NODRIFT_VARYING_DX_STATIONARY_NOMINAL_SCALE),
+                            "sigma_init_mode": "nn_based" if "_nis_" in method_name else "dx",
+                            "nn_scale_factor": float(nn_scale),
+                        }
+                        assoc = _dispatch_association_method(
+                            blind_frames,
+                            m,
+                            dx_scale=float(NODRIFT_VARYING_DX_STATIONARY_NOMINAL_SCALE),
+                            gating_override=gating_override,
+                            params_override=params_override,
+                        )
+                        cfg_id = (
+                            f"md{_fmt_token(float(HCV_NIS_FIXED_MAX_DIST_FACTOR))}"
+                            f"_kp{int(HCV_NIS_KEEP_PERCENTILE)}"
+                            f"_it{int(iters)}"
+                            f"_nn{_fmt_token(float(nn_scale))}"
+                        )
+                        run_dir = out_root / "dx_birthdeath_stationary" / file_stem / method_name / cfg_id
+                        row = _evaluate_and_save_run(
+                            out_dir=run_dir,
+                            assoc_result=assoc,
+                            gt_tracks_df=gt_tracks,
+                            mapping_df=map_sub,
+                            blind_frames=blind_frames,
+                            regime=NODRIFT_VARYING_DX_STATIONARY_REGIME,
+                            file_stem=file_stem,
+                            method_name=method_name,
+                            extras={
+                                "dx_scale": float(NODRIFT_VARYING_DX_STATIONARY_NOMINAL_SCALE),
+                                "dx_regime": str(NODRIFT_VARYING_DX_STATIONARY_TAG),
+                                "config_id": cfg_id,
+                                "max_dist_factor": float(HCV_NIS_FIXED_MAX_DIST_FACTOR),
+                                "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                                "motion_refine_iters": int(iters),
+                                "nn_scale_factor": float(nn_scale),
+                                "sigma_init_mode": "nn_based" if "_nis_" in method_name else "dx",
+                                **dx_stats,
+                                **bd_stats,
+                                **stationary_stats,
+                            },
+                        )
+                        if dx_schedule_path.exists():
+                            try:
+                                shutil.copy2(dx_schedule_path, run_dir / dx_schedule_path.name)
+                            except Exception as exc:
+                                print(f"[WARN] Could not copy dx schedule CSV to run dir: {exc}")
+                        rows.append(row)
+
+    if rows:
+        agg = pd.DataFrame(rows)
+        agg_path = out_root / "aggregated_hcv_nis_dx_blind_birthdeath_stationary.csv"
+        agg.to_csv(agg_path, index=False)
+
+        metric_cols = [
+            c
+            for c in [
+                "link_f1_mean",
+                "fragmentation_rate",
+                "id_switches_mean_per_track",
+                "rms_mean",
+                "unmatched_rate_mean",
+            ]
+            if c in agg.columns
+        ]
+        if metric_cols:
+            long = agg.melt(
+                id_vars=[
+                    "method",
+                    "dx_scale",
+                    "dx_regime",
+                    "max_dist_factor",
+                    "keep_percentile",
+                    "motion_refine_iters",
+                    "config_id",
+                    "nn_scale_factor",
+                    "sigma_init_mode",
+                ],
+                value_vars=metric_cols,
+                var_name="metric",
+                value_name="value",
+            )
+            stats = (
+                long.groupby(
+                    [
+                        "method",
+                        "dx_scale",
+                        "dx_regime",
+                        "max_dist_factor",
+                        "keep_percentile",
+                        "motion_refine_iters",
+                        "nn_scale_factor",
+                        "sigma_init_mode",
+                        "metric",
+                    ],
+                    as_index=False,
+                )["value"]
+                .agg(mean="mean", std="std", n="count")
+                .sort_values(["metric", "method", "dx_regime", "nn_scale_factor", "motion_refine_iters"])
+                .reset_index(drop=True)
+            )
+            stats_path = out_root / "aggregated_hcv_nis_dx_blind_birthdeath_stationary_stats.csv"
+            stats.to_csv(stats_path, index=False)
+        else:
+            stats_path = out_root / "aggregated_hcv_nis_dx_blind_birthdeath_stationary_stats.csv"
+            pd.DataFrame().to_csv(stats_path, index=False)
+
+        generated = _plot_hcv_variants_overview(out_root, agg)
+        generated.extend(_plot_nis_gate_diagnostics(out_root, agg))
+        generated = sorted(set(generated))
+
+        (out_root / "README.txt").write_text(
+            "\n".join(
+                [
+                    f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                    f"dataset_root: {data_root}",
+                    f"regime: {NODRIFT_VARYING_DX_STATIONARY_REGIME}",
+                    f"dx_regime_tag: {NODRIFT_VARYING_DX_STATIONARY_TAG}",
+                    f"dx_nominal_scale_for_dispatch: {NODRIFT_VARYING_DX_STATIONARY_NOMINAL_SCALE}",
+                    f"max_dist_factor_fixed: {HCV_NIS_FIXED_MAX_DIST_FACTOR}",
+                    f"keep_percentile_fixed: {HCV_NIS_KEEP_PERCENTILE}",
+                    f"motion_refine_iters: {HCV_REFINE_ITERS}",
+                    f"nn_scale_factors: {HCV_NIS_DX_BLIND_NN_SCALE_FACTORS}",
+                    f"methods: {[m['name'] for m in HCV_NIS_METHODS]}",
+                    f"aggregated_csv: {agg_path.name}",
+                    f"aggregated_stats_csv: {stats_path.name}",
+                    "extra_aggregated_columns: active_tracks_mean,birth_events_total,death_events_total,birth_near_fraction,birth_near_dist_mean,stationary_fraction_actual,stationary_tracks_count",
+                    "dx_schedule_csv_pattern: <file_stem>_dx_schedule.csv (copied into each run dir when present)",
                     "nis_diag_csv_pattern: <file_stem>_<method>_nis_gate_diagnostics.csv",
                     "plots:",
                     *[f"- {p}" for p in generated],

@@ -124,6 +124,8 @@ def generate_controlled_drift_dataset(
     birth_near_dist_min_um: float = 0.2,
     birth_near_dist_max_um: float = 4.0,
     birth_near_pick: str = "uniform_over_active_tracks",
+    stationary_mode: str = "hard_zero",
+    stationary_apply_to: str = "all_tracks",
     drift_rotation_enable: bool = True,
     drift_rotation_deg_scale: float = 2.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -189,7 +191,13 @@ def generate_controlled_drift_dataset(
     for ti in range(1, t_count):
         x_true[:, ti, :] = x_true[:, ti - 1, :] + vel + rw_step[:, ti, :]
 
-    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx", "nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_with_drift"}:
+    if mode in {
+        "nodrift_dx_sweep",
+        "nodrift_varying_dx",
+        "nodrift_dx_varying_birthdeath",
+        "varying_dx_birthdeath_stationary",
+        "varying_dx_birthdeath_with_drift",
+    }:
         # Association-only regimes: no imaging drift with controlled motion
         # amplitudes. "nodrift_varying_dx" uses heteroscedastic dx schedules.
         if mode == "nodrift_dx_sweep":
@@ -198,6 +206,8 @@ def generate_controlled_drift_dataset(
             rng_offset = 29013
         elif mode == "nodrift_dx_varying_birthdeath":
             rng_offset = 39013
+        elif mode == "varying_dx_birthdeath_stationary":
+            rng_offset = 49013
         else:
             rng_offset = 59013
         rng_dx = np.random.default_rng(int(seed) + int(rng_offset))
@@ -205,7 +215,7 @@ def generate_controlled_drift_dataset(
         x_true[:, 0, :] = p0
         a = float(np.clip(dx_track_smoothness, 0.0, 0.98))
 
-        if mode in {"nodrift_varying_dx", "nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_with_drift"}:
+        if mode in {"nodrift_varying_dx", "nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_stationary", "varying_dx_birthdeath_with_drift"}:
             dx_mode_l = str(dx_mode).lower()
             dx_lo = float(min(dx_min_um, dx_max_um))
             dx_hi = float(max(dx_min_um, dx_max_um))
@@ -318,7 +328,9 @@ def generate_controlled_drift_dataset(
     parent_track_id = np.full((n,), np.nan, dtype=float)
     init_dist_to_parent = np.full((n,), np.nan, dtype=float)
 
-    birthdeath_active = bool(birthdeath_enable) or (mode in {"nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_with_drift"})
+    birthdeath_active = bool(birthdeath_enable) or (
+        mode in {"nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_stationary", "varying_dx_birthdeath_with_drift"}
+    )
     if birthdeath_active:
         rng_bd = np.random.default_rng(int(seed) + 49013)
         min_life = int(max(2, min(int(min_life_frames), t_count)))
@@ -388,6 +400,28 @@ def generate_controlled_drift_dataset(
             # Keep pre-birth positions out-of-range-safe; these rows will be dropped.
             for ti in range(0, tb):
                 x_true[i, ti, :] = init_pos
+
+    # Optional hard-stationary subset for varying-dx birthdeath regime.
+    is_stationary_track = np.zeros((n,), dtype=bool)
+    if mode == "varying_dx_birthdeath_stationary":
+        rng_sta = np.random.default_rng(int(seed) + 79013)
+        frac = float(np.clip(stationary_fraction, 0.0, 1.0))
+        apply_to = str(stationary_apply_to).lower()
+        if apply_to == "initial_tracks_only":
+            eligible = np.flatnonzero(t_birth_idx == 0)
+        else:
+            eligible = np.arange(n, dtype=int)
+        if eligible.size > 0 and frac > 0.0:
+            is_stationary_track[eligible] = rng_sta.random(eligible.size) < frac
+        if str(stationary_mode).lower() == "hard_zero":
+            for i in np.flatnonzero(is_stationary_track):
+                tb = int(t_birth_idx[i])
+                td = int(t_death_idx[i])
+                anchor = x_true[i, tb, :].copy()
+                x_true[i, tb : td + 1, :] = anchor[None, :]
+                dx_schedule[i, tb : td + 1] = 0.0
+                dx_source_all[i, tb : td + 1] = "stationary_hard_zero"
+            cell_type[is_stationary_track] = "stationary"
 
     x_true[:, :, 0] = np.clip(x_true[:, :, 0], x_rng[0], x_rng[1])
     x_true[:, :, 1] = np.clip(x_true[:, :, 1], y_rng[0], y_rng[1])
@@ -636,7 +670,7 @@ def generate_controlled_drift_dataset(
             drift_tz[ti] = float(trans[ti, 2])
             drift_rot_deg[ti] = float(rot_deg[ti])
 
-    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx", "nodrift_dx_varying_birthdeath"}:
+    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx", "nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_stationary"}:
         drift_global_all = np.zeros_like(x_true)
         drift_local_all = np.zeros_like(x_true)
         drift_tx[:] = 0.0
@@ -782,6 +816,8 @@ def generate_synthetic_imaris_folder(
     birth_near_dist_min_um: float = 0.2,
     birth_near_dist_max_um: float = 4.0,
     birth_near_pick: str = "uniform_over_active_tracks",
+    stationary_mode: str = "hard_zero",
+    stationary_apply_to: str = "all_tracks",
     drift_rotation_enable: bool = True,
     drift_rotation_deg_scale: float = 2.0,
 ) -> dict[str, Any]:
@@ -827,6 +863,8 @@ def generate_synthetic_imaris_folder(
             birth_near_dist_min_um=birth_near_dist_min_um,
             birth_near_dist_max_um=birth_near_dist_max_um,
             birth_near_pick=birth_near_pick,
+            stationary_mode=stationary_mode,
+            stationary_apply_to=stationary_apply_to,
             drift_rotation_enable=drift_rotation_enable,
             drift_rotation_deg_scale=drift_rotation_deg_scale,
         )
@@ -970,6 +1008,8 @@ def generate_synthetic_imaris_folder(
             "birth_near_dist_min_um": float(birth_near_dist_min_um),
             "birth_near_dist_max_um": float(birth_near_dist_max_um),
             "birth_near_pick": str(birth_near_pick),
+            "stationary_mode": str(stationary_mode),
+            "stationary_apply_to": str(stationary_apply_to),
             "drift_rotation_enable": bool(drift_rotation_enable),
             "drift_rotation_deg_scale": float(drift_rotation_deg_scale),
         }

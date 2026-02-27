@@ -307,8 +307,6 @@ if RUN_SINGLE_FILE:
         use_stationary_subset=False,
     )
     postprocess_outputs(df_single, file_path, out_prefix_single, corr_single)
-
-
 # %% HOW TO BATCH RUN MULTIPLE FILES
 
 RUN_BATCH = False
@@ -327,8 +325,6 @@ if RUN_BATCH:
             use_stationary_subset=False,
         )
         postprocess_outputs(df_batch, file_path, out_prefix_batch, corr_batch)
-
-
 # %% HOW TO GENERATE AND RUN SYNTHETIC DATA: DEFAULT SETTINGS
 RUN_SYNTHETIC = False
 if RUN_SYNTHETIC:
@@ -356,7 +352,6 @@ if RUN_SYNTHETIC:
             opts=OPTIONS,
             use_stationary_subset=False)
         postprocess_outputs(df_syn, file_path, out_prefix_syn, corr_syn)
-
 # %% HOW TO RUN SYNTHETIC PAPER BASELINE
 RUN_SYNTHETIC_PAPER_BASELINE_DEFAULTS = False
 if RUN_SYNTHETIC_PAPER_BASELINE_DEFAULTS:
@@ -392,5 +387,4 @@ if RUN_SYNTHETIC_PAPER_BASELINE_DEFAULTS:
             use_stationary_subset=False,
         )
         postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
 # %% END

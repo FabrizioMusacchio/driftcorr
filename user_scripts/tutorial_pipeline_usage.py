@@ -271,7 +271,6 @@ def run_methods_for_dataframe(
 
     return corr_by_method
 
-
 def postprocess_outputs(
     df_orig: pd.DataFrame,
     imaris_file: Path,
@@ -289,7 +288,6 @@ def postprocess_outputs(
 
     if gt is not None:
         save_groundtruth_evaluation_outputs(out_prefix, gt, corr_by_method, drift_field_groundtruth=drift_gt)
-
 
 # %% HOW TO RUN A SINGLE FILE
 

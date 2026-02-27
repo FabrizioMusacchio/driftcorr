@@ -196,6 +196,7 @@ def generate_controlled_drift_dataset(
         "nodrift_varying_dx",
         "nodrift_dx_varying_birthdeath",
         "varying_dx_birthdeath_stationary",
+        "varying_dx_birthdeath_stationary_density",
         "varying_dx_birthdeath_with_drift",
     }:
         # Association-only regimes: no imaging drift with controlled motion
@@ -206,7 +207,7 @@ def generate_controlled_drift_dataset(
             rng_offset = 29013
         elif mode == "nodrift_dx_varying_birthdeath":
             rng_offset = 39013
-        elif mode == "varying_dx_birthdeath_stationary":
+        elif mode in {"varying_dx_birthdeath_stationary", "varying_dx_birthdeath_stationary_density"}:
             rng_offset = 49013
         else:
             rng_offset = 59013
@@ -215,7 +216,13 @@ def generate_controlled_drift_dataset(
         x_true[:, 0, :] = p0
         a = float(np.clip(dx_track_smoothness, 0.0, 0.98))
 
-        if mode in {"nodrift_varying_dx", "nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_stationary", "varying_dx_birthdeath_with_drift"}:
+        if mode in {
+            "nodrift_varying_dx",
+            "nodrift_dx_varying_birthdeath",
+            "varying_dx_birthdeath_stationary",
+            "varying_dx_birthdeath_stationary_density",
+            "varying_dx_birthdeath_with_drift",
+        }:
             dx_mode_l = str(dx_mode).lower()
             dx_lo = float(min(dx_min_um, dx_max_um))
             dx_hi = float(max(dx_min_um, dx_max_um))
@@ -329,7 +336,12 @@ def generate_controlled_drift_dataset(
     init_dist_to_parent = np.full((n,), np.nan, dtype=float)
 
     birthdeath_active = bool(birthdeath_enable) or (
-        mode in {"nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_stationary", "varying_dx_birthdeath_with_drift"}
+        mode in {
+            "nodrift_dx_varying_birthdeath",
+            "varying_dx_birthdeath_stationary",
+            "varying_dx_birthdeath_stationary_density",
+            "varying_dx_birthdeath_with_drift",
+        }
     )
     if birthdeath_active:
         rng_bd = np.random.default_rng(int(seed) + 49013)
@@ -403,7 +415,7 @@ def generate_controlled_drift_dataset(
 
     # Optional hard-stationary subset for varying-dx birthdeath regime.
     is_stationary_track = np.zeros((n,), dtype=bool)
-    if mode == "varying_dx_birthdeath_stationary":
+    if mode in {"varying_dx_birthdeath_stationary", "varying_dx_birthdeath_stationary_density"}:
         rng_sta = np.random.default_rng(int(seed) + 79013)
         frac = float(np.clip(stationary_fraction, 0.0, 1.0))
         apply_to = str(stationary_apply_to).lower()
@@ -670,7 +682,13 @@ def generate_controlled_drift_dataset(
             drift_tz[ti] = float(trans[ti, 2])
             drift_rot_deg[ti] = float(rot_deg[ti])
 
-    if mode in {"nodrift_dx_sweep", "nodrift_varying_dx", "nodrift_dx_varying_birthdeath", "varying_dx_birthdeath_stationary"}:
+    if mode in {
+        "nodrift_dx_sweep",
+        "nodrift_varying_dx",
+        "nodrift_dx_varying_birthdeath",
+        "varying_dx_birthdeath_stationary",
+        "varying_dx_birthdeath_stationary_density",
+    }:
         drift_global_all = np.zeros_like(x_true)
         drift_local_all = np.zeros_like(x_true)
         drift_tx[:] = 0.0
@@ -820,6 +838,7 @@ def generate_synthetic_imaris_folder(
     stationary_apply_to: str = "all_tracks",
     drift_rotation_enable: bool = True,
     drift_rotation_deg_scale: float = 2.0,
+    bounds_xyz: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] = ((80.0, 620.0), (80.0, 620.0), (20.0, 320.0)),
 ) -> dict[str, Any]:
     """Create a synthetic IMARIS folder plus ground-truth sidecar files."""
     out_dir = Path(out_dir)
@@ -839,6 +858,7 @@ def generate_synthetic_imaris_folder(
             stationary_fraction=stationary_fraction,
             migrating_fraction=migrating_fraction,
             seed=file_seed,
+            bounds_xyz=bounds_xyz,
             temporal_smoothness=temporal_smoothness,
             local_mode=local_mode,
             piecewise_regions=piecewise_regions,

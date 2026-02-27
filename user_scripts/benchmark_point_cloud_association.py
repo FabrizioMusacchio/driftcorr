@@ -120,6 +120,7 @@ DATA_ROOT_VARYING_DX = ASSOC_ROOT / "_blind_pairs_varying_dx"
 DATA_ROOT_VARYING_DX_BIRTHDEATH = ASSOC_ROOT / "_blind_pairs_varying_dx_birthdeath"
 DATA_ROOT_VARYING_DX_BIRTHDEATH_DRIFT = ASSOC_ROOT / "_blind_pairs_varying_dx_birthdeath_drift"
 DATA_ROOT_VARYING_DX_STATIONARY = ASSOC_ROOT / "_blind_pairs_varying_dx_stationary"
+DATA_ROOT_VARYING_DX_DENSITY = ASSOC_ROOT / "_blind_pairs_varying_dx_density"
 NODRIFT_VARYING_DX_REGIME = "nodrift_varying_dx"
 NODRIFT_VARYING_DX_TAG = "varying_dx_0p20_4p00"
 NODRIFT_VARYING_DX_NOMINAL_SCALE = 1.0
@@ -133,6 +134,11 @@ NODRIFT_VARYING_DX_STATIONARY_REGIME = "varying_dx_birthdeath_stationary"
 NODRIFT_VARYING_DX_STATIONARY_TAG = "varying_dx_birthdeath_stationary"
 NODRIFT_VARYING_DX_STATIONARY_NOMINAL_SCALE = 1.0
 NODRIFT_VARYING_DX_STATIONARY_STATIONARY_FRACTION = 0.25
+NODRIFT_VARYING_DX_DENSITY_REGIME = "varying_dx_birthdeath_stationary_density"
+NODRIFT_VARYING_DX_DENSITY_TAG = "varying_dx_birthdeath_stationary_density"
+DENSITY_INITIAL_TRACKS = 80
+DENSITY_SCALES = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 15.0, 20.0]
+VOLUME_SIZE = (700.0, 700.0, 350.0)
 DRIFT_PARAMS_BIRTHDEATH = {
     "global_drift_scale_xyz": (2.8, 2.2, 1.1),
     "local_drift_scale_um": 0.0,
@@ -158,6 +164,7 @@ RUN_HCV_NIS_DX_BLIND_SWEEP_VARYING_DX = True
 RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH = True
 RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_DRIFT = True
 RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_STATIONARY = True
+RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY = True
 RUN_DRIFT_STRATEGY_COMPARISON = False
 OVERWRITE_DATASETS = True
 
@@ -286,6 +293,7 @@ HCV_MAX_FILES_VARYING_DX = 1 # defines how many files to generate and run per dx
 HCV_MAX_FILES_BIRTHDEATH = 1
 HCV_MAX_FILES_BIRTHDEATH_DRIFT = 1
 HCV_MAX_FILES_BIRTHDEATH_STATIONARY = 1
+HCV_MAX_FILES_DENSITY = 1
 HCV_NIS_METHODS = [
     {
         "name": "hungarian_gating_cv",
@@ -1184,8 +1192,17 @@ def _plot_nis_gate_diagnostics(out_root: Path, agg: pd.DataFrame) -> list[str]:
             sub_m = sub_m.sort_values(["link_f1_mean", "rms_mean"], ascending=[False, True])
             best = sub_m.iloc[0]
             cfg_id = str(best.get("config_id", ""))
-            csv_path = out_root / f"dx_{_fmt_token(float(dx))}" / str(file_stem) / str(method) / cfg_id / f"{file_stem}_{method}_nis_gate_diagnostics.csv"
-            if not csv_path.exists():
+            base_candidates = [
+                out_root / f"dx_{_fmt_token(float(dx))}",
+                out_root / f"density_{_fmt_token(float(dx))}",
+            ]
+            csv_path = None
+            for b in base_candidates:
+                cp = b / str(file_stem) / str(method) / cfg_id / f"{file_stem}_{method}_nis_gate_diagnostics.csv"
+                if cp.exists():
+                    csv_path = cp
+                    break
+            if csv_path is None:
                 continue
             tab = pd.read_csv(csv_path)
             if tab.empty or "Time" not in tab.columns or "r_eq_median" not in tab.columns:
@@ -1415,6 +1432,154 @@ def _stationary_stats_from_dx_schedule(dx_schedule_path: Path) -> dict[str, floa
     return out
 
 
+def _write_density_stats_for_file(
+    data_root: Path,
+    regime: str,
+    file_stem: str,
+    volume_size: tuple[float, float, float],
+) -> dict[str, float]:
+    """Compute and persist density diagnostics for one synthetic file."""
+    out = {
+        "active_tracks_mean": float("nan"),
+        "volume": float(volume_size[0] * volume_size[1] * volume_size[2]),
+        "density_mean": float("nan"),
+        "mean_nn_distance": float("nan"),
+    }
+    gt_root = data_root / "gt" / str(regime) / "_groundtruth"
+    gt_path = gt_root / f"{file_stem}_groundtruth.csv"
+    blind_path = data_root / "blind" / str(regime) / f"{file_stem}_blind.csv"
+    if not gt_path.exists():
+        return out
+    gt = pd.read_csv(gt_path)
+    if gt.empty or "Time" not in gt.columns or "TrackID" not in gt.columns:
+        return out
+    gt["Time"] = pd.to_numeric(gt["Time"], errors="coerce")
+    gt = gt.dropna(subset=["Time", "TrackID"])
+    if gt.empty:
+        return out
+    active = gt.groupby("Time", as_index=False)["TrackID"].nunique().rename(columns={"TrackID": "active_tracks"})
+    if not active.empty:
+        out["active_tracks_mean"] = float(np.mean(pd.to_numeric(active["active_tracks"], errors="coerce").dropna().to_numpy(float)))
+        if out["volume"] > 0.0 and np.isfinite(out["active_tracks_mean"]):
+            out["density_mean"] = float(out["active_tracks_mean"] / out["volume"])
+
+    if blind_path.exists():
+        try:
+            blind_frames = load_blind_frames(blind_path)
+            nn_df = compute_nn_distance(blind_frames)
+            nn_vals = pd.to_numeric(nn_df.get("nn_mean", np.nan), errors="coerce").dropna().to_numpy(float)
+            if nn_vals.size == 0:
+                nn_vals = pd.to_numeric(nn_df.get("nn_median", np.nan), errors="coerce").dropna().to_numpy(float)
+            if nn_vals.size:
+                out["mean_nn_distance"] = float(np.nanmedian(nn_vals))
+        except Exception:
+            pass
+
+    pd.DataFrame([{"File": str(file_stem), **out}]).to_csv(gt_root / f"{file_stem}_density_stats.csv", index=False)
+    return out
+
+
+def _density_stats_for_file(data_root: Path, regime: str, file_stem: str) -> dict[str, float]:
+    """Load density diagnostics for one synthetic file."""
+    out = {
+        "active_tracks_mean": float("nan"),
+        "volume": float("nan"),
+        "density_mean": float("nan"),
+        "mean_nn_distance": float("nan"),
+    }
+    p = data_root / "gt" / str(regime) / "_groundtruth" / f"{file_stem}_density_stats.csv"
+    if not p.exists():
+        return out
+    try:
+        tab = pd.read_csv(p)
+    except Exception:
+        return out
+    if tab.empty:
+        return out
+    row = tab.iloc[0]
+    for k in out.keys():
+        out[k] = float(pd.to_numeric(pd.Series([row.get(k, np.nan)]), errors="coerce").iloc[0])
+    return out
+
+
+def _plot_density_sweep_summary(out_root: Path, agg: pd.DataFrame) -> list[str]:
+    """Create density-dependent performance plots."""
+    generated: list[str] = []
+    if agg.empty or "density_scale" not in agg.columns or "method" not in agg.columns:
+        return generated
+
+    d = agg.copy()
+    d["density_scale"] = pd.to_numeric(d["density_scale"], errors="coerce")
+    d = d.dropna(subset=["density_scale", "method"])
+    if d.empty:
+        return generated
+
+    metric_specs = [
+        ("link_f1_mean", True),
+        ("id_switches_mean_per_track", False),
+        ("fragmentation_rate", False),
+    ]
+    for metric, higher_is_better in metric_specs:
+        if metric not in d.columns:
+            continue
+        tmp = d.copy()
+        tmp[metric] = pd.to_numeric(tmp[metric], errors="coerce")
+        tmp = tmp.dropna(subset=[metric])
+        if tmp.empty:
+            continue
+        tmp = tmp.sort_values(
+            ["method", "density_scale", metric],
+            ascending=[True, True, not higher_is_better],
+        )
+        best = tmp.groupby(["method", "density_scale"], as_index=False).first()
+        fig, ax = plt.subplots(figsize=(8.2, 4.8))
+        for method in sorted(best["method"].astype(str).unique().tolist()):
+            sm = best[best["method"].astype(str) == str(method)].sort_values("density_scale")
+            ax.plot(sm["density_scale"].to_numpy(float), sm[metric].to_numpy(float), marker="o", label=method)
+        ax.set_xlabel("density_scale")
+        ax.set_ylabel(metric)
+        ax.set_title(f"Best-by-config {metric} vs density")
+        if metric == "link_f1_mean":
+            ax.set_ylim(0.0, 1.0)
+        else:
+            ax.set_ylim(bottom=0.0)
+        ax.legend(fontsize=8)
+        fig.tight_layout()
+        p = out_root / f"plot_density_{metric}_vs_density_scale.png"
+        fig.savefig(p, dpi=300)
+        plt.close(fig)
+        generated.append(p.name)
+
+    if "link_f1_mean" in d.columns and "mean_nn_distance" in d.columns:
+        rr = d.copy()
+        rr["link_f1_mean"] = pd.to_numeric(rr["link_f1_mean"], errors="coerce")
+        rr["mean_nn_distance"] = pd.to_numeric(rr["mean_nn_distance"], errors="coerce")
+        rr["median_r_eq"] = pd.to_numeric(rr.get("median_r_eq", np.nan), errors="coerce")
+        rr["gate_radius_nominal"] = pd.to_numeric(rr.get("gate_radius_nominal", np.nan), errors="coerce")
+        rr["gate_radius"] = rr["median_r_eq"]
+        mask = rr["gate_radius"].isna() | (~np.isfinite(rr["gate_radius"]))
+        rr.loc[mask, "gate_radius"] = rr.loc[mask, "gate_radius_nominal"]
+        rr["gate_ratio"] = rr["gate_radius"] / rr["mean_nn_distance"].replace(0.0, np.nan)
+        rr = rr.dropna(subset=["link_f1_mean", "gate_ratio", "method"])
+        if not rr.empty:
+            fig, ax = plt.subplots(figsize=(8.2, 4.8))
+            for method in sorted(rr["method"].astype(str).unique().tolist()):
+                sm = rr[rr["method"].astype(str) == str(method)].copy()
+                sm = sm.sort_values("gate_ratio")
+                ax.plot(sm["gate_ratio"].to_numpy(float), sm["link_f1_mean"].to_numpy(float), marker="o", linestyle="-", alpha=0.7, label=method)
+            ax.set_xlabel("gate_radius / mean_nn_distance")
+            ax.set_ylabel("link_f1_mean")
+            ax.set_title("Association quality vs normalized gate radius")
+            ax.set_ylim(0.0, 1.0)
+            ax.legend(fontsize=8)
+            fig.tight_layout()
+            p = out_root / "plot_link_f1_vs_gate_ratio.png"
+            fig.savefig(p, dpi=300)
+            plt.close(fig)
+            generated.append(p.name)
+    return generated
+
+
 def _frames_from_gt_tracks(gt_tracks: pd.DataFrame) -> list[PointCloudFrame]:
     frames: list[PointCloudFrame] = []
     for t, grp in gt_tracks.groupby("Time"):
@@ -1454,7 +1619,8 @@ def _evaluate_and_save_run(
     mapping_table.to_csv(out_dir / f"{file_stem}_gt_inferred_mapping_{method_name}.csv", index=False)
     nis_rows = assoc_result.params.get("nis_gate_diagnostics_rows")
     if isinstance(nis_rows, list) and len(nis_rows) > 0:
-        pd.DataFrame(nis_rows).to_csv(out_dir / f"{file_stem}_{method_name}_nis_gate_diagnostics.csv", index=False)
+        nis_df = pd.DataFrame(nis_rows)
+        nis_df.to_csv(out_dir / f"{file_stem}_{method_name}_nis_gate_diagnostics.csv", index=False)
 
     gt_frames = _frames_from_gt_tracks(gt_tracks_df)
     inferred_frames = []
@@ -1494,6 +1660,10 @@ def _evaluate_and_save_run(
             else:
                 pvn = pd.to_numeric(pd.Series([pv]), errors="coerce").iloc[0]
                 row[pkey] = float(pvn) if np.isfinite(pvn) else np.nan
+    if isinstance(nis_rows, list) and len(nis_rows) > 0:
+        r_eq_vals = pd.to_numeric(pd.DataFrame(nis_rows).get("r_eq_median", np.nan), errors="coerce").dropna().to_numpy(float)
+        if r_eq_vals.size:
+            row["median_r_eq"] = float(np.nanmedian(r_eq_vals))
     for k, v in assoc_result.quality.items():
         if isinstance(v, (int, float, np.floating)):
             row[f"assoc_{k}"] = float(v)
@@ -1653,6 +1823,73 @@ if RUN_GENERATE_DATASETS:
             "stationary_fraction_actual=",
             round(float(st["stationary_fraction_actual"]), 4) if np.isfinite(st["stationary_fraction_actual"]) else "nan",
         )
+
+    # Generate density-sweep datasets: increasing track count in fixed volume.
+    for density_scale in DENSITY_SCALES:
+        ds_token = _fmt_token(float(density_scale))
+        tag = f"{NODRIFT_VARYING_DX_DENSITY_TAG}_ds{ds_token}"
+        varying_density_root = DATA_ROOT_VARYING_DX_DENSITY / tag
+        n_tracks_density = int(max(1, round(float(DENSITY_INITIAL_TRACKS) * float(density_scale))))
+        p_birth_base = 0.35
+        p_death_base = 0.35
+        synthetic_generate_blind_pair(
+            synthetic_dir=varying_density_root,
+            seed=BASE_SEED,
+            n_files=N_FILES,
+            n_tracks=n_tracks_density,
+            n_times=N_TIMES,
+            regimes=[NODRIFT_VARYING_DX_DENSITY_REGIME],
+            drift_params={},
+            motion_params={
+                "initial_tracks": int(DENSITY_INITIAL_TRACKS),
+                "density_scale": float(density_scale),
+                "scene_bounds_um": tuple(VOLUME_SIZE),
+                "stationary_fraction": float(NODRIFT_VARYING_DX_STATIONARY_STATIONARY_FRACTION),
+                "migrating_fraction": 0.75,
+                "temporal_smoothness": 0.9,
+                "dx_scale_um": 1.0,
+                "dx_distribution": "gaussian",
+                "dx_track_smoothness": 0.7,
+                "dx_mode": "varying_per_track_time",
+                "dx_min_um": 0.2,
+                "dx_max_um": 4.0,
+                "dx_varying_distribution": "uniform",
+                "birthdeath_enable": True,
+                "p_birth_late": p_birth_base,
+                "p_death_early": p_death_base,
+                "min_life_frames": 5,
+                "p_birth_random": 0.5,
+                "birth_near_dist_min_um": 0.2,
+                "birth_near_dist_max_um": 4.0,
+                "birth_near_pick": "uniform_over_active_tracks",
+                "stationary_mode": "hard_zero",
+                "stationary_apply_to": "all_tracks",
+            },
+            out_blind_dir=varying_density_root / "blind",
+            out_gt_dir=varying_density_root / "gt",
+            unblinding_path=varying_density_root / "unblinding.csv",
+            overwrite=bool(OVERWRITE_DATASETS),
+        )
+        blind_density_dir = varying_density_root / "blind" / NODRIFT_VARYING_DX_DENSITY_REGIME
+        for blind_file in sorted(blind_density_dir.glob("*_blind.csv")):
+            file_stem = blind_file.name.replace("_blind.csv", "")
+            ds = _write_density_stats_for_file(
+                varying_density_root,
+                NODRIFT_VARYING_DX_DENSITY_REGIME,
+                file_stem,
+                tuple(float(v) for v in VOLUME_SIZE),
+            )
+            print(
+                "[density-sanity]",
+                f"ds={float(density_scale):.2f}",
+                file_stem,
+                "active_tracks_mean=",
+                round(float(ds["active_tracks_mean"]), 3) if np.isfinite(ds["active_tracks_mean"]) else "nan",
+                "density_mean=",
+                f"{float(ds['density_mean']):.6g}" if np.isfinite(ds["density_mean"]) else "nan",
+                "mean_nn_distance=",
+                round(float(ds["mean_nn_distance"]), 3) if np.isfinite(ds["mean_nn_distance"]) else "nan",
+            )
 
     # Generate heteroscedastic varying-dx + birth/death + global-drift dataset.
     varying_bd_drift_root = DATA_ROOT_VARYING_DX_BIRTHDEATH_DRIFT / NODRIFT_VARYING_DX_BIRTHDEATH_DRIFT_TAG
@@ -3280,6 +3517,208 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_STATIONARY:
                     "extra_aggregated_columns: active_tracks_mean,birth_events_total,death_events_total,birth_near_fraction,birth_near_dist_mean,stationary_fraction_actual,stationary_tracks_count",
                     "dx_schedule_csv_pattern: <file_stem>_dx_schedule.csv (copied into each run dir when present)",
                     "nis_diag_csv_pattern: <file_stem>_<method>_nis_gate_diagnostics.csv",
+                    "plots:",
+                    *[f"- {p}" for p in generated],
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+# %% HCV_NIS_DX_BLIND_SWEEP_DENSITY
+"""Run NIS dx-blind sweep on density-scaled datasets.
+
+What is tested:
+- How association robustness changes as track density increases in fixed volume,
+  while retaining varying dx, births/deaths, and stationary subset.
+"""
+
+if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
+    out_root = _results_root("hungarian_cv_variants_sweep_nis_dx_blind_density")
+    out_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, float | str]] = []
+
+    for density_scale in DENSITY_SCALES:
+        ds_token = _fmt_token(float(density_scale))
+        data_root = DATA_ROOT_VARYING_DX_DENSITY / f"{NODRIFT_VARYING_DX_DENSITY_TAG}_ds{ds_token}"
+        blind_reg_dir = data_root / "blind" / NODRIFT_VARYING_DX_DENSITY_REGIME
+        gt_reg_dir = data_root / "gt" / NODRIFT_VARYING_DX_DENSITY_REGIME
+        map_path = data_root / "unblinding.csv"
+        if not map_path.exists() or not blind_reg_dir.exists() or not gt_reg_dir.exists():
+            print(f"[WARN] Missing density dataset {density_scale}: {data_root}")
+            continue
+
+        mapping_all = pd.read_csv(map_path)
+        blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))[: int(max(1, HCV_MAX_FILES_DENSITY))]
+
+        for blind_file in blind_files:
+            file_stem = blind_file.name.replace("_blind.csv", "")
+            map_sub = mapping_all[
+                (mapping_all["Regime"].astype(str) == NODRIFT_VARYING_DX_DENSITY_REGIME)
+                & (mapping_all["File"].astype(str) == file_stem)
+            ].copy()
+            if map_sub.empty:
+                continue
+
+            blind_frames = load_blind_frames(blind_file)
+            gt_tracks = _gt_tracks_with_pointindex(
+                data_root / "gt",
+                NODRIFT_VARYING_DX_DENSITY_REGIME,
+                file_stem,
+                mapping_all,
+            )
+            density_stats = _density_stats_for_file(data_root, NODRIFT_VARYING_DX_DENSITY_REGIME, file_stem)
+            dx_schedule_path = data_root / "gt" / NODRIFT_VARYING_DX_DENSITY_REGIME / "_groundtruth" / f"{file_stem}_dx_schedule.csv"
+
+            for m in HCV_NIS_METHODS:
+                method_name = str(m.get("name", ""))
+                nn_scales = HCV_NIS_DX_BLIND_NN_SCALE_FACTORS if "_nis_" in method_name else [0.3]
+                for nn_scale in nn_scales:
+                    for iters in HCV_REFINE_ITERS:
+                        gating_override = {
+                            "max_dist": float(max(0.5, float(HCV_NIS_FIXED_MAX_DIST_FACTOR) * 1.0)),
+                            "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                        }
+                        params_override = {
+                            "motion_refine_iters": int(iters),
+                            "max_dist_factor": float(HCV_NIS_FIXED_MAX_DIST_FACTOR),
+                            "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                            "dx_scale": 1.0,
+                            "sigma_init_mode": "nn_based" if "_nis_" in method_name else "dx",
+                            "nn_scale_factor": float(nn_scale),
+                        }
+                        assoc = _dispatch_association_method(
+                            blind_frames,
+                            m,
+                            dx_scale=1.0,
+                            gating_override=gating_override,
+                            params_override=params_override,
+                        )
+                        cfg_id = (
+                            f"md{_fmt_token(float(HCV_NIS_FIXED_MAX_DIST_FACTOR))}"
+                            f"_kp{int(HCV_NIS_KEEP_PERCENTILE)}"
+                            f"_it{int(iters)}"
+                            f"_nn{_fmt_token(float(nn_scale))}"
+                        )
+                        run_dir = out_root / f"density_{ds_token}" / file_stem / method_name / cfg_id
+                        row = _evaluate_and_save_run(
+                            out_dir=run_dir,
+                            assoc_result=assoc,
+                            gt_tracks_df=gt_tracks,
+                            mapping_df=map_sub,
+                            blind_frames=blind_frames,
+                            regime=NODRIFT_VARYING_DX_DENSITY_REGIME,
+                            file_stem=file_stem,
+                            method_name=method_name,
+                            extras={
+                                "density_scale": float(density_scale),
+                                "dx_scale": float(density_scale),
+                                "dx_regime": f"density_{ds_token}",
+                                "config_id": cfg_id,
+                                "max_dist_factor": float(HCV_NIS_FIXED_MAX_DIST_FACTOR),
+                                "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                                "motion_refine_iters": int(iters),
+                                "nn_scale_factor": float(nn_scale),
+                                "sigma_init_mode": "nn_based" if "_nis_" in method_name else "dx",
+                                "gate_radius_nominal": float(gating_override["max_dist"]),
+                                **density_stats,
+                            },
+                        )
+                        if dx_schedule_path.exists():
+                            try:
+                                shutil.copy2(dx_schedule_path, run_dir / dx_schedule_path.name)
+                            except Exception as exc:
+                                print(f"[WARN] Could not copy dx schedule CSV to run dir: {exc}")
+                        density_stats_path = data_root / "gt" / NODRIFT_VARYING_DX_DENSITY_REGIME / "_groundtruth" / f"{file_stem}_density_stats.csv"
+                        if density_stats_path.exists():
+                            try:
+                                shutil.copy2(density_stats_path, run_dir / density_stats_path.name)
+                            except Exception as exc:
+                                print(f"[WARN] Could not copy density stats CSV to run dir: {exc}")
+                        rows.append(row)
+
+    if rows:
+        agg = pd.DataFrame(rows)
+        agg_path = out_root / "aggregated_density.csv"
+        agg.to_csv(agg_path, index=False)
+
+        metric_cols = [
+            c
+            for c in [
+                "link_f1_mean",
+                "fragmentation_rate",
+                "id_switches_mean_per_track",
+                "rms_mean",
+                "unmatched_rate_mean",
+            ]
+            if c in agg.columns
+        ]
+        if metric_cols:
+            long = agg.melt(
+                id_vars=[
+                    "method",
+                    "density_scale",
+                    "dx_scale",
+                    "dx_regime",
+                    "max_dist_factor",
+                    "keep_percentile",
+                    "motion_refine_iters",
+                    "config_id",
+                    "nn_scale_factor",
+                    "sigma_init_mode",
+                ],
+                value_vars=metric_cols,
+                var_name="metric",
+                value_name="value",
+            )
+            stats = (
+                long.groupby(
+                    [
+                        "method",
+                        "density_scale",
+                        "dx_scale",
+                        "dx_regime",
+                        "max_dist_factor",
+                        "keep_percentile",
+                        "motion_refine_iters",
+                        "nn_scale_factor",
+                        "sigma_init_mode",
+                        "metric",
+                    ],
+                    as_index=False,
+                )["value"]
+                .agg(mean="mean", std="std", n="count")
+                .sort_values(["metric", "method", "density_scale", "nn_scale_factor", "motion_refine_iters"])
+                .reset_index(drop=True)
+            )
+            stats_path = out_root / "aggregated_density_stats.csv"
+            stats.to_csv(stats_path, index=False)
+        else:
+            stats_path = out_root / "aggregated_density_stats.csv"
+            pd.DataFrame().to_csv(stats_path, index=False)
+
+        generated = _plot_hcv_variants_overview(out_root, agg)
+        generated.extend(_plot_nis_gate_diagnostics(out_root, agg))
+        generated.extend(_plot_density_sweep_summary(out_root, agg))
+        generated = sorted(set(generated))
+
+        (out_root / "README.txt").write_text(
+            "\n".join(
+                [
+                    f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                    f"dataset_root: {DATA_ROOT_VARYING_DX_DENSITY}",
+                    f"regime: {NODRIFT_VARYING_DX_DENSITY_REGIME}",
+                    f"density_scales: {DENSITY_SCALES}",
+                    f"density_initial_tracks: {DENSITY_INITIAL_TRACKS}",
+                    f"volume_size_um: {VOLUME_SIZE}",
+                    f"max_dist_factor_fixed: {HCV_NIS_FIXED_MAX_DIST_FACTOR}",
+                    f"keep_percentile_fixed: {HCV_NIS_KEEP_PERCENTILE}",
+                    f"motion_refine_iters: {HCV_REFINE_ITERS}",
+                    f"nn_scale_factors: {HCV_NIS_DX_BLIND_NN_SCALE_FACTORS}",
+                    f"methods: {[m['name'] for m in HCV_NIS_METHODS]}",
+                    f"aggregated_csv: {agg_path.name}",
+                    f"aggregated_stats_csv: {stats_path.name}",
+                    "extra_aggregated_columns: density_scale,active_tracks_mean,volume,density_mean,mean_nn_distance,median_r_eq,gate_radius_nominal",
                     "plots:",
                     *[f"- {p}" for p in generated],
                 ]

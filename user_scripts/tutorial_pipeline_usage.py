@@ -109,7 +109,7 @@ OPTIONS = {
     "space_input_mode": "ref_position",
     "st_refine_iters": 3,
     "st_refine_tol": 0.0,
-    "st_robust_mode": "sample_trim",
+    "st_robust_mode": "hybrid_track_irls",
     "st_track_trim_iters": 4,
     "st_per_axis_scaling": 1,
     "st_linear_interactions": 0,

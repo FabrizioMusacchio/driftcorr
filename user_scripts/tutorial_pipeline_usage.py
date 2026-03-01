@@ -311,7 +311,7 @@ if RUN_SINGLE_FILE:
 
 RUN_BATCH = False
 if RUN_BATCH:
-    methods_batch = ["rbf", "rigid", "local", "st_rbf"]
+    methods_batch = ["rigid", "local", "rbf", "st_rbf"]
 
     for file_path in list_imaris_xls_files(IMARIS_DIR):
         df_batch = ensure_numeric_tracks(read_imaris_position_xls(file_path))

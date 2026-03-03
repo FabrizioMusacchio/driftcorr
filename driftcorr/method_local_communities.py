@@ -39,7 +39,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -48,6 +48,7 @@ import pandas as pd
 from scipy.spatial import cKDTree
 from scipy.stats import pearsonr
 
+from .drift_smoothing import detect_stage_jumps, plot_drift_timeseries, smooth_drift_timeseries
 from .io_imaris import ensure_numeric_tracks
 from .metrics import pivot_tracks
 
@@ -475,3 +476,138 @@ def run_local_drift_correction_for_file(
     plot_cluster_drifts(model, out_prefix)
 
     return df_corr, model, comm_res, comm_table, drift_table
+
+
+def _estimate_time_drift_from_corrected(
+    df_orig: pd.DataFrame,
+    df_corr: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Estimate per-time drift vectors from median(original - corrected)."""
+    d0 = ensure_numeric_tracks(df_orig)
+    dc = ensure_numeric_tracks(df_corr)
+    if d0.shape[0] != dc.shape[0]:
+        merged = d0.merge(dc, on=["TrackID", "Time"], how="inner", suffixes=("_orig", "_corr"))
+        merged["dx"] = merged["Position X_orig"].to_numpy(float) - merged["Position X_corr"].to_numpy(float)
+        merged["dy"] = merged["Position Y_orig"].to_numpy(float) - merged["Position Y_corr"].to_numpy(float)
+        merged["dz"] = merged["Position Z_orig"].to_numpy(float) - merged["Position Z_corr"].to_numpy(float)
+        tab = (
+            merged.groupby("Time", as_index=False)
+            .agg(dx=("dx", "median"), dy=("dy", "median"), dz=("dz", "median"))
+            .sort_values("Time")
+            .reset_index(drop=True)
+        )
+    else:
+        tab = pd.DataFrame(
+            {
+                "Time": d0["Time"].to_numpy(float),
+                "dx": d0["Position X"].to_numpy(float) - dc["Position X_corr"].to_numpy(float),
+                "dy": d0["Position Y"].to_numpy(float) - dc["Position Y_corr"].to_numpy(float),
+                "dz": d0["Position Z"].to_numpy(float) - dc["Position Z_corr"].to_numpy(float),
+            }
+        )
+        tab = (
+            tab.groupby("Time", as_index=False)
+            .agg(dx=("dx", "median"), dy=("dy", "median"), dz=("dz", "median"))
+            .sort_values("Time")
+            .reset_index(drop=True)
+        )
+    return tab["Time"].to_numpy(float), tab[["dx", "dy", "dz"]].to_numpy(float)
+
+
+def _smooth_drift_piecewise(
+    times: np.ndarray,
+    drift_raw: np.ndarray,
+    method: str,
+    params: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    detect_jumps = bool(params.get("detect_stage_jumps", True))
+    if not detect_jumps or drift_raw.shape[0] <= 2:
+        return smooth_drift_timeseries(times, drift_raw, method=method, params=params), np.zeros((drift_raw.shape[0],), dtype=bool)
+
+    jump_mask = detect_stage_jumps(times, drift_raw, method="mad_threshold", params=params)
+    if not np.any(jump_mask):
+        return smooth_drift_timeseries(times, drift_raw, method=method, params=params), jump_mask
+
+    out = np.array(drift_raw, dtype=float, copy=True)
+    split_idx = [0] + [int(i) for i in np.where(jump_mask)[0].tolist()] + [int(drift_raw.shape[0])]
+    for a, b in zip(split_idx[:-1], split_idx[1:]):
+        if b - a <= 2:
+            continue
+        out[a:b] = smooth_drift_timeseries(times[a:b], drift_raw[a:b], method=method, params=params)
+    return out, jump_mask
+
+
+def run_local_drift_correction_for_file_with_optional_smoothing(
+    df: pd.DataFrame,
+    out_prefix: str | Path,
+    reference_time: Optional[float] = None,
+    k_neighbors: int = 12,
+    radius_um: Optional[float] = None,
+    ell_um_graph: float = 80.0,
+    ell_um_field: float = 120.0,
+    min_edge_weight: float = 0.25,
+    max_pairs_per_node: Optional[int] = 50,
+    use_track_mean_position: bool = True,
+    smoothing_enabled: bool = False,
+    smoothing_method: str = "savgol",
+    smoothing_params: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, DriftModel, CommunityResult, pd.DataFrame, pd.DataFrame]:
+    """Run local correction with optional posthoc smoothing of global drift trace.
+
+    When smoothing is disabled this is a strict passthrough to
+    ``run_local_drift_correction_for_file``.
+    """
+
+    df_corr, model, comm_res, comm_table, drift_table = run_local_drift_correction_for_file(
+        df=df,
+        out_prefix=out_prefix,
+        reference_time=reference_time,
+        k_neighbors=k_neighbors,
+        radius_um=radius_um,
+        ell_um_graph=ell_um_graph,
+        ell_um_field=ell_um_field,
+        min_edge_weight=min_edge_weight,
+        max_pairs_per_node=max_pairs_per_node,
+        use_track_mean_position=use_track_mean_position,
+    )
+    if not bool(smoothing_enabled):
+        return df_corr, model, comm_res, comm_table, drift_table
+
+    params = {} if smoothing_params is None else dict(smoothing_params)
+    tvals, drift_raw = _estimate_time_drift_from_corrected(df, df_corr)
+    drift_smooth, jump_mask = _smooth_drift_piecewise(
+        tvals,
+        drift_raw,
+        method=smoothing_method,
+        params=params,
+    )
+
+    # Drift-only smoothing adjustment:
+    # x_corr_s = x_corr_raw + (d_raw(t) - d_smooth(t))
+    df_sm = df_corr.copy()
+    tt = df_sm["Time"].to_numpy(float)
+    map_raw = {float(t): drift_raw[i] for i, t in enumerate(tvals)}
+    map_sm = {float(t): drift_smooth[i] for i, t in enumerate(tvals)}
+    delta = np.vstack([map_raw.get(float(t), np.zeros(3)) - map_sm.get(float(t), np.zeros(3)) for t in tt])
+    df_sm["Position X_corr"] = df_sm["Position X_corr"].to_numpy(float) + delta[:, 0]
+    df_sm["Position Y_corr"] = df_sm["Position Y_corr"].to_numpy(float) + delta[:, 1]
+    df_sm["Position Z_corr"] = df_sm["Position Z_corr"].to_numpy(float) + delta[:, 2]
+
+    out_prefix = Path(out_prefix)
+    tab = pd.DataFrame(
+        {
+            "time": tvals,
+            "dx_raw": drift_raw[:, 0],
+            "dy_raw": drift_raw[:, 1],
+            "dz_raw": drift_raw[:, 2],
+            "dx_smooth": drift_smooth[:, 0],
+            "dy_smooth": drift_smooth[:, 1],
+            "dz_smooth": drift_smooth[:, 2],
+            "jump_detected": jump_mask.astype(int),
+        }
+    )
+    tab.to_csv(Path(str(out_prefix) + "_local_smooth_drift_timeseries.csv"), index=False)
+    plot_drift_timeseries(tvals, drift_raw, drift_smooth, out_prefix=out_prefix, tag="local_smooth")
+
+    df_sm.to_csv(str(out_prefix) + "_positions_corrected_localdrift_smooth.csv", index=False)
+    return df_sm, model, comm_res, comm_table, drift_table

@@ -22,9 +22,16 @@ try:
     from driftcorr.evaluate import run_all_methods_and_compare, save_evaluation_outputs
     from driftcorr.benchmarks import paper_regression, synthetic_generate, synthetic_regime_benchmark
     from driftcorr.io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris_position_xls
-    from driftcorr.method_local_communities import run_local_drift_correction_for_file
+    from driftcorr.method_local_communities import (
+        run_local_drift_correction_for_file,
+        run_local_drift_correction_for_file_with_optional_smoothing,
+    )
     from driftcorr.method_rbf_ref import correct_positions_rbf_to_reference, make_rbf_diagnostic_plots
-    from driftcorr.method_rigid_step import apply_rigid_correction_to_tracks, build_step_transforms
+    from driftcorr.method_rigid_step import (
+        apply_rigid_correction_to_tracks,
+        apply_rigid_correction_with_optional_smoothing,
+        build_step_transforms,
+    )
     from driftcorr.method_spacetime_rbf import apply_correction as apply_spacetime_correction
     from driftcorr.method_spacetime_rbf import fit_spacetime_rbf_model
     from driftcorr.method_spacetime_rbf_moe import apply_spacetime_rbf_moe_correction, fit_spacetime_rbf_moe_model
@@ -45,9 +52,16 @@ except ModuleNotFoundError as exc:
         from driftcorr.evaluate import run_all_methods_and_compare, save_evaluation_outputs
         from driftcorr.benchmarks import paper_regression, synthetic_generate, synthetic_regime_benchmark
         from driftcorr.io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris_position_xls
-        from driftcorr.method_local_communities import run_local_drift_correction_for_file
+        from driftcorr.method_local_communities import (
+            run_local_drift_correction_for_file,
+            run_local_drift_correction_for_file_with_optional_smoothing,
+        )
         from driftcorr.method_rbf_ref import correct_positions_rbf_to_reference, make_rbf_diagnostic_plots
-        from driftcorr.method_rigid_step import apply_rigid_correction_to_tracks, build_step_transforms
+        from driftcorr.method_rigid_step import (
+            apply_rigid_correction_to_tracks,
+            apply_rigid_correction_with_optional_smoothing,
+            build_step_transforms,
+        )
         from driftcorr.method_spacetime_rbf import apply_correction as apply_spacetime_correction
         from driftcorr.method_spacetime_rbf import fit_spacetime_rbf_model
         from driftcorr.method_spacetime_rbf_moe import apply_spacetime_rbf_moe_correction, fit_spacetime_rbf_moe_model
@@ -118,6 +132,16 @@ OPTIONS = {
     "st_moe_blend_sigma_um": 140.0,
     "st_moe_cluster_mode": "track_anchor",
     "st_moe_drift_cap_factor": 3.0,
+    "rigid_smooth_enable": 0,
+    "rigid_smooth_method": "savgol",
+    "rigid_smooth_window": 9,
+    "rigid_smooth_polyorder": 2,
+    "local_smooth_enable": 0,
+    "local_smooth_method": "savgol",
+    "local_smooth_window": 9,
+    "local_smooth_polyorder": 2,
+    "smooth_detect_stage_jumps": 1,
+    "smooth_jump_thresh_mad": 6.0,
 }
 
 # %% FUNCTIONS
@@ -182,6 +206,25 @@ def run_methods_for_dataframe(
         tf_rigid.to_csv(str(out_prefix) + "_rigid_transforms.csv", index=False)
         df_rigid.to_csv(str(out_prefix) + "_positions_corrected_rigid.csv", index=False)
         corr_by_method["rigid"] = df_rigid
+        if bool(opts.get("rigid_smooth_enable", 0)):
+            df_rigid_s = apply_rigid_correction_with_optional_smoothing(
+                df=df,
+                step=step,
+                times=times,
+                ref_time=ref_time,
+                smoothing_enabled=True,
+                smoothing_method=str(opts.get("rigid_smooth_method", "savgol")),
+                smoothing_params={
+                    "window_length": int(opts.get("rigid_smooth_window", 9)),
+                    "polyorder": int(opts.get("rigid_smooth_polyorder", 2)),
+                    "detect_stage_jumps": bool(opts.get("smooth_detect_stage_jumps", 1)),
+                    "jump_thresh_mad": float(opts.get("smooth_jump_thresh_mad", 6.0)),
+                },
+                out_prefix=out_prefix,
+                tag="rigid_smooth",
+            )
+            df_rigid_s.to_csv(str(out_prefix) + "_positions_corrected_rigid_smooth.csv", index=False)
+            corr_by_method["rigid_smooth"] = df_rigid_s
 
     if "local" in methods:
         df_local, *_ = run_local_drift_correction_for_file(
@@ -197,6 +240,30 @@ def run_methods_for_dataframe(
             use_track_mean_position=True,
         )
         corr_by_method["local"] = df_local
+        if bool(opts.get("local_smooth_enable", 0)):
+            local_smooth_prefix = Path(str(out_prefix) + "_local_smooth")
+            df_local_s, *_ = run_local_drift_correction_for_file_with_optional_smoothing(
+                df=df,
+                out_prefix=local_smooth_prefix,
+                reference_time=opts["reference_time"],
+                k_neighbors=opts["k_neighbors"],
+                radius_um=opts["radius_um"],
+                ell_um_graph=opts["ell_um_graph"],
+                ell_um_field=opts["ell_um_field"],
+                min_edge_weight=opts["min_edge_weight"],
+                max_pairs_per_node=opts["max_pairs_per_node"],
+                use_track_mean_position=True,
+                smoothing_enabled=True,
+                smoothing_method=str(opts.get("local_smooth_method", "savgol")),
+                smoothing_params={
+                    "window_length": int(opts.get("local_smooth_window", 9)),
+                    "polyorder": int(opts.get("local_smooth_polyorder", 2)),
+                    "detect_stage_jumps": bool(opts.get("smooth_detect_stage_jumps", 1)),
+                    "jump_thresh_mad": float(opts.get("smooth_jump_thresh_mad", 6.0)),
+                },
+            )
+            df_local_s.to_csv(str(out_prefix) + "_positions_corrected_local_smooth.csv", index=False)
+            corr_by_method["local_smooth"] = df_local_s
 
     if "st_rbf" in methods:
         st_model, st_info = fit_spacetime_rbf_model(
@@ -307,24 +374,184 @@ if RUN_SINGLE_FILE:
         use_stationary_subset=False,
     )
     postprocess_outputs(df_single, file_path, out_prefix_single, corr_single)
+
+    RUN_SINGLE_FILE_WITH_SMOOTHING = False
+    if RUN_SINGLE_FILE_WITH_SMOOTHING:
+        opts_single_smooth = dict(OPTIONS)
+        opts_single_smooth["rigid_smooth_enable"] = 1
+        opts_single_smooth["local_smooth_enable"] = 1
+        out_prefix_single_smooth = RESULTS_ROOT / file_path.stem / "with_smoothing" / file_path.stem
+        corr_single_smooth = run_methods_for_dataframe(
+            df=df_single,
+            out_prefix=out_prefix_single_smooth,
+            methods=methods_single,
+            opts=opts_single_smooth,
+            use_stationary_subset=False,
+        )
+        postprocess_outputs(df_single, file_path, out_prefix_single_smooth, corr_single_smooth)
 # %% HOW TO BATCH RUN MULTIPLE FILES
 
-RUN_BATCH = False
+RUN_BATCH = True
 if RUN_BATCH:
-    methods_batch = ["rigid", "local", "rbf", "st_rbf"]
+    methods_batch = ["rbf", "rigid", "local", "st_rbf"]
+    RUN_BATCH_SMOOTHED = True
+    opts_batch = dict(OPTIONS)
+    batch_root = RESULTS_ROOT / "batch_default"
+    if RUN_BATCH_SMOOTHED:
+        opts_batch["rigid_smooth_enable"] = 1
+        opts_batch["local_smooth_enable"] = 1
+        batch_root = RESULTS_ROOT / "batch_with_smoothing"
 
     for file_path in list_imaris_xls_files(IMARIS_DIR):
         df_batch = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-        out_prefix_batch = RESULTS_ROOT / file_path.stem / file_path.stem
+        out_prefix_batch = batch_root / file_path.stem / file_path.stem
 
         corr_batch = run_methods_for_dataframe(
             df=df_batch,
             out_prefix=out_prefix_batch,
             methods=methods_batch,
-            opts=OPTIONS,
+            opts=opts_batch,
             use_stationary_subset=False,
         )
         postprocess_outputs(df_batch, file_path, out_prefix_batch, corr_batch)
+
+
+# %% HOW TO PARAMETER SWEEP ST RBF FOR SMOOTHER RESULTS
+
+RUN_ST_RBF_SWEEP = True
+if RUN_ST_RBF_SWEEP:
+    ST_RBF_SWEEP_FILES: list[str] = []
+    st_ell_time_list = [0.3, 0.4, 0.6, 0.8, 1.0]
+    st_lam_list = [5e-4, 8.5e-4, 1.2e-3]
+    st_robust_keep_fraction_list = [0.80, 0.83, 0.87]
+
+    if ST_RBF_SWEEP_FILES:
+        sweep_files = [IMARIS_DIR / f for f in ST_RBF_SWEEP_FILES]
+    else:
+        sweep_files = list_imaris_xls_files(IMARIS_DIR)
+
+    sweep_rows: list[dict[str, object]] = []
+    for file_path in sweep_files:
+        if not file_path.exists():
+            continue
+        df_sw = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+        for ell_t in st_ell_time_list:
+            for lam in st_lam_list:
+                for keep in st_robust_keep_fraction_list:
+                    opts_sw = dict(OPTIONS)
+                    opts_sw["st_ell_time"] = float(ell_t)
+                    opts_sw["st_lam"] = float(lam)
+                    opts_sw["st_robust_keep_fraction"] = float(keep)
+                    tag = f"st_sweep_ellT{str(ell_t).replace('.', 'p')}_lam{str(lam).replace('.', 'p')}_keep{str(keep).replace('.', 'p')}"
+                    out_prefix_sw = RESULTS_ROOT / "st_rbf_sweep" / file_path.stem / tag / file_path.stem
+                    corr_sw = run_methods_for_dataframe(
+                        df=df_sw,
+                        out_prefix=out_prefix_sw,
+                        methods=["st_rbf"],
+                        opts=opts_sw,
+                        use_stationary_subset=False,
+                    )
+                    postprocess_outputs(df_sw, file_path, out_prefix_sw, corr_sw)
+                    summary_sw, _ = run_all_methods_and_compare(df_sw, corr_sw)
+                    if summary_sw.shape[0] == 0:
+                        continue
+                    row = summary_sw.iloc[0].to_dict()
+                    row["file"] = file_path.name
+                    row["st_ell_time"] = float(ell_t)
+                    row["st_lam"] = float(lam)
+                    row["st_robust_keep_fraction"] = float(keep)
+                    sweep_rows.append(row)
+
+    if sweep_rows:
+        sweep_df = pd.DataFrame(sweep_rows)
+        out_csv = RESULTS_ROOT / "st_rbf_sweep" / "st_rbf_sweep_summary.csv"
+        out_csv.parent.mkdir(parents=True, exist_ok=True)
+        sweep_df.to_csv(out_csv, index=False)
+
+
+# %% HOW TO PARAMETER SWEEP RIGID AND LOCAL METHODS
+
+RUN_RIGID_LOCAL_SWEEP = True
+if RUN_RIGID_LOCAL_SWEEP:
+    RIGID_LOCAL_SWEEP_FILES: list[str] = []
+    rigid_keep_fraction_list = [0.50, 0.70, 0.85, 0.95]
+    rigid_inlier_reestimate_iters_list = [5, 15, 30]
+    local_k_neighbors_list = [8, 12, 20, 30]
+    local_ell_um_field_list = [80.0, 120.0, 180.0, 240.0]
+
+    if RIGID_LOCAL_SWEEP_FILES:
+        sweep_files = [IMARIS_DIR / f for f in RIGID_LOCAL_SWEEP_FILES]
+    else:
+        sweep_files = list_imaris_xls_files(IMARIS_DIR)
+
+    sweep_rows: list[dict[str, object]] = []
+    for file_path in sweep_files:
+        if not file_path.exists():
+            continue
+        df_sw = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+
+        for keep in rigid_keep_fraction_list:
+            for iters in rigid_inlier_reestimate_iters_list:
+                opts_sw = dict(OPTIONS)
+                opts_sw["keep_fraction"] = float(keep)
+                opts_sw["inlier_reestimate_iters"] = int(iters)
+                tag = f"rigid_kf{str(keep).replace('.', 'p')}_iters{iters}"
+                out_prefix_sw = RESULTS_ROOT / "rigid_local_sweep" / file_path.stem / tag / file_path.stem
+                corr_sw = run_methods_for_dataframe(
+                    df=df_sw,
+                    out_prefix=out_prefix_sw,
+                    methods=["rigid"],
+                    opts=opts_sw,
+                    use_stationary_subset=False,
+                )
+                postprocess_outputs(df_sw, file_path, out_prefix_sw, corr_sw)
+                summary_sw, _ = run_all_methods_and_compare(df_sw, corr_sw)
+                if summary_sw.shape[0] == 0:
+                    continue
+                row = summary_sw.iloc[0].to_dict()
+                row["file"] = file_path.name
+                row["sweep_method"] = "rigid"
+                row["keep_fraction"] = float(keep)
+                row["inlier_reestimate_iters"] = int(iters)
+                sweep_rows.append(row)
+
+        for k_neighbors in local_k_neighbors_list:
+            for ell_field in local_ell_um_field_list:
+                opts_sw = dict(OPTIONS)
+                opts_sw["k_neighbors"] = int(k_neighbors)
+                opts_sw["ell_um_field"] = float(ell_field)
+                tag = f"local_k{k_neighbors}_field{str(ell_field).replace('.', 'p')}"
+                out_prefix_sw = RESULTS_ROOT / "rigid_local_sweep" / file_path.stem / tag / file_path.stem
+                corr_sw = run_methods_for_dataframe(
+                    df=df_sw,
+                    out_prefix=out_prefix_sw,
+                    methods=["local"],
+                    opts=opts_sw,
+                    use_stationary_subset=False,
+                )
+                postprocess_outputs(df_sw, file_path, out_prefix_sw, corr_sw)
+                summary_sw, _ = run_all_methods_and_compare(df_sw, corr_sw)
+                if summary_sw.shape[0] == 0:
+                    continue
+                row = summary_sw.iloc[0].to_dict()
+                row["file"] = file_path.name
+                row["sweep_method"] = "local"
+                row["k_neighbors"] = int(k_neighbors)
+                row["ell_um_field"] = float(ell_field)
+                sweep_rows.append(row)
+
+    if sweep_rows:
+        sweep_df = pd.DataFrame(sweep_rows)
+        out_root = RESULTS_ROOT / "rigid_local_sweep"
+        out_root.mkdir(parents=True, exist_ok=True)
+        sweep_df.to_csv(out_root / "rigid_local_sweep_summary.csv", index=False)
+        if "sweep_method" in sweep_df.columns:
+            sweep_df[sweep_df["sweep_method"] == "rigid"].to_csv(
+                out_root / "rigid_sweep_summary.csv", index=False
+            )
+            sweep_df[sweep_df["sweep_method"] == "local"].to_csv(
+                out_root / "local_sweep_summary.csv", index=False
+            )
 # %% HOW TO GENERATE AND RUN SYNTHETIC DATA: DEFAULT SETTINGS
 RUN_SYNTHETIC = False
 if RUN_SYNTHETIC:

@@ -38,11 +38,13 @@ date: Feb 2026
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
 
+from .drift_smoothing import detect_stage_jumps, plot_drift_timeseries, smooth_drift_timeseries
 from .io_imaris import ensure_numeric_tracks
 
 
@@ -268,6 +270,131 @@ def apply_rigid_correction_to_tracks(
     return df_corr
 
 
+def _estimate_time_drift_from_corrected(
+    df_orig: pd.DataFrame,
+    df_corr: pd.DataFrame,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Estimate per-time drift vectors as robust median(original - corrected)."""
+    d0 = ensure_numeric_tracks(df_orig)
+    dc = ensure_numeric_tracks(df_corr)
+    if d0.shape[0] == dc.shape[0]:
+        # Fast path: same row count and preserved row order.
+        m = pd.DataFrame(
+            {
+                "Time": d0["Time"].to_numpy(float),
+                "dx": d0["Position X"].to_numpy(float) - dc["Position X_corr"].to_numpy(float),
+                "dy": d0["Position Y"].to_numpy(float) - dc["Position Y_corr"].to_numpy(float),
+                "dz": d0["Position Z"].to_numpy(float) - dc["Position Z_corr"].to_numpy(float),
+            }
+        )
+    else:
+        m = d0.merge(dc, on=["TrackID", "Time"], how="inner", suffixes=("_orig", "_corr"))
+        m["dx"] = m["Position X_orig"].to_numpy(float) - m["Position X_corr"].to_numpy(float)
+        m["dy"] = m["Position Y_orig"].to_numpy(float) - m["Position Y_corr"].to_numpy(float)
+        m["dz"] = m["Position Z_orig"].to_numpy(float) - m["Position Z_corr"].to_numpy(float)
+        m = m[["Time", "dx", "dy", "dz"]]
+
+    tab = (
+        m.groupby("Time", as_index=False)
+        .agg(
+            dx=("dx", "median"),
+            dy=("dy", "median"),
+            dz=("dz", "median"),
+        )
+        .sort_values("Time")
+        .reset_index(drop=True)
+    )
+    times = tab["Time"].to_numpy(float)
+    drift = tab[["dx", "dy", "dz"]].to_numpy(float)
+    return times, drift
+
+
+def _smooth_drift_piecewise(
+    times: np.ndarray,
+    drift_raw: np.ndarray,
+    method: str,
+    params: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Smooth drift trace, preserving optional jump discontinuities via segmentation."""
+    detect_jumps = bool(params.get("detect_stage_jumps", True))
+    if not detect_jumps or drift_raw.shape[0] <= 2:
+        return smooth_drift_timeseries(times, drift_raw, method=method, params=params), np.zeros((drift_raw.shape[0],), dtype=bool)
+
+    jump_mask = detect_stage_jumps(times, drift_raw, method="mad_threshold", params=params)
+    if not np.any(jump_mask):
+        return smooth_drift_timeseries(times, drift_raw, method=method, params=params), jump_mask
+
+    out = np.array(drift_raw, dtype=float, copy=True)
+    split_idx = [0] + [int(i) for i in np.where(jump_mask)[0].tolist()] + [int(drift_raw.shape[0])]
+    for a, b in zip(split_idx[:-1], split_idx[1:]):
+        seg_len = int(b - a)
+        if seg_len <= 2:
+            continue
+        out[a:b] = smooth_drift_timeseries(times[a:b], drift_raw[a:b], method=method, params=params)
+    return out, jump_mask
+
+
+def apply_rigid_correction_with_optional_smoothing(
+    df: pd.DataFrame,
+    step: dict[tuple[float, float], tuple[np.ndarray, np.ndarray]],
+    times: np.ndarray,
+    ref_time: float,
+    smoothing_enabled: bool = False,
+    smoothing_method: str = "savgol",
+    smoothing_params: dict[str, Any] | None = None,
+    out_prefix: str | Path | None = None,
+    tag: str = "rigid",
+) -> pd.DataFrame:
+    """Apply rigid correction with optional temporal smoothing of global drift.
+
+    Default behavior is unchanged: when ``smoothing_enabled=False`` this calls
+    ``apply_rigid_correction_to_tracks`` directly.
+    """
+
+    df_raw = apply_rigid_correction_to_tracks(df, step, times, ref_time)
+    if not bool(smoothing_enabled):
+        return df_raw
+
+    params = {} if smoothing_params is None else dict(smoothing_params)
+    tvals, drift_raw = _estimate_time_drift_from_corrected(df, df_raw)
+    drift_smooth, jump_mask = _smooth_drift_piecewise(
+        tvals,
+        drift_raw,
+        method=smoothing_method,
+        params=params,
+    )
+
+    # Posthoc drift-only smoothing:
+    # x_corr_s = x_corr_raw + (d_raw(t) - d_smooth(t))
+    df_sm = df_raw.copy()
+    tt = df_sm["Time"].to_numpy(float)
+    map_raw = {float(t): drift_raw[i] for i, t in enumerate(tvals)}
+    map_sm = {float(t): drift_smooth[i] for i, t in enumerate(tvals)}
+    delta = np.vstack([map_raw.get(float(t), np.zeros(3)) - map_sm.get(float(t), np.zeros(3)) for t in tt])
+    df_sm["Position X_corr"] = df_sm["Position X_corr"].to_numpy(float) + delta[:, 0]
+    df_sm["Position Y_corr"] = df_sm["Position Y_corr"].to_numpy(float) + delta[:, 1]
+    df_sm["Position Z_corr"] = df_sm["Position Z_corr"].to_numpy(float) + delta[:, 2]
+
+    if out_prefix is not None:
+        out_prefix = Path(out_prefix)
+        tab = pd.DataFrame(
+            {
+                "time": tvals,
+                "dx_raw": drift_raw[:, 0],
+                "dy_raw": drift_raw[:, 1],
+                "dz_raw": drift_raw[:, 2],
+                "dx_smooth": drift_smooth[:, 0],
+                "dy_smooth": drift_smooth[:, 1],
+                "dz_smooth": drift_smooth[:, 2],
+                "jump_detected": jump_mask.astype(int),
+            }
+        )
+        tab.to_csv(Path(str(out_prefix) + f"_{tag}_drift_timeseries.csv"), index=False)
+        plot_drift_timeseries(tvals, drift_raw, drift_smooth, out_prefix=out_prefix, tag=tag)
+
+    return df_sm
+
+
 def _cluster_tracks_by_mean_position(
     df: pd.DataFrame,
     n_groups: int,
@@ -283,6 +410,8 @@ def _cluster_tracks_by_mean_position(
         labels = np.zeros(points.shape[0], dtype=int)
         centers = np.nanmean(points, axis=0, keepdims=True)
     else:
+        from sklearn.cluster import KMeans
+
         km = KMeans(n_clusters=n_groups, random_state=seed, n_init=10)
         labels = km.fit_predict(points)
         centers = km.cluster_centers_

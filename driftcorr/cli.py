@@ -41,7 +41,10 @@ import pandas as pd
 from .evaluate import run_all_methods_and_compare, save_evaluation_outputs
 from .io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris_position_xls
 from .metrics import msd_per_track, pivot_tracks
-from .method_local_communities import run_local_drift_correction_for_file
+from .method_local_communities import (
+    run_local_drift_correction_for_file,
+    run_local_drift_correction_for_file_with_optional_smoothing,
+)
 from .method_rbf_ref import (
     correct_positions_rbf_to_reference,
     make_rbf_diagnostic_plots,
@@ -50,6 +53,7 @@ from .method_rbf_ref import (
 from .method_rigid_step import (
     apply_piecewise_rigid_correction_to_tracks,
     apply_rigid_correction_to_tracks,
+    apply_rigid_correction_with_optional_smoothing,
     build_piecewise_rigid_model,
     build_step_transforms,
 )
@@ -74,6 +78,16 @@ from .visualization import save_visual_inspection_plots
 
 def _base_from_path(path: Path) -> str:
     return path.stem
+
+
+def _parse_float_list(raw: str) -> list[float]:
+    vals: list[float] = []
+    for tok in str(raw).split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        vals.append(float(tok))
+    return vals
 
 
 def _result_prefix_for_input_file(out_dir: Path, input_file: Path) -> Path:
@@ -742,6 +756,130 @@ def run_batch(args: argparse.Namespace) -> int:
     return _run_batch_for_folder(imaris_dir, out_dir, args, methods)
 
 
+def run_smooth(args: argparse.Namespace) -> int:
+    """Run rigid/local correction with optional drift smoothing wrapper."""
+    in_path = Path(args.input)
+    out_dir = Path(args.out) if args.out is not None else in_path.parent / "driftcorr_results_smooth"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    df = ensure_numeric_tracks(read_imaris_position_xls(in_path))
+    gt = load_groundtruth_for_imaris_file(in_path)
+    out_prefix = _result_prefix_for_input_file(out_dir, in_path)
+    smooth_params = {
+        "window_length": int(args.savgol_window),
+        "polyorder": int(args.polyorder),
+        "frac": float(args.lowess_frac),
+        "it": int(args.lowess_it),
+        "window": int(args.median_window),
+        "detect_stage_jumps": bool(args.detect_jumps),
+        "jump_thresh_mad": float(args.jump_thresh_mad),
+    }
+
+    corr_by_method: dict[str, pd.DataFrame] = {}
+    if str(args.method) == "rigid":
+        step, tf_rigid, times = build_step_transforms(
+            df,
+            keep_fraction=args.keep_fraction,
+            min_pairs=args.min_pairs,
+            mode=args.rigid_mode,
+            inlier_reestimate_iters=args.inlier_reestimate_iters,
+        )
+        ref_time = float(times.min()) if args.reference_time is None else float(args.reference_time)
+        df_corr = apply_rigid_correction_with_optional_smoothing(
+            df=df,
+            step=step,
+            times=times,
+            ref_time=ref_time,
+            smoothing_enabled=True,
+            smoothing_method=str(args.smoothing_method),
+            smoothing_params=smooth_params,
+            out_prefix=out_prefix,
+            tag="rigid_smooth",
+        )
+        tf_rigid.to_csv(str(out_prefix) + "_rigid_transforms.csv", index=False)
+        df_corr.to_csv(str(out_prefix) + "_positions_corrected_rigid_smooth.csv", index=False)
+        corr_by_method["rigid_smooth"] = df_corr
+    elif str(args.method) == "local":
+        df_corr, *_ = run_local_drift_correction_for_file_with_optional_smoothing(
+            df=df,
+            out_prefix=out_prefix,
+            reference_time=args.reference_time,
+            k_neighbors=args.k_neighbors,
+            radius_um=args.radius_um,
+            ell_um_graph=args.ell_um_graph,
+            ell_um_field=args.ell_um_field,
+            min_edge_weight=args.min_edge_weight,
+            max_pairs_per_node=args.max_pairs_per_node,
+            use_track_mean_position=not args.use_row_position,
+            smoothing_enabled=True,
+            smoothing_method=str(args.smoothing_method),
+            smoothing_params=smooth_params,
+        )
+        df_corr.to_csv(str(out_prefix) + "_positions_corrected_local_smooth.csv", index=False)
+        corr_by_method["local_smooth"] = df_corr
+    else:
+        raise ValueError("--method must be one of {rigid,local} for smooth command.")
+
+    if not args.skip_visual_plots:
+        for name, dfc in corr_by_method.items():
+            save_visual_inspection_plots(df, dfc, out_prefix, name, df_groundtruth=gt)
+    summary_df, details = run_all_methods_and_compare(df, corr_by_method)
+    save_evaluation_outputs(out_prefix, summary_df, details)
+    _maybe_groundtruth_eval(in_path, out_prefix, corr_by_method, groundtruth_df=gt)
+    print(f"Done: smoothing run for {in_path.name} -> {out_prefix.parent}")
+    return 0
+
+
+def run_st_sweep(args: argparse.Namespace) -> int:
+    """Run ST-RBF sweep over ell-time and lambda on all files in input dir."""
+    imaris_dir = Path(args.input_dir)
+    out_dir = Path(args.out) if args.out is not None else imaris_dir / "driftcorr_st_sweep"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ell_times = _parse_float_list(args.ell_time)
+    lam_vals = _parse_float_list(args.lam)
+    if not ell_times or not lam_vals:
+        raise ValueError("st-sweep requires non-empty --ell-time and --lam lists.")
+
+    files = list_imaris_xls_files(imaris_dir)
+    if not files:
+        raise FileNotFoundError(f"No IMARIS files found in {imaris_dir}")
+
+    rows: list[dict[str, object]] = []
+    for f in files:
+        df = ensure_numeric_tracks(read_imaris_position_xls(f))
+        gt = load_groundtruth_for_imaris_file(f)
+        for ell_t in ell_times:
+            for lam in lam_vals:
+                tag = f"st_sweep_ellT{str(ell_t).replace('.', 'p')}_lam{str(lam).replace('.', 'p')}"
+                out_prefix = out_dir / f.stem / tag / f.stem
+                out_prefix.parent.mkdir(parents=True, exist_ok=True)
+                cfg = argparse.Namespace(**vars(args))
+                cfg.st_ell_time = float(ell_t)
+                cfg.st_lam = float(lam)
+                corr = _run_st_rbf(df, out_prefix, cfg, fit_track_ids=None, save_outputs=True)
+                df_corr = corr["st_rbf"]
+                _assert_no_nan_corrected(df, df_corr, "st_rbf")
+                _save_pred_drift_sanity(df, df_corr, out_prefix, "st_rbf")
+                if not args.skip_visual_plots:
+                    save_visual_inspection_plots(df, df_corr, out_prefix, "st_rbf", df_groundtruth=gt)
+                summary_df, details = run_all_methods_and_compare(df, corr)
+                save_evaluation_outputs(out_prefix, summary_df, details)
+                _maybe_groundtruth_eval(f, out_prefix, corr, groundtruth_df=gt)
+                if summary_df.shape[0] > 0:
+                    row = summary_df.iloc[0].to_dict()
+                    row["file"] = f.name
+                    row["st_ell_time"] = float(ell_t)
+                    row["st_lam"] = float(lam)
+                    rows.append(row)
+
+    if rows:
+        out_csv = out_dir / "st_sweep_summary.csv"
+        pd.DataFrame(rows).to_csv(out_csv, index=False)
+        print(f"ST sweep summary -> {out_csv}")
+    return 0
+
+
 def run_synthetic_benchmark(args: argparse.Namespace) -> int:
     synthetic_dir = Path(args.synthetic_dir)
     if not (bool(getattr(args, "reuse_existing", 0)) and list_imaris_xls_files(synthetic_dir)):
@@ -1192,6 +1330,45 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run_all.add_argument("--methods", default="rbf,rigid,local,st_rbf", help="Comma-separated method names")
 
+    smooth = sub.add_parser("smooth", help="Run rigid/local correction with optional drift smoothing")
+    smooth.add_argument("--method", choices=["rigid", "local"], required=True)
+    smooth.add_argument("--input", required=True, help="Path to one IMARIS xls/xlsx/csv file")
+    smooth.add_argument("--out", default=None, help="Output directory (default: <input_parent>/driftcorr_results_smooth)")
+    smooth.add_argument("--smoothing-method", choices=["savgol", "lowess", "moving_median"], default="savgol")
+    smooth.add_argument("--savgol-window", type=int, default=9)
+    smooth.add_argument("--polyorder", type=int, default=2)
+    smooth.add_argument("--lowess-frac", type=float, default=0.25)
+    smooth.add_argument("--lowess-it", type=int, default=1)
+    smooth.add_argument("--median-window", type=int, default=9)
+    smooth.add_argument("--detect-jumps", action="store_true")
+    smooth.add_argument("--jump-thresh-mad", type=float, default=6.0)
+
+    st_sweep = sub.add_parser("st-sweep", help="Sweep ST-RBF parameters over a directory of IMARIS files")
+    st_sweep.add_argument("--input-dir", required=True)
+    st_sweep.add_argument("--out", default=None, help="Output directory (default: <input-dir>/driftcorr_st_sweep)")
+    st_sweep.add_argument("--ell-time", default="0.3,0.4,0.6,0.8")
+    st_sweep.add_argument("--lam", default="5e-4,8.5e-4,1.2e-3")
+    st_sweep.add_argument("--reference-time", type=float, default=None)
+    st_sweep.add_argument("--seed", type=int, default=0)
+    st_sweep.add_argument("--st-m-centers", type=int, default=70)
+    st_sweep.add_argument("--st-ell-space", type=float, default=4.0)
+    st_sweep.add_argument("--st-ell-x", type=float, default=None)
+    st_sweep.add_argument("--st-ell-y", type=float, default=None)
+    st_sweep.add_argument("--st-ell-z", type=float, default=None)
+    st_sweep.add_argument("--st-robust-keep-fraction", type=float, default=0.83)
+    st_sweep.add_argument("--st-robust-iters", type=int, default=2)
+    st_sweep.add_argument("--st-robust-mode", choices=["none", "sample_trim", "track_trim", "irls_huber", "hybrid_track_irls"], default="sample_trim")
+    st_sweep.add_argument("--st-track-trim-iters", type=int, default=4)
+    st_sweep.add_argument("--space-input-mode", choices=["row_position", "track_anchor", "ref_position"], default="ref_position")
+    st_sweep.add_argument("--st-refine-iters", type=int, default=3)
+    st_sweep.add_argument("--st-refine-tol", type=float, default=0.0)
+    st_sweep.add_argument("--rbf-linear-terms", type=int, choices=[0, 1], default=0)
+    st_sweep.add_argument("--st-linear-interactions", type=int, choices=[0, 1], default=0)
+    st_sweep.add_argument("--st-per-axis-scaling", type=int, choices=[0, 1], default=1)
+    st_sweep.add_argument("--two-stage", type=int, choices=[0, 1], default=0)
+    st_sweep.add_argument("--weight-abort-threshold", type=float, default=1e4)
+    st_sweep.add_argument("--skip-visual-plots", action="store_true")
+
     synth = sub.add_parser("synthetic-benchmark", help="Generate synthetic IMARIS folder and run full pipeline")
     synth.add_argument("--synthetic-dir", default="synthetic_imaris_files")
     synth.add_argument("--out", default=None, help="Default: <synthetic-dir>/driftcorr_results")
@@ -1244,7 +1421,7 @@ def build_parser() -> argparse.ArgumentParser:
     regression.add_argument("--synthetic-seed", type=int, default=42)
     regression.add_argument("--synthetic-temporal-smoothness", type=float, default=0.9)
 
-    for p in (run, run_all, synth, synth_gen, synth_reg, regression):
+    for p in (run, run_all, smooth, synth, synth_gen, synth_reg, regression):
         _add_common_method_options(p)
 
     return parser
@@ -1257,6 +1434,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_single(args)
     if args.command == "run-all":
         return run_batch(args)
+    if args.command == "smooth":
+        return run_smooth(args)
+    if args.command == "st-sweep":
+        return run_st_sweep(args)
     if args.command == "synthetic-benchmark":
         return run_synthetic_benchmark(args)
     if args.command == "synthetic-generate":

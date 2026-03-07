@@ -2936,7 +2936,7 @@ Artifacts:
 - Regression report folder under `Synthetic files parameter sweep non rigid/paper_regression`.
 """
 
-RUN_PAPER_REGRESSION_CHECK = False
+RUN_PAPER_REGRESSION_CHECK = True
 if RUN_PAPER_REGRESSION_CHECK:
     baseline_dir = ensure_baseline_groundtruth()
     paper_regression(

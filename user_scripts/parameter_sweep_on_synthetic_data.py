@@ -96,7 +96,7 @@ LARGE_FOLDER_MODE_TOKEN = {
     "piecewise_abrupt": "piecewise_abrupt",
 }
 
-DEFAULT_METHODS = ["rbf", "rigid", "local", "st_rbf"]
+DEFAULT_METHODS = ["rigid", "local", "rbf", "st_rbf"]
 
 # Core method options in one place.
 OPTIONS = {
@@ -1890,7 +1890,7 @@ Success:
 - Exactly/at least 5 files per mode exist and are discoverable by mode prefix.
 """
 
-RUN_GENERATE_BASELINE_GROUNDTRUTH = False
+RUN_GENERATE_BASELINE_GROUNDTRUTH = True
 if RUN_GENERATE_BASELINE_GROUNDTRUTH:
     ensure_baseline_groundtruth()
     grouped = enumerate_groundtruth_files(GROUNDTRUTH_ROOT)
@@ -1912,7 +1912,7 @@ Success:
 - All expected folders exist; missing folders are generated without touching existing ones.
 """
 
-RUN_GENERATE_LARGE_GROUNDTRUTH = False
+RUN_GENERATE_LARGE_GROUNDTRUTH = True
 if RUN_GENERATE_LARGE_GROUNDTRUTH:
     ensure_large_groundtruth_regimes()
     print(f"[OK] large dataset folders: {len(list_large_regime_folders())}")
@@ -1932,11 +1932,11 @@ Success:
 - Full outputs are generated for every baseline file and method.
 """
 
-RUN_BASELINE_METHOD_COMPARISON = False
+RUN_BASELINE_METHOD_COMPARISON = True
 if RUN_BASELINE_METHOD_COMPARISON:
     ensure_baseline_groundtruth()
     baseline_root = results_root("baseline_suite")
-    baseline_methods = ["rbf", "rigid", "local", "st_rbf", "st_rbf_moe"]
+    baseline_methods = ["rigid", "local", "rbf", "st_rbf", "st_rbf_moe"]
     baseline_opts = dict(OPTIONS)
     baseline_opts["st_moe_k_list"] = [2, 3, 5]
 
@@ -1969,7 +1969,7 @@ Success:
 - Summary tables plus overview plots make method differences across smooth/piecewise modes directly visible.
 """
 
-RUN_BASELINE_SUITE_AGGREGATION = False
+RUN_BASELINE_SUITE_AGGREGATION = True
 if RUN_BASELINE_SUITE_AGGREGATION:
     tidy_path, summary_path = _write_study_aggregates(
         "baseline_suite",
@@ -2021,7 +2021,7 @@ Artifacts:
 - Per-config outputs under `Synthetic files parameter sweep/rbf_robust_*`.
 """
 
-RUN_RBF_ROBUST_MODE_SWEEP = False
+RUN_RBF_ROBUST_MODE_SWEEP = True
 if RUN_RBF_ROBUST_MODE_SWEEP:
     ensure_baseline_groundtruth()
     runs = [("sample_trim", "rbf_robust_sample_trim"), ("irls_huber", "rbf_robust_irls_huber")]
@@ -2053,7 +2053,7 @@ Success:
 - Plots clearly show whether `sample_trim` or `irls_huber` is better per mode and in aggregate.
 """
 
-RUN_RBF_ROBUST_MODE_AGGREGATION = False
+RUN_RBF_ROBUST_MODE_AGGREGATION = True
 if RUN_RBF_ROBUST_MODE_AGGREGATION:
     tidy_path, summary_path = _write_study_aggregates(
         "rbf_robust_sweep",
@@ -2109,7 +2109,7 @@ Artifacts:
 - Per-config outputs under `Synthetic files parameter sweep/st_rbf_robust_*`.
 """
 
-RUN_ST_RBF_ROBUST_MODE_SWEEP = False
+RUN_ST_RBF_ROBUST_MODE_SWEEP = True
 if RUN_ST_RBF_ROBUST_MODE_SWEEP:
     ensure_baseline_groundtruth()
     runs = [
@@ -2143,7 +2143,7 @@ Artifacts:
 - `Synthetic files parameter sweep/st_rbf_robust_sweep/st_rbf_robust_*_plot.png` (config-vs-mode summaries)
 """
 
-RUN_ST_RBF_ROBUST_MODE_AGGREGATION = False
+RUN_ST_RBF_ROBUST_MODE_AGGREGATION = True
 if RUN_ST_RBF_ROBUST_MODE_AGGREGATION:
     tidy_path, summary_path = _write_study_aggregates(
         "st_rbf_robust_sweep",
@@ -2211,7 +2211,7 @@ Artifacts:
 - Per-config outputs under `Synthetic files parameter sweep/st_rbf_expressivity_*`.
 """
 
-RUN_ST_RBF_EXPRESSIVITY_SWEEP = False
+RUN_ST_RBF_EXPRESSIVITY_SWEEP = True
 if RUN_ST_RBF_EXPRESSIVITY_SWEEP:
     ensure_baseline_groundtruth()
     runs = [
@@ -2290,7 +2290,7 @@ Artifacts:
 - `Synthetic files parameter sweep/st_rbf_expressivity_sweep/st_rbf_expressivity_*_plot.png` (config-vs-mode summaries)
 """
 
-RUN_ST_RBF_EXPRESSIVITY_AGGREGATION = False
+RUN_ST_RBF_EXPRESSIVITY_AGGREGATION = True
 if RUN_ST_RBF_EXPRESSIVITY_AGGREGATION:
     tidy_path, summary_path = _write_study_aggregates(
         "st_rbf_expressivity_sweep",
@@ -2364,7 +2364,7 @@ RUN_LARGE_REGIME_BENCHMARK = True
 if RUN_LARGE_REGIME_BENCHMARK:
     ensure_large_groundtruth_regimes()
     out_root = results_root("regime_benchmark_large_20seeds")
-    methods = ["rbf", "rigid", "local", "st_rbf"]
+    methods = ["rigid", "local", "rbf", "st_rbf"]
     opts = dict(OPTIONS)
 
     for regime_dir in list_large_regime_folders():
@@ -2538,7 +2538,7 @@ Artifacts:
 - Heatmaps and A/B plots plus plotting README in selection root.
 """
 
-RUN_ST_RBF_SELECTION_PLOTS = False
+RUN_ST_RBF_SELECTION_PLOTS = True
 if RUN_ST_RBF_SELECTION_PLOTS:
     selection_root = results_root("st_rbf_parameter_selection")
     generated: list[Path] = []
@@ -2579,8 +2579,8 @@ Artifacts:
 - Sweep folders + aggregated CSV + line/heatmap plots under `Synthetic files parameter sweep/rigid_fairness_sweep` and `Synthetic files parameter sweep/local_fairness_sweep`.
 """
 
-RUN_RIGID_FAIRNESS_SWEEP = False
-RUN_LOCAL_FAIRNESS_SWEEP = False
+RUN_RIGID_FAIRNESS_SWEEP = True
+RUN_LOCAL_FAIRNESS_SWEEP = True
 
 if RUN_RIGID_FAIRNESS_SWEEP:
     baseline_dir = ensure_baseline_groundtruth()
@@ -2699,7 +2699,6 @@ if RUN_LOCAL_FAIRNESS_SWEEP:
             n_regimes=int(local_agg["regime"].nunique()),
         )
 
-
 # %% Paper Regression Harness (Optional)
 """Run optional paper regression harness for output-manifest verification.
 
@@ -2713,7 +2712,7 @@ Artifacts:
 - Regression report folder under `Synthetic files parameter sweep/paper_regression`.
 """
 
-RUN_PAPER_REGRESSION_CHECK = False
+RUN_PAPER_REGRESSION_CHECK = True
 if RUN_PAPER_REGRESSION_CHECK:
     baseline_dir = ensure_baseline_groundtruth()
     paper_regression(

@@ -27,7 +27,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from pathlib import Path
@@ -35,7 +35,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
+# %% FUNCTIONS
 
 def _compute_limits(
     df_orig: pd.DataFrame,
@@ -307,8 +307,7 @@ def plot_tracks_over_time_panels(
     df_corr: pd.DataFrame,
     out_path: str | Path,
     title_prefix: str = "",
-    df_groundtruth: pd.DataFrame | None = None,
-) -> Path:
+    df_groundtruth: pd.DataFrame | None = None) -> Path:
     """Plot full track trajectories over all timepoints.
 
     Layout:
@@ -426,7 +425,7 @@ def plot_tracks_over_time_panels(
             ax_overlay.text2D(
                 0.02,
                 0.98,
-                "GT: thin dashed, corrected: thick solid",
+                "GT: semi-transparent tracks, corrected: solid tracks",
                 transform=ax_overlay.transAxes,
                 va="top",
                 fontsize=8,
@@ -441,6 +440,155 @@ def plot_tracks_over_time_panels(
 
     plt.savefig(out_path, dpi=220)
     plt.close(fig)
+    
+    # now, save each panel separately:
+    def _safe_name(s: str) -> str:
+        s = str(s).strip().lower()
+        for old, new in [
+            (" ", "_"),
+            (":", ""),
+            ("/", "_"),
+            ("\\", "_"),
+            ("(", ""),
+            (")", ""),
+            (",", ""),
+            ("+", "plus"),]:
+            s = s.replace(old, new)
+        return s
+
+    panel_specs: list[tuple[int, str, str]] = []
+    if has_gt:
+        panel_specs.append((1, "Ground Truth tracks", "ground_truth_tracks"))
+    panel_specs.extend(
+        [
+            (2 if has_gt else 1, "Original input tracks", "original_input_tracks"),
+            (3 if has_gt else 2, "Corrected tracks", "corrected_tracks"),
+        ])
+    if has_gt:
+        panel_specs.append((4, "Overlay: GT and corrected tracks", "overlay_gt_and_corrected"))
+
+    cm2inch = 1/2.54
+    for panel_id, panel_title, name_stub in panel_specs:
+        fig_i = plt.figure(figsize=(6.0 * cm2inch, 6.0 * cm2inch), constrained_layout=True)
+        ax_i = fig_i.add_subplot(111, projection="3d")
+        
+        """ 
+        # generate some dummy scatter points:
+        np.random.seed(42)
+        n_points = 100
+        x = np.random.uniform(0, 300, n_points)
+        y = np.random.uniform(0, 300, n_points)
+        z = np.random.uniform(0, 300, n_points)
+
+        cm2inch = 0.393701
+        fig = plt.figure(figsize=(6.0 * cm2inch, 4.5 * cm2inch), constrained_layout=True)
+        ax = fig.add_subplot(111, projection="3d")
+        ax.scatter(x, y, z, c="gray", s=10, alpha=0.5, label="Dummy points")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        ax.set_title(r"$x^{true}$", pad=10)
+        # reduce gap between the title and plot:
+        ax.view_init(elev=25, azim=-60)
+        # move the plot a bit up:
+        ax.set_position([0.1, 0.2, 0.8, 0.7])
+        # reduce gap between the axis ticks and plot:
+        ax.tick_params(axis="both", which="major", pad=-2)
+        # reduce gap between the axis label and plot:
+        ax.xaxis.labelpad = -2
+        ax.yaxis.labelpad = -2
+        ax.zaxis.labelpad = -2
+        fig.savefig("/Users/husker/Science/Python/Projekte/Correct uniform movements/paper/figures/test_scatter.pdf", dpi=300, transparent=True)
+        #plt.tight_layout()
+        plt.close(fig)
+        """
+
+        if name_stub == "ground_truth_tracks":
+            assert df_groundtruth is not None
+            for tid in df_groundtruth["TrackID"].dropna().unique():
+                d = df_groundtruth[df_groundtruth["TrackID"] == tid].sort_values("Time")
+                ax_i.plot(d["Position X"], d["Position Y"], d["Position Z"], alpha=0.8, linewidth=1.0)
+
+        elif name_stub == "original_input_tracks":
+            for tid in df_orig["TrackID"].dropna().unique():
+                d = df_orig[df_orig["TrackID"] == tid].sort_values("Time")
+                ax_i.plot(d["Position X"], d["Position Y"], d["Position Z"], alpha=0.8, linewidth=1.0)
+
+        elif name_stub == "corrected_tracks":
+            for tid in df_corr["TrackID"].dropna().unique():
+                d = df_corr[df_corr["TrackID"] == tid].sort_values("Time")
+                ax_i.plot(d["Position X_corr"], d["Position Y_corr"], d["Position Z_corr"], alpha=0.8, linewidth=1.0)
+
+        elif name_stub == "overlay_gt_and_corrected":
+            assert df_groundtruth is not None
+
+            gt_ids = set(df_groundtruth["TrackID"].dropna().unique().tolist())
+            corr_ids = set(df_corr["TrackID"].dropna().unique().tolist())
+            common_track_ids = sorted(gt_ids.intersection(corr_ids))
+
+            if common_track_ids:
+                cmap = plt.get_cmap("turbo")
+                n_tracks = max(len(common_track_ids), 1)
+                denom = max(n_tracks - 1, 1)
+                color_by_tid = {tid: cmap(i / denom) for i, tid in enumerate(common_track_ids)}
+
+                for tid in common_track_ids:
+                    c = color_by_tid[tid]
+
+                    d_gt = df_groundtruth[df_groundtruth["TrackID"] == tid].sort_values("Time")
+                    d_corr = df_corr[df_corr["TrackID"] == tid].sort_values("Time")
+
+                    ax_i.plot(
+                        d_gt["Position X"],
+                        d_gt["Position Y"],
+                        d_gt["Position Z"],
+                        color=c,
+                        linewidth=1.0,
+                        alpha=0.25,
+                        linestyle="-",
+                    )
+                    ax_i.plot(
+                        d_corr["Position X_corr"],
+                        d_corr["Position Y_corr"],
+                        d_corr["Position Z_corr"],
+                        color=c,
+                        linewidth=0.5,
+                        alpha=1.0,
+                        linestyle="-",
+                    )
+
+                """ ax_i.text2D(
+                    0.02,
+                    0.98,
+                    "GT: semi-transparent tracks, corrected: solid tracks",
+                    transform=ax_i.transAxes,
+                    va="top",
+                    fontsize=8,
+                    bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.7},
+                ) """
+            else:
+                ax_i.text2D(0.2, 0.5, "No common GT/corrected TrackIDs", transform=ax_i.transAxes)
+
+        ax_i.set_title(panel_title, pad=-55)
+        ax_i.set_xlim(x_min, x_max)
+        ax_i.set_ylim(y_min, y_max)
+        ax_i.set_zlim(z_min, z_max)
+        ax_i.set_xlabel("X")
+        ax_i.set_ylabel("Y")
+        ax_i.set_zlabel("Z")
+        ax_i.view_init(elev=25, azim=-60)
+        
+        ax_i.set_position([0.1, 0.1, 0.7, 0.8])
+        ax_i.tick_params(axis="both", which="major", pad=-2)
+        ax_i.xaxis.labelpad = -2
+        ax_i.yaxis.labelpad = -2
+        ax_i.zaxis.labelpad = -2
+
+        out_i = out_path.parent / f"{out_path.stem}_panel_{panel_id}_{_safe_name(name_stub)}.pdf"
+        fig_i.savefig(out_i, dpi=300, transparent=True)
+        plt.close(fig_i)
+    
+    
     return out_path
 
 
@@ -488,3 +636,4 @@ def save_visual_inspection_plots(
     if gif_path is not None:
         out["timeseries_gif"] = gif_path
     return out
+# %% END

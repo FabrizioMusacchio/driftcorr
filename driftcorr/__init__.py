@@ -25,10 +25,17 @@ date: Feb 2026
 try:
     import matplotlib.pyplot as plt
 
+    # remove spines globally for all plots:
     plt.rcParams["axes.spines.right"] = False
     plt.rcParams["axes.spines.top"] = False
     plt.rcParams["axes.spines.left"] = False
     plt.rcParams["axes.spines.bottom"] = False
+    
+    # set font size globally for all plots:
+    plt.rcParams["font.size"] = 8
+    
+    # set font family globally for all plots to Arial:
+    plt.rcParams["font.family"] = "Arial"
 except Exception:
     pass
 

@@ -1946,6 +1946,25 @@ Success:
 - Full outputs are generated for every baseline file and method.
 """
 
+""" ensure_baseline_groundtruth()
+baseline_root = results_root("baseline_suite")
+baseline_methods = ["rigid", "local", "rbf", "st_rbf", "st_rbf_moe"]
+baseline_opts = dict(OPTIONS)
+baseline_opts["st_moe_k_list"] = [2, 3, 5]
+
+
+file_path = list_baseline_imaris_files()[14]
+df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+out_prefix = baseline_root / file_path.stem / file_path.stem
+corr = run_methods_for_dataframe(
+    df=df_syn,
+    out_prefix=out_prefix,
+    methods=baseline_methods,
+    opts=baseline_opts,
+    use_stationary_subset=False)
+postprocess_outputs(df_syn, file_path, out_prefix, corr)
+"""
+
 RUN_BASELINE_METHOD_COMPARISON = True
 if RUN_BASELINE_METHOD_COMPARISON:
     ensure_baseline_groundtruth()

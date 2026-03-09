@@ -184,33 +184,6 @@ def run_methods_for_dataframe(
 
     corr_by_method: dict[str, pd.DataFrame] = {}
 
-    if "rbf" in methods:
-        df_rbf, tf_table, _, _, _ = correct_positions_rbf_to_reference(
-            df,
-            reference_time=opts["reference_time"],
-            m=opts["m_centers"],
-            keep_fraction=opts["keep_fraction"],
-            lam=opts["lam"],
-            sigma=opts["sigma"],
-            min_pairs=opts["min_pairs"],
-            seed=opts["seed"],
-            fit_track_ids=stationary_ids,
-            temporal_gamma=opts["temporal_gamma"],
-            center_mode=opts["center_mode"],
-            pooled_time_stride=opts["center_pooled_time_stride"],
-            robust_mode=opts["robust_mode"],
-            track_trim_iters=opts["track_trim_iters"],
-            two_stage=bool(opts["two_stage"]),
-            space_input_mode=opts.get("rbf_space_input_mode", opts["space_input_mode"]),
-            rbf_linear_terms=bool(opts["rbf_linear_terms"]),
-            row_position_iters=opts["row_position_iters"],
-            row_position_tol=opts["row_position_tol"],
-            weight_abort_threshold=opts["weight_abort_threshold"],
-        )
-        df_rbf.to_csv(str(out_prefix) + "_positions_corrected_rbf.csv", index=False)
-        tf_table.to_csv(str(out_prefix) + "_rbf_fit_table.csv", index=False)
-        make_rbf_diagnostic_plots(tf_table, out_prefix)
-        corr_by_method["rbf"] = df_rbf
 
     if "rigid" in methods:
         step, tf_rigid, times = build_step_transforms(
@@ -240,6 +213,35 @@ def run_methods_for_dataframe(
             use_track_mean_position=True,
         )
         corr_by_method["local"] = df_local
+
+    if "rbf" in methods:
+        df_rbf, tf_table, _, _, _ = correct_positions_rbf_to_reference(
+            df,
+            reference_time=opts["reference_time"],
+            m=opts["m_centers"],
+            keep_fraction=opts["keep_fraction"],
+            lam=opts["lam"],
+            sigma=opts["sigma"],
+            min_pairs=opts["min_pairs"],
+            seed=opts["seed"],
+            fit_track_ids=stationary_ids,
+            temporal_gamma=opts["temporal_gamma"],
+            center_mode=opts["center_mode"],
+            pooled_time_stride=opts["center_pooled_time_stride"],
+            robust_mode=opts["robust_mode"],
+            track_trim_iters=opts["track_trim_iters"],
+            two_stage=bool(opts["two_stage"]),
+            space_input_mode=opts.get("rbf_space_input_mode", opts["space_input_mode"]),
+            rbf_linear_terms=bool(opts["rbf_linear_terms"]),
+            row_position_iters=opts["row_position_iters"],
+            row_position_tol=opts["row_position_tol"],
+            weight_abort_threshold=opts["weight_abort_threshold"],
+        )
+        df_rbf.to_csv(str(out_prefix) + "_positions_corrected_rbf.csv", index=False)
+        tf_table.to_csv(str(out_prefix) + "_rbf_fit_table.csv", index=False)
+        make_rbf_diagnostic_plots(tf_table, out_prefix)
+        corr_by_method["rbf"] = df_rbf
+
 
     if "st_rbf" in methods:
         st_model, st_info = fit_spacetime_rbf_model(
@@ -318,9 +320,17 @@ def postprocess_outputs(
     df_orig: pd.DataFrame,
     imaris_file: Path,
     out_prefix: Path,
-    corr_by_method: dict[str, pd.DataFrame],
-) -> None:
-    """Create standard evaluation + visual plots + optional groundtruth evaluation."""
+    corr_by_method: dict[str, pd.DataFrame]) -> None:
+    """
+    Create standard evaluation + visual plots + optional groundtruth evaluation.
+    
+    DEBUg: 
+    df_orig = df_syn
+    imaris_file = file_path
+    out_prefix = out_prefix
+    corr_by_method = corr
+    
+    """
     summary_df, details = run_all_methods_and_compare(df_orig, corr_by_method)
     save_evaluation_outputs(out_prefix, summary_df, details)
 
@@ -1679,6 +1689,7 @@ def _plot_summary_heatmap(
     metric_name: str,
     out_path: Path,
     title: str,
+    figsize: tuple[float, float] = (6.0, 4.0)
 ) -> bool:
     """Plot method x mode heatmap of mean metric values."""
     sub = summary_df[summary_df["metric_name"].astype(str) == str(metric_name)].copy()
@@ -1694,12 +1705,15 @@ def _plot_summary_heatmap(
     mat = piv.to_numpy(float)
     cmap = plt.get_cmap("viridis").copy()
     cmap.set_bad("#f0f0f0")
-    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label(metric_name)
+    # replace all "_" with " ":
+    cbar.set_label(metric_name.replace("_", " "))
     ax.set_xticks(np.arange(len(modes)))
-    ax.set_xticklabels(modes, rotation=20, ha="right")
+    # replace all "_" with " " in mode labels:
+    modes_names = [m.replace("_", " ") for m in modes]
+    ax.set_xticklabels(modes_names, rotation=20, ha="right")
     ax.set_yticks(np.arange(len(methods)))
     ax.set_yticklabels(methods)
     ax.set_title(title)
@@ -1707,7 +1721,7 @@ def _plot_summary_heatmap(
     ax.set_ylabel("method")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=300)
+    fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
     return True
 
@@ -1941,6 +1955,7 @@ if RUN_BASELINE_METHOD_COMPARISON:
     baseline_opts["st_moe_k_list"] = [2, 3, 5]
 
     for file_path in list_baseline_imaris_files():
+        # file_path = list_baseline_imaris_files()[14]
         df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
         out_prefix = baseline_root / file_path.stem / file_path.stem
         corr = run_methods_for_dataframe(
@@ -1985,29 +2000,77 @@ if RUN_BASELINE_SUITE_AGGREGATION:
         ("drift_bias_abs", "Baseline suite: drift bias by mode and method"),
     ]
     for metric_name, title in plot_specs:
-        p_bar = out_dir / f"baseline_suite_{metric_name}_grouped_bar_plot.png"
+        p_bar = out_dir / f"baseline_suite_{metric_name}_grouped_bar_plot.pdf"
         if _plot_summary_grouped_bars(summary, metric_name=metric_name, out_path=p_bar, title=title):
             generated.append(p_bar)
-        p_hm = out_dir / f"baseline_suite_{metric_name}_heatmap_plot.png"
-        if _plot_summary_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title):
+        p_hm = out_dir / f"baseline_suite_{metric_name}_heatmap_plot.pdf"
+        if _plot_summary_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title, figsize=(5.5, 4.0)):
             generated.append(p_hm)
 
     if generated:
-        readme = out_dir / "baseline_suite_plots_README.txt"
-        readme.write_text(
-            "\n".join(
-                [
-                    f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
-                    f"summary_csv: {summary_path}",
-                    "description: Means and std over baseline files, grouped by mode and method.",
-                    "plots:",
-                    *[f"- {p.name}" for p in generated],
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
-        )
         print(f"[OK] Wrote baseline suite plots: {len(generated)}")
+# %% Canonical Large Regime Benchmark (3 Modes x 20 Seeds) FOR SUPPLEMENTARY MATERIALS (!)
+"""Run the canonical large benchmark over `_groundtruth_large`.
+
+Question answered:
+- How stable are method rankings across 3 regimes and 20 seeds each?
+
+Datasets:
+- `_groundtruth_large` only.
+
+Artifacts:
+- Per-run outputs in `Synthetic files parameter sweep/regime_benchmark_large_20seeds/...`
+- Aggregated tables in the same root.
+"""
+
+RUN_LARGE_REGIME_BENCHMARK = True
+if RUN_LARGE_REGIME_BENCHMARK:
+    ensure_large_groundtruth_regimes()
+    out_root = results_root("regime_benchmark_large_20seeds")
+    methods = ["rigid", "local", "rbf", "st_rbf"]
+    opts = dict(OPTIONS)
+
+    for regime_dir in list_large_regime_folders():
+        for file_path in list_imaris_xls_files(regime_dir):
+            df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
+            out_prefix = out_root / regime_dir.name / file_path.stem / file_path.stem
+            corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=methods, opts=opts)
+            postprocess_outputs(df_syn, file_path, out_prefix, corr)
+
+    # Aggregate per-file metric summaries.
+    rows: list[pd.DataFrame] = []
+    for p in sorted(out_root.rglob("*_gt_metrics_summary.csv")):
+        try:
+            df = pd.read_csv(p)
+        except Exception:
+            continue
+        if df.empty or "method" not in df.columns:
+            continue
+        run_folder = p.parents[1].name  # <regime_folder>/<file_stem>/<file_stem>_gt_metrics_summary.csv
+        metrics = [c for c in df.columns if c != "method" and pd.api.types.is_numeric_dtype(df[c])]
+        if not metrics:
+            continue
+        tidy = df[["method"] + metrics].melt(id_vars=["method"], var_name="metric_name", value_name="metric_value")
+        tidy["run_folder"] = run_folder
+        tidy["file_stem"] = p.name.replace("_gt_metrics_summary.csv", "")
+        rows.append(tidy[["run_folder", "file_stem", "method", "metric_name", "metric_value"]])
+    if rows:
+        agg = pd.concat(rows, ignore_index=True)
+        agg.to_csv(out_root / "regime_benchmark_large_20seeds_aggregated.csv", index=False)
+        summary = (
+            agg.groupby(["run_folder", "method", "metric_name"], as_index=False)["metric_value"]
+            .agg(mean="mean", std="std", n="count")
+            .sort_values(["run_folder", "method", "metric_name"])
+            .reset_index(drop=True)
+        )
+        summary.to_csv(out_root / "regime_benchmark_large_20seeds_summary.csv", index=False)
+
+RUN_LARGE_REGIME_BENCHMARK_PLOTS = True
+if RUN_LARGE_REGIME_BENCHMARK and RUN_LARGE_REGIME_BENCHMARK_PLOTS:
+    large_root = results_root("regime_benchmark_large_20seeds")
+    generated = _plot_large_regime_benchmark_from_aggregates(large_root)
+    if generated:
+        print(f"[OK] Wrote large-regime evaluation plots: {len(generated)}")
 # %% RBF Robust Mode Sweep (All Baseline Modes)
 """Run RBF robust-mode sweep across all baseline files and modes.
 
@@ -2346,68 +2409,7 @@ if RUN_ST_RBF_EXPRESSIVITY_AGGREGATION:
             encoding="utf-8",
         )
         print(f"[OK] Wrote ST-RBF expressivity plots: {len(generated)}")
-# %% Canonical Large Regime Benchmark (3 Modes x 20 Seeds)
-"""Run the canonical large benchmark over `_groundtruth_large`.
 
-Question answered:
-- How stable are method rankings across 3 regimes and 20 seeds each?
-
-Datasets:
-- `_groundtruth_large` only.
-
-Artifacts:
-- Per-run outputs in `Synthetic files parameter sweep/regime_benchmark_large_20seeds/...`
-- Aggregated tables in the same root.
-"""
-
-RUN_LARGE_REGIME_BENCHMARK = True
-if RUN_LARGE_REGIME_BENCHMARK:
-    ensure_large_groundtruth_regimes()
-    out_root = results_root("regime_benchmark_large_20seeds")
-    methods = ["rigid", "local", "rbf", "st_rbf"]
-    opts = dict(OPTIONS)
-
-    for regime_dir in list_large_regime_folders():
-        for file_path in list_imaris_xls_files(regime_dir):
-            df_syn = ensure_numeric_tracks(read_imaris_position_xls(file_path))
-            out_prefix = out_root / regime_dir.name / file_path.stem / file_path.stem
-            corr = run_methods_for_dataframe(df=df_syn, out_prefix=out_prefix, methods=methods, opts=opts)
-            postprocess_outputs(df_syn, file_path, out_prefix, corr)
-
-    # Aggregate per-file metric summaries.
-    rows: list[pd.DataFrame] = []
-    for p in sorted(out_root.rglob("*_gt_metrics_summary.csv")):
-        try:
-            df = pd.read_csv(p)
-        except Exception:
-            continue
-        if df.empty or "method" not in df.columns:
-            continue
-        run_folder = p.parents[1].name  # <regime_folder>/<file_stem>/<file_stem>_gt_metrics_summary.csv
-        metrics = [c for c in df.columns if c != "method" and pd.api.types.is_numeric_dtype(df[c])]
-        if not metrics:
-            continue
-        tidy = df[["method"] + metrics].melt(id_vars=["method"], var_name="metric_name", value_name="metric_value")
-        tidy["run_folder"] = run_folder
-        tidy["file_stem"] = p.name.replace("_gt_metrics_summary.csv", "")
-        rows.append(tidy[["run_folder", "file_stem", "method", "metric_name", "metric_value"]])
-    if rows:
-        agg = pd.concat(rows, ignore_index=True)
-        agg.to_csv(out_root / "regime_benchmark_large_20seeds_aggregated.csv", index=False)
-        summary = (
-            agg.groupby(["run_folder", "method", "metric_name"], as_index=False)["metric_value"]
-            .agg(mean="mean", std="std", n="count")
-            .sort_values(["run_folder", "method", "metric_name"])
-            .reset_index(drop=True)
-        )
-        summary.to_csv(out_root / "regime_benchmark_large_20seeds_summary.csv", index=False)
-
-RUN_LARGE_REGIME_BENCHMARK_PLOTS = True
-if RUN_LARGE_REGIME_BENCHMARK and RUN_LARGE_REGIME_BENCHMARK_PLOTS:
-    large_root = results_root("regime_benchmark_large_20seeds")
-    generated = _plot_large_regime_benchmark_from_aggregates(large_root)
-    if generated:
-        print(f"[OK] Wrote large-regime evaluation plots: {len(generated)}")
 # %% ST-RBF Parameter Grid Sweep (3x3)
 """Run ST-RBF parameter grid sweep using baseline datasets across all modes.
 

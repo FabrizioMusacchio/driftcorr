@@ -98,7 +98,7 @@ LARGE_FOLDER_MODE_TOKEN = {
     "jump_events": "jump_events",
 }
 
-DEFAULT_METHODS = ["rbf", "rigid", "local", "st_rbf"]
+DEFAULT_METHODS = ["rigid", "local", "rbf", "st_rbf"]
 
 # Core method options in one place.
 OPTIONS = {
@@ -186,33 +186,6 @@ def run_methods_for_dataframe(
 
     corr_by_method: dict[str, pd.DataFrame] = {}
 
-    if "rbf" in methods:
-        df_rbf, tf_table, _, _, _ = correct_positions_rbf_to_reference(
-            df,
-            reference_time=opts["reference_time"],
-            m=opts["m_centers"],
-            keep_fraction=opts["keep_fraction"],
-            lam=opts["lam"],
-            sigma=opts["sigma"],
-            min_pairs=opts["min_pairs"],
-            seed=opts["seed"],
-            fit_track_ids=stationary_ids,
-            temporal_gamma=opts["temporal_gamma"],
-            center_mode=opts["center_mode"],
-            pooled_time_stride=opts["center_pooled_time_stride"],
-            robust_mode=opts["robust_mode"],
-            track_trim_iters=opts["track_trim_iters"],
-            two_stage=bool(opts["two_stage"]),
-            space_input_mode=opts.get("rbf_space_input_mode", opts["space_input_mode"]),
-            rbf_linear_terms=bool(opts["rbf_linear_terms"]),
-            row_position_iters=opts["row_position_iters"],
-            row_position_tol=opts["row_position_tol"],
-            weight_abort_threshold=opts["weight_abort_threshold"],
-        )
-        df_rbf.to_csv(str(out_prefix) + "_positions_corrected_rbf.csv", index=False)
-        tf_table.to_csv(str(out_prefix) + "_rbf_fit_table.csv", index=False)
-        make_rbf_diagnostic_plots(tf_table, out_prefix)
-        corr_by_method["rbf"] = df_rbf
 
     if "rigid" in methods:
         step, tf_rigid, times = build_step_transforms(
@@ -242,6 +215,34 @@ def run_methods_for_dataframe(
             use_track_mean_position=True,
         )
         corr_by_method["local"] = df_local
+
+    if "rbf" in methods:
+        df_rbf, tf_table, _, _, _ = correct_positions_rbf_to_reference(
+            df,
+            reference_time=opts["reference_time"],
+            m=opts["m_centers"],
+            keep_fraction=opts["keep_fraction"],
+            lam=opts["lam"],
+            sigma=opts["sigma"],
+            min_pairs=opts["min_pairs"],
+            seed=opts["seed"],
+            fit_track_ids=stationary_ids,
+            temporal_gamma=opts["temporal_gamma"],
+            center_mode=opts["center_mode"],
+            pooled_time_stride=opts["center_pooled_time_stride"],
+            robust_mode=opts["robust_mode"],
+            track_trim_iters=opts["track_trim_iters"],
+            two_stage=bool(opts["two_stage"]),
+            space_input_mode=opts.get("rbf_space_input_mode", opts["space_input_mode"]),
+            rbf_linear_terms=bool(opts["rbf_linear_terms"]),
+            row_position_iters=opts["row_position_iters"],
+            row_position_tol=opts["row_position_tol"],
+            weight_abort_threshold=opts["weight_abort_threshold"],
+        )
+        df_rbf.to_csv(str(out_prefix) + "_positions_corrected_rbf.csv", index=False)
+        tf_table.to_csv(str(out_prefix) + "_rbf_fit_table.csv", index=False)
+        make_rbf_diagnostic_plots(tf_table, out_prefix)
+        corr_by_method["rbf"] = df_rbf
 
     if "st_rbf" in methods:
         st_model, st_info = fit_spacetime_rbf_model(
@@ -2130,7 +2131,7 @@ RUN_BASELINE_METHOD_COMPARISON = True
 if RUN_BASELINE_METHOD_COMPARISON:
     ensure_baseline_groundtruth()
     baseline_root = results_root("baseline_suite")
-    baseline_methods = ["rbf", "rigid", "local", "st_rbf", "st_rbf_moe"]
+    baseline_methods = ["rigid", "local", "rbf", "st_rbf", "st_rbf_moe"]
     baseline_opts = dict(OPTIONS)
     baseline_opts["st_moe_k_list"] = [2, 3, 5]
 
@@ -2558,7 +2559,7 @@ RUN_LARGE_REGIME_BENCHMARK = True
 if RUN_LARGE_REGIME_BENCHMARK:
     ensure_large_groundtruth_regimes()
     out_root = results_root("regime_benchmark_large_20seeds")
-    methods = ["rbf", "rigid", "local", "st_rbf"]
+    methods = ["rigid", "local", "rbf", "st_rbf"]
     opts = dict(OPTIONS)
 
     for regime_dir in list_large_regime_folders():

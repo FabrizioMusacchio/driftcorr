@@ -42,7 +42,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from pathlib import Path
@@ -54,7 +54,7 @@ import pandas as pd
 
 from .io_imaris import ensure_numeric_tracks
 from .metrics import per_time_groundtruth_metrics
-
+# %% FUNCTIONS
 
 def _smooth_random_series(
     rng: np.random.Generator,
@@ -1157,7 +1157,16 @@ def save_groundtruth_evaluation_outputs(
     corrected_by_method: dict[str, pd.DataFrame],
     drift_field_groundtruth: pd.DataFrame | None = None,
 ) -> dict[str, Path]:
-    """Save groundtruth-based method comparison metrics and plots."""
+    """
+    Save groundtruth-based method comparison metrics and plots.
+    
+    DEBUG: 
+    
+    base_out_prefix = out_prefix
+    groundtruth_df = gt
+    corrected_by_method = corr_by_method
+    drift_field_groundtruth=drift_gt
+    """
     base_out_prefix = Path(base_out_prefix)
     base_out_prefix.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1242,13 +1251,15 @@ def save_groundtruth_evaluation_outputs(
     out_summary = base_out_prefix.with_name(base_out_prefix.name + "_gt_metrics_summary.csv")
     summary_df.to_csv(out_summary, index=False)
 
-    out_hist = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_per_track_hist.png")
-    out_time = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_over_time.png")
-    out_time_stationary = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_stationary_over_time.png")
-    out_time_migrating = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_migrating_over_time.png")
-    out_drift_bias = base_out_prefix.with_name(base_out_prefix.name + "_gt_drift_bias_over_time.png")
+    out_hist = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_per_track_hist.pdf")
+    out_time = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_over_time.pdf")
+    out_time_stationary = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_stationary_over_time.pdf")
+    out_time_migrating = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_migrating_over_time.pdf")
+    out_drift_bias = base_out_prefix.with_name(base_out_prefix.name + "_gt_drift_bias_over_time.pdf")
 
-    fig = plt.figure(figsize=(9, 5))
+    #fig = plt.figure(figsize=(9, 5))
+    cm2inch = 1/2.54
+    fig = plt.figure(figsize=(6.0*cm2inch, 4*cm2inch))
     for method, tab in per_method_track.items():
         arr = tab["rms_error"].to_numpy(float)
         if arr.size:
@@ -1258,72 +1269,97 @@ def save_groundtruth_evaluation_outputs(
     plt.title("Corrected vs Groundtruth: per-track RMS error")
     handles, _ = plt.gca().get_legend_handles_labels()
     if handles:
-        plt.legend()
+        plt.legend(ncol=2, loc="upper left")
     plt.tight_layout()
-    plt.savefig(out_hist, dpi=300)
+    plt.savefig(out_hist, dpi=300, transparent=True)
     plt.close(fig)
 
-    fig = plt.figure(figsize=(9, 5))
+    #fig = plt.figure(figsize=(9, 5))
+    cm2inch = 1/2.54
+    fig = plt.figure(figsize=(6.0*cm2inch, 4*cm2inch))
     for method, tab in per_method_time.items():
         if tab.shape[0]:
-            plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), marker="o", label=method)
+            plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), 
+                     marker="o", label=method, markersize=2, lw=0.7)
     plt.xlabel("Time")
     plt.ylabel("RMS error (um)")
     plt.title("Corrected vs Groundtruth: RMS error over time")
-    plt.ylim(bottom=0.0)
+    plt.ylim(bottom=0.0, top=11.0)
     handles, _ = plt.gca().get_legend_handles_labels()
     if handles:
-        plt.legend()
+        plt.legend(ncol=2, loc="upper left", fontsize=4)
+    if tab["Time"].max() <= 10:
+        plt.xticks(np.arange(0, tab["Time"].max() + 1, step=2))
+    elif tab["Time"].max() <= 20:
+        plt.xticks(np.arange(0, tab["Time"].max() + 1, step=5))
     plt.tight_layout()
-    plt.savefig(out_time, dpi=300)
+    plt.savefig(out_time, dpi=300, transparent=True)
     plt.close(fig)
 
     if per_method_time_stationary:
-        fig = plt.figure(figsize=(9, 5))
+        #fig = plt.figure(figsize=(9, 5))
+        cm2inch = 1/2.54
+        fig = plt.figure(figsize=(6.0*cm2inch, 4*cm2inch))
         for method, tab in per_method_time_stationary.items():
             if tab.shape[0]:
                 plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), marker="o", label=method)
         plt.xlabel("Time")
         plt.ylabel("RMS error (um)")
         plt.title("Corrected vs Groundtruth: RMS_stationary_over_time")
-        plt.ylim(bottom=0.0)
+        plt.ylim(bottom=0.0, top=11.0)
         handles, _ = plt.gca().get_legend_handles_labels()
         if handles:
-            plt.legend()
+            plt.legend(ncol=2, loc="upper left")
+        if tab["Time"].max() <= 10:
+            plt.xticks(np.arange(0, tab["Time"].max() + 1, step=2))
+        elif tab["Time"].max() <= 20:
+            plt.xticks(np.arange(0, tab["Time"].max() + 1, step=5))
         plt.tight_layout()
-        plt.savefig(out_time_stationary, dpi=300)
+        plt.savefig(out_time_stationary, dpi=300, transparent=True)
         plt.close(fig)
 
     if per_method_time_migrating:
-        fig = plt.figure(figsize=(9, 5))
+        #fig = plt.figure(figsize=(9, 5))
+        cm2inch = 1/2.54
+        fig = plt.figure(figsize=(6.0*cm2inch, 4*cm2inch))
         for method, tab in per_method_time_migrating.items():
             if tab.shape[0]:
                 plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), marker="o", label=method)
         plt.xlabel("Time")
         plt.ylabel("RMS error (um)")
         plt.title("Corrected vs Groundtruth: RMS_migrating_over_time")
-        plt.ylim(bottom=0.0)
+        plt.ylim(bottom=0.0, top=11.0)
         handles, _ = plt.gca().get_legend_handles_labels()
         if handles:
-            plt.legend()
+            plt.legend(ncol=2, loc="upper left")
+        if tab["Time"].max() <= 10:
+            plt.xticks(np.arange(0, tab["Time"].max() + 1, step=2))
+        elif tab["Time"].max() <= 20:
+            plt.xticks(np.arange(0, tab["Time"].max() + 1, step=5))
         plt.tight_layout()
-        plt.savefig(out_time_migrating, dpi=300)
+        plt.savefig(out_time_migrating, dpi=300, transparent=True)
         plt.close(fig)
 
     if per_method_drift_bias:
-        fig = plt.figure(figsize=(9, 5))
+        #fig = plt.figure(figsize=(9, 5))
+        cm2inch = 1/2.54
+        fig = plt.figure(figsize=(6.0*cm2inch, 4*cm2inch))
         for method, tab in per_method_drift_bias.items():
             if tab.shape[0]:
                 plt.plot(tab["Time"].to_numpy(float), tab["drift_bias_norm"].to_numpy(float), marker="o", label=method)
         plt.xlabel("Time")
         plt.ylabel("||median(pred_drift)-median(true_drift)|| (um)")
         plt.title("Groundtruth drift bias over time")
-        plt.ylim(bottom=0.0)
+        plt.ylim(bottom=0.0, top=11.0)
         handles, _ = plt.gca().get_legend_handles_labels()
         if handles:
-            plt.legend()
+            plt.legend(ncol=2, loc="upper left")
+        if groundtruth_df["Time"].max() <= 10:
+            plt.xticks(np.arange(0, groundtruth_df["Time"].max() + 1, step=2))
+        elif groundtruth_df["Time"].max() <= 20:
+            plt.xticks(np.arange(0, groundtruth_df["Time"].max() + 1, step=5))
         plt.tight_layout()
-        plt.savefig(out_drift_bias, dpi=300)
+        plt.savefig(out_drift_bias, dpi=300, transparent=True)
         plt.close(fig)
 
     out: dict[str, Path] = {
@@ -1338,3 +1374,4 @@ def save_groundtruth_evaluation_outputs(
     if per_method_drift_bias:
         out["gt_drift_bias_over_time"] = out_drift_bias
     return out
+# %% END

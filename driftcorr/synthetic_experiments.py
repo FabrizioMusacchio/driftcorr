@@ -1264,17 +1264,17 @@ def save_groundtruth_evaluation_outputs(
         arr = tab["rms_error"].to_numpy(float)
         if arr.size:
             plt.hist(arr, bins=40, alpha=0.4, label=method)
-    plt.xlabel("RMS error per track (um)")
+    plt.xlabel(r"RMS error per track ($\mu$m)")
     plt.ylabel("count")
-    plt.title("Corrected vs Groundtruth: per-track RMS error")
+    plt.title(r"Corrected vs GT: per-track RMS")
     handles, _ = plt.gca().get_legend_handles_labels()
     if handles:
-        plt.legend(ncol=2, loc="upper left")
+        plt.legend(ncol=2, loc="upper right", fontsize=4, frameon=False)
     plt.tight_layout()
     plt.savefig(out_hist, dpi=300, transparent=True)
     plt.close(fig)
-
-    #fig = plt.figure(figsize=(9, 5))
+  
+    #fig = plt.figure(figsize=(7, 5))
     cm2inch = 1/2.54
     fig = plt.figure(figsize=(6.0*cm2inch, 4*cm2inch))
     for method, tab in per_method_time.items():
@@ -1282,12 +1282,12 @@ def save_groundtruth_evaluation_outputs(
             plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), 
                      marker="o", label=method, markersize=2, lw=0.7)
     plt.xlabel("Time")
-    plt.ylabel("RMS error (um)")
-    plt.title("Corrected vs Groundtruth: RMS error over time")
+    plt.ylabel("RMS error ($\mu$m)")
+    plt.title(r"Corrected vs GT: RMS$_{\text{global}}$")
     plt.ylim(bottom=0.0, top=11.0)
     handles, _ = plt.gca().get_legend_handles_labels()
     if handles:
-        plt.legend(ncol=2, loc="upper left", fontsize=4)
+        plt.legend(ncol=2, loc="upper left", fontsize=4, frameon=False)
     if tab["Time"].max() <= 10:
         plt.xticks(np.arange(0, tab["Time"].max() + 1, step=2))
     elif tab["Time"].max() <= 20:
@@ -1302,14 +1302,16 @@ def save_groundtruth_evaluation_outputs(
         fig = plt.figure(figsize=(6.0*cm2inch, 4*cm2inch))
         for method, tab in per_method_time_stationary.items():
             if tab.shape[0]:
-                plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), marker="o", label=method)
+                plt.plot(tab["Time"].to_numpy(float), 
+                         tab["rms_error"].to_numpy(float), 
+                         marker="o", label=method, markersize=2, lw=0.7)
         plt.xlabel("Time")
-        plt.ylabel("RMS error (um)")
-        plt.title("Corrected vs Groundtruth: RMS_stationary_over_time")
+        plt.ylabel("RMS error ($\mu$m)")
+        plt.title(r"Corrected vs GT: RMS$_{\text{stationary}}$")
         plt.ylim(bottom=0.0, top=11.0)
         handles, _ = plt.gca().get_legend_handles_labels()
         if handles:
-            plt.legend(ncol=2, loc="upper left")
+            plt.legend(ncol=2, loc="upper left", fontsize=4, frameon=False)
         if tab["Time"].max() <= 10:
             plt.xticks(np.arange(0, tab["Time"].max() + 1, step=2))
         elif tab["Time"].max() <= 20:
@@ -1324,14 +1326,15 @@ def save_groundtruth_evaluation_outputs(
         fig = plt.figure(figsize=(6.0*cm2inch, 4*cm2inch))
         for method, tab in per_method_time_migrating.items():
             if tab.shape[0]:
-                plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), marker="o", label=method)
+                plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), 
+                         marker="o", label=method, markersize=2, lw=0.7)
         plt.xlabel("Time")
-        plt.ylabel("RMS error (um)")
-        plt.title("Corrected vs Groundtruth: RMS_migrating_over_time")
+        plt.ylabel("RMS error ($\mu$m)")
+        plt.title(r"Corrected vs GT: RMS$_{\text{migrating}}$")
         plt.ylim(bottom=0.0, top=11.0)
         handles, _ = plt.gca().get_legend_handles_labels()
         if handles:
-            plt.legend(ncol=2, loc="upper left")
+            plt.legend(ncol=2, loc="upper left", fontsize=4, frameon=False)
         if tab["Time"].max() <= 10:
             plt.xticks(np.arange(0, tab["Time"].max() + 1, step=2))
         elif tab["Time"].max() <= 20:
@@ -1346,14 +1349,17 @@ def save_groundtruth_evaluation_outputs(
         fig = plt.figure(figsize=(6.0*cm2inch, 4*cm2inch))
         for method, tab in per_method_drift_bias.items():
             if tab.shape[0]:
-                plt.plot(tab["Time"].to_numpy(float), tab["drift_bias_norm"].to_numpy(float), marker="o", label=method)
+                plt.plot(tab["Time"].to_numpy(float), 
+                         tab["drift_bias_norm"].to_numpy(float), 
+                         marker="o", label=method, markersize=2, lw=0.7)
         plt.xlabel("Time")
-        plt.ylabel("||median(pred_drift)-median(true_drift)|| (um)")
+        #plt.ylabel("||median(drift$_{pred}$)- \n median(drift$_{true}$)|| ($\mu$m)")
+        plt.ylabel(r"$\|\mathrm{med}(\mathbf{d}_{pred})-\mathrm{med}(\mathbf{d}_{true})\|$ ($\mu$m)")
         plt.title("Groundtruth drift bias over time")
-        plt.ylim(bottom=0.0, top=11.0)
+        plt.ylim(bottom=0.0, top=6.0)
         handles, _ = plt.gca().get_legend_handles_labels()
         if handles:
-            plt.legend(ncol=2, loc="upper left")
+            plt.legend(ncol=2, loc="upper left", fontsize=4, frameon=False)
         if groundtruth_df["Time"].max() <= 10:
             plt.xticks(np.arange(0, groundtruth_df["Time"].max() + 1, step=2))
         elif groundtruth_df["Time"].max() <= 20:

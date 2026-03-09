@@ -18,7 +18,6 @@ import numpy as np
 import pandas as pd
 
 from .types import PointCloudFrame
-
 # %% FUNCTIONS
 def _frames_to_points_df(frames: list[PointCloudFrame]) -> pd.DataFrame:
     rows: list[dict[str, float]] = []
@@ -282,6 +281,62 @@ def plot_3d_frames_comparison(
     fig.tight_layout()
     fig.savefig(out, dpi=300)
     plt.close(fig)
+    
+    
+    # repeat all 4 plots above, but now each in a separate figure:
+    def _safe_name(s: str) -> str:
+        s = str(s).strip().lower()
+        for old, new in [
+            (" ", "_"),
+            (":", ""),
+            ("/", "_"),
+            ("\\", "_"),
+            ("(", ""),
+            (")", ""),
+            (",", ""),
+        ]:
+            s = s.replace(old, new)
+        return s
+
+    panel_specs = [
+        (1, "GT tracks", "gt_tracks"),
+        (2, "Blind point clouds", "blind_point_clouds"),
+        (3, "Inferred pseudo tracks", "inferred_pseudo_tracks"),
+        (4, "Overlay: GT tracks (thin) vs inferred tracks (thick)", "overlay_gt_vs_inferred"),
+    ]
+
+    for i, title_use, name_stub in panel_specs:
+        fig, ax = plt.subplots(figsize=(5.5, 4.0), subplot_kw={"projection": "3d"})
+        #print("..plotting each panel into separate files...")
+        if i == 1 and not gt_tracks.empty:
+            _plot_tracks(ax, gt_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=1.2, alpha=0.75)
+            #print("true for i=1")
+        elif i == 2 and not blind_pts.empty:
+            times = blind_pts["Time"].to_numpy(float)
+            ax.scatter(blind_pts["x"], blind_pts["y"], blind_pts["z"], c=times, cmap="viridis", s=6, alpha=0.55)
+            # print("true for i=2")
+        elif i == 3 and not inf_tracks.empty:
+            _plot_tracks(ax, inf_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=1.4, alpha=0.8)
+            # print("true for i=3")
+        elif i == 4:
+            if not gt_tracks.empty:
+                _plot_tracks(ax, gt_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=1.0, alpha=1.0)
+                # print("true for i=4.1")
+            if not inf_tracks.empty:
+                _plot_tracks(ax, inf_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=2.0, alpha=0.5)
+                # print("true for i=4.2")
+
+        ax.set_title(title_use)
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.set_zlabel("Z")
+        fig.tight_layout()
+
+        out_i = out.parent / f"{out.stem}_panel_{i}_{_safe_name(name_stub)}.pdf"
+        # print(f"stored in {out_i}")
+        fig.savefig(out_i, dpi=300, transparent=True)
+        plt.close(fig)
+    
     return out
 
 
@@ -318,7 +373,7 @@ def plot_rms_over_time(gt_tracks_df: pd.DataFrame, inferred_tracks_df: pd.DataFr
     mi = i[["Time", "GT_TrackID_mapped", "x", "y", "z"]].rename(columns={"GT_TrackID_mapped": "GT_TrackID", "x": "x_inf", "y": "y_inf", "z": "z_inf"})
     m = mg.merge(mi, on=["Time", "GT_TrackID"], how="inner")
     if m.empty:
-        fig, ax = plt.subplots(figsize=(6.5, 4.5))
+        fig, ax = plt.subplots(figsize=(5.5, 3.5))
         ax.set_title("RMS over time (no overlap)")
         ax.set_xlabel("Time")
         ax.set_ylabel("RMS")
@@ -332,7 +387,7 @@ def plot_rms_over_time(gt_tracks_df: pd.DataFrame, inferred_tracks_df: pd.DataFr
     rms = tab.groupby("Time", as_index=False)["err"].apply(lambda v: float(np.sqrt(np.mean(np.asarray(v, dtype=float) ** 2))))
     rms = rms.rename(columns={"err": "rms"})
 
-    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    fig, ax = plt.subplots(figsize=(5.5, 3.5))
     ax.plot(rms["Time"], rms["rms"], marker="o")
     ax.set_title("RMS error over time")
     ax.set_xlabel("Time")

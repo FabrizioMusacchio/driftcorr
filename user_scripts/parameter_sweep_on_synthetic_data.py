@@ -1708,6 +1708,8 @@ def _plot_summary_heatmap(
     fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    # remove frame around colorbar:
+    cbar.outline.set_visible(False)
     # replace all "_" with " ":
     cbar.set_label(metric_name.replace("_", " "))
     ax.set_xticks(np.arange(len(modes)))
@@ -2011,20 +2013,91 @@ if RUN_BASELINE_SUITE_AGGREGATION:
     print(f"[OK] {tidy_path}")
     print(f"[OK] {summary_path}")
 
-    summary = pd.read_csv(summary_path)
     out_dir = results_root("baseline_suite")
+    summary = pd.read_csv(summary_path)
+    tidy = pd.read_csv(tidy_path)
+    metrics_extended = ["overall_rms_error", "median_error_norm", "p95_error_norm", "drift_bias_abs"]
+    sub_ext = tidy[tidy["metric_name"].astype(str).isin(metrics_extended)].copy()
+    if sub_ext.empty:
+        summary_ext = pd.DataFrame(columns=["mode", "config", "method", "metric_name", "mean", "std", "n"])
+    else:
+        summary_ext = (
+            sub_ext.groupby(["mode", "config", "method", "metric_name"], as_index=False)["metric_value"]
+            .agg(mean="mean", std="std", n="count")
+            .sort_values(["mode", "config", "method", "metric_name"])
+            .reset_index(drop=True)
+        )
+    summary_ext_path = out_dir / "baseline_suite_summary_extended.csv"
+    summary_ext.to_csv(summary_ext_path, index=False)
+    print(f"[OK] {summary_ext_path}")
+
     generated: list[Path] = []
     plot_specs = [
-        ("overall_rms_error", "Baseline suite: overall RMS by mode and method"),
-        ("drift_bias_abs", "Baseline suite: drift bias by mode and method"),
+        ("overall_rms_error", "Overall RMS by mode and method"),
+        ("median_error_norm", "Median error by mode and method"),
+        ("p95_error_norm", "P95 error by mode and method"),
+        ("drift_bias_abs", "Drift bias by mode and method"),
     ]
     for metric_name, title in plot_specs:
         p_bar = out_dir / f"baseline_suite_{metric_name}_grouped_bar_plot.pdf"
-        if _plot_summary_grouped_bars(summary, metric_name=metric_name, out_path=p_bar, title=title):
+        if _plot_summary_grouped_bars(summary_ext, metric_name=metric_name, out_path=p_bar, title=title):
             generated.append(p_bar)
         p_hm = out_dir / f"baseline_suite_{metric_name}_heatmap_plot.pdf"
-        if _plot_summary_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title, figsize=(5.5, 4.0)):
+        CM = 1/2.54  # centimeters in inches
+        if _plot_summary_heatmap(summary_ext, metric_name=metric_name, out_path=p_hm, title=title, 
+                                 figsize=(8*CM, 6.0*CM)):
             generated.append(p_hm)
+
+    # Reviewer figure: RMS vs P95 scatter (points = method x regime).
+    rms_tab = summary_ext[summary_ext["metric_name"].astype(str) == "overall_rms_error"][
+        ["mode", "method", "mean"]
+    ].rename(columns={"mean": "rms_mean"})
+    p95_tab = summary_ext[summary_ext["metric_name"].astype(str) == "p95_error_norm"][
+        ["mode", "method", "mean"]
+    ].rename(columns={"mean": "p95_mean"})
+    scatter_df = rms_tab.merge(p95_tab, on=["mode", "method"], how="inner")
+    if scatter_df.shape[0] > 0:
+        modes = _ordered_modes(sorted(scatter_df["mode"].astype(str).unique().tolist()))
+        methods = _ordered_methods(sorted(scatter_df["method"].astype(str).unique().tolist()))
+        marker_map = {m: mk for m, mk in zip(modes, ["o", "s", "^", "D", "v", "P", "X", "*"])}
+        color_map = {m: plt.cm.tab10(i % 10) for i, m in enumerate(methods)}
+        #fig, ax = plt.subplots(figsize=(6.0, 4.8))
+        fig, ax = plt.subplots(figsize=(9*CM, 6*CM))
+        # add some dummy plots for legend to plot a) colors of methods and b) markers of modes:
+        for m in methods:
+            ax.scatter([], [], color=color_map.get(m, "C0"), s=30,
+                       label=m, alpha=0.8, edgecolor="black", linewidth=0.0)
+        for m in modes:
+            ax.scatter([], [], marker=marker_map.get(m, "o"), color="gray", label=m, s=30,
+                       alpha=0.8, edgecolor="black", linewidth=0.0)
+        
+        for _, r in scatter_df.iterrows():
+            mode = str(r["mode"])
+            method = str(r["method"])
+            x = float(r["rms_mean"])
+            y = float(r["p95_mean"])
+            ax.scatter(
+                x,
+                y,
+                s=30,
+                marker=marker_map.get(mode, "o"),
+                color=color_map.get(method, "C0"),
+                alpha=0.8,
+                edgecolor="black",
+                linewidth=0.0,
+            )
+            #ax.annotate(f"{method} | {mode}", (x, y), textcoords="offset points", xytext=(4, 3), fontsize=7)
+        ax.set_xlabel("RMS (mean)")
+        ax.set_ylabel("P95 error norm (mean)")
+        ax.set_title("RMS vs P95 (method x mode)")
+        ax.set_xlim(left=0.0)
+        ax.set_ylim(bottom=0.0)
+        plt.legend(title="method / mode", bbox_to_anchor=(1.05, 1), loc="upper left", frameon=False)
+        fig.tight_layout()
+        p_sc = out_dir / "baseline_suite_rms_vs_p95_scatter_plot.pdf"
+        fig.savefig(p_sc, dpi=300)
+        plt.close(fig)
+        generated.append(p_sc)
 
     if generated:
         print(f"[OK] Wrote baseline suite plots: {len(generated)}")

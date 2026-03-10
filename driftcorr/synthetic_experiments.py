@@ -1091,7 +1091,7 @@ def evaluate_corrected_vs_groundtruth(
       summary metrics
       merged table with per-row errors
       per-track RMS table
-      per-time RMS table
+      per-time error metrics table (RMS + robust distance statistics)
     """
     dc = df_corr.copy()
     dgt = df_groundtruth.copy()
@@ -1128,7 +1128,13 @@ def evaluate_corrected_vs_groundtruth(
 
     per_time = (
         merged.groupby("Time", as_index=False)
-        .agg(rms_error=("err_norm", lambda x: float(np.sqrt(np.mean(np.asarray(x, dtype=float) ** 2)))))
+        .agg(
+            rms_error=("err_norm", lambda x: float(np.sqrt(np.mean(np.asarray(x, dtype=float) ** 2)))),
+            mae_error=("err_norm", lambda x: float(np.mean(np.asarray(x, dtype=float)))),
+            median_error_norm=("err_norm", lambda x: float(np.median(np.asarray(x, dtype=float)))),
+            p90_error_norm=("err_norm", lambda x: float(np.percentile(np.asarray(x, dtype=float), 90))),
+            p95_error_norm=("err_norm", lambda x: float(np.percentile(np.asarray(x, dtype=float), 95))),
+        )
         .sort_values("Time")
         .reset_index(drop=True)
     )
@@ -1137,6 +1143,10 @@ def evaluate_corrected_vs_groundtruth(
         "n_points": float(merged.shape[0]),
         "n_tracks": float(per_track.shape[0]),
         "overall_rms_error": float(np.sqrt(np.mean(merged["err_norm"].to_numpy(float) ** 2))) if merged.shape[0] else float("nan"),
+        "mae_error": float(np.mean(merged["err_norm"].to_numpy(float))) if merged.shape[0] else float("nan"),
+        "median_error_norm": float(np.median(merged["err_norm"].to_numpy(float))) if merged.shape[0] else float("nan"),
+        "p90_error_norm": float(np.percentile(merged["err_norm"].to_numpy(float), 90)) if merged.shape[0] else float("nan"),
+        "p95_error_norm": float(np.percentile(merged["err_norm"].to_numpy(float), 95)) if merged.shape[0] else float("nan"),
         "median_track_rms_error": float(per_track["rms_error"].median()) if per_track.shape[0] else float("nan"),
         "p90_track_rms_error": float(per_track["rms_error"].quantile(0.90)) if per_track.shape[0] else float("nan"),
         "mean_time_rms_error": float(per_time["rms_error"].mean()) if per_time.shape[0] else float("nan"),
@@ -1189,6 +1199,22 @@ def save_groundtruth_evaluation_outputs(
         merged.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_errors_{method}.csv"), index=False)
         per_track.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_rms_per_track_{method}.csv"), index=False)
         per_time.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_rms_over_time_{method}.csv"), index=False)
+        per_time[["Time", "mae_error"]].to_csv(
+            base_out_prefix.with_name(base_out_prefix.name + f"_gt_mae_over_time_{method}.csv"),
+            index=False,
+        )
+        per_time[["Time", "median_error_norm"]].to_csv(
+            base_out_prefix.with_name(base_out_prefix.name + f"_gt_median_error_norm_over_time_{method}.csv"),
+            index=False,
+        )
+        per_time[["Time", "p90_error_norm"]].to_csv(
+            base_out_prefix.with_name(base_out_prefix.name + f"_gt_p90_error_norm_over_time_{method}.csv"),
+            index=False,
+        )
+        per_time[["Time", "p95_error_norm"]].to_csv(
+            base_out_prefix.with_name(base_out_prefix.name + f"_gt_p95_error_norm_over_time_{method}.csv"),
+            index=False,
+        )
 
         if "CellType" in merged.columns:
             for ctype, store, suffix in [
@@ -1253,6 +1279,10 @@ def save_groundtruth_evaluation_outputs(
 
     out_hist = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_per_track_hist.pdf")
     out_time = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_over_time.pdf")
+    out_time_mae = base_out_prefix.with_name(base_out_prefix.name + "_gt_mae_over_time.pdf")
+    out_time_median = base_out_prefix.with_name(base_out_prefix.name + "_gt_median_error_norm_over_time.pdf")
+    out_time_p90 = base_out_prefix.with_name(base_out_prefix.name + "_gt_p90_error_norm_over_time.pdf")
+    out_time_p95 = base_out_prefix.with_name(base_out_prefix.name + "_gt_p95_error_norm_over_time.pdf")
     out_time_stationary = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_stationary_over_time.pdf")
     out_time_migrating = base_out_prefix.with_name(base_out_prefix.name + "_gt_rms_migrating_over_time.pdf")
     out_drift_bias = base_out_prefix.with_name(base_out_prefix.name + "_gt_drift_bias_over_time.pdf")
@@ -1273,28 +1303,87 @@ def save_groundtruth_evaluation_outputs(
     plt.tight_layout()
     plt.savefig(out_hist, dpi=300, transparent=True)
     plt.close(fig)
-  
-    #fig = plt.figure(figsize=(7, 5))
-    cm2inch = 1/2.54
-    fig = plt.figure(figsize=(6.0*cm2inch, 4*cm2inch))
-    for method, tab in per_method_time.items():
-        if tab.shape[0]:
-            plt.plot(tab["Time"].to_numpy(float), tab["rms_error"].to_numpy(float), 
-                     marker="o", label=method, markersize=2, lw=0.7)
-    plt.xlabel("Time")
-    plt.ylabel("RMS error ($\mu$m)")
-    plt.title(r"Corrected vs GT: RMS$_{\text{global}}$")
-    plt.ylim(bottom=0.0, top=11.0)
-    handles, _ = plt.gca().get_legend_handles_labels()
-    if handles:
-        plt.legend(ncol=2, loc="upper left", fontsize=4, frameon=False)
-    if tab["Time"].max() <= 10:
-        plt.xticks(np.arange(0, tab["Time"].max() + 1, step=2))
-    elif tab["Time"].max() <= 20:
-        plt.xticks(np.arange(0, tab["Time"].max() + 1, step=5))
-    plt.tight_layout()
-    plt.savefig(out_time, dpi=300, transparent=True)
-    plt.close(fig)
+
+    def _plot_time_metric(
+        time_by_method: dict[str, pd.DataFrame],
+        metric_col: str,
+        ylabel: str,
+        title: str,
+        out_path: Path,
+        y_top: float | None = None,
+    ) -> None:
+        cm2inch = 1 / 2.54
+        fig = plt.figure(figsize=(6.0 * cm2inch, 4 * cm2inch))
+        any_points = False
+        tmax = float(groundtruth_df["Time"].max()) if groundtruth_df.shape[0] else 0.0
+        for method, tab in time_by_method.items():
+            if tab.shape[0] and metric_col in tab.columns:
+                any_points = True
+                plt.plot(
+                    tab["Time"].to_numpy(float),
+                    tab[metric_col].to_numpy(float),
+                    marker="o",
+                    label=method,
+                    markersize=2,
+                    lw=0.7,
+                )
+        plt.xlabel("Time")
+        plt.ylabel(ylabel)
+        plt.title(title)
+        plt.ylim(bottom=0.0)
+        if y_top is not None:
+            plt.ylim(top=float(y_top))
+        handles, _ = plt.gca().get_legend_handles_labels()
+        if handles:
+            plt.legend(ncol=2, loc="upper left", fontsize=4, frameon=False)
+        if tmax <= 10:
+            plt.xticks(np.arange(0, tmax + 1, step=2))
+        elif tmax <= 20:
+            plt.xticks(np.arange(0, tmax + 1, step=5))
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=300, transparent=True)
+        plt.close(fig)
+
+    _plot_time_metric(
+        per_method_time,
+        metric_col="rms_error",
+        ylabel="RMS error ($\\mu$m)",
+        title=r"Corrected vs GT: RMS$_{\text{global}}$",
+        out_path=out_time,
+        y_top=11.0,
+    )
+    _plot_time_metric(
+        per_method_time,
+        metric_col="mae_error",
+        ylabel="MAE error ($\\mu$m)",
+        title=r"Corrected vs GT: MAE$_{\text{global}}$",
+        out_path=out_time_mae,
+        y_top=11.0,
+    )
+    _plot_time_metric(
+        per_method_time,
+        metric_col="median_error_norm",
+        ylabel="Median error ($\\mu$m)",
+        title=r"Corrected vs GT: median error$_{\text{global}}$",
+        out_path=out_time_median,
+        y_top=11.0,
+    )
+    _plot_time_metric(
+        per_method_time,
+        metric_col="p90_error_norm",
+        ylabel="P90 error ($\\mu$m)",
+        title=r"Corrected vs GT: p90 error$_{\text{global}}$",
+        out_path=out_time_p90,
+        y_top=11.0,
+    )
+    _plot_time_metric(
+        per_method_time,
+        metric_col="p95_error_norm",
+        ylabel="P95 error ($\\mu$m)",
+        title=r"Corrected vs GT: p95 error$_{\text{global}}$",
+        out_path=out_time_p95,
+        y_top=11.0,
+    )
 
     if per_method_time_stationary:
         #fig = plt.figure(figsize=(9, 5))
@@ -1354,9 +1443,9 @@ def save_groundtruth_evaluation_outputs(
                          marker="o", label=method, markersize=2, lw=0.7)
         plt.xlabel("Time")
         #plt.ylabel("||median(drift$_{pred}$)- \n median(drift$_{true}$)|| ($\mu$m)")
-        plt.ylabel(r"$\|\mathrm{med}(\mathbf{d}_{pred})-\mathrm{med}(\mathbf{d}_{true})\|$ ($\mu$m)")
-        plt.title("Groundtruth drift bias over time")
-        plt.ylim(bottom=0.0, top=6.0)
+        plt.ylabel("$\|\mathrm{med}(\mathbf{d}_{pred})-\mathrm{med}(\mathbf{d}_{true})\|$\n($\mu$m)")
+        plt.title("Groundtruth drift bias")
+        plt.ylim(bottom=0.0, top=11.0)
         handles, _ = plt.gca().get_legend_handles_labels()
         if handles:
             plt.legend(ncol=2, loc="upper left", fontsize=4, frameon=False)
@@ -1372,6 +1461,10 @@ def save_groundtruth_evaluation_outputs(
         "gt_metrics_summary": out_summary,
         "gt_rms_per_track_hist": out_hist,
         "gt_rms_over_time": out_time,
+        "gt_mae_over_time": out_time_mae,
+        "gt_median_error_norm_over_time": out_time_median,
+        "gt_p90_error_norm_over_time": out_time_p90,
+        "gt_p95_error_norm_over_time": out_time_p95,
     }
     if per_method_time_stationary:
         out["gt_rms_stationary_over_time"] = out_time_stationary

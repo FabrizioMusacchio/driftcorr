@@ -1962,8 +1962,8 @@ corr = run_methods_for_dataframe(
     methods=baseline_methods,
     opts=baseline_opts,
     use_stationary_subset=False)
-postprocess_outputs(df_syn, file_path, out_prefix, corr)
-"""
+postprocess_outputs(df_syn, file_path, out_prefix, corr) """
+
 
 RUN_BASELINE_METHOD_COMPARISON = True
 if RUN_BASELINE_METHOD_COMPARISON:

@@ -1190,6 +1190,7 @@ def save_groundtruth_evaluation_outputs(
 
     for method, df_corr in corrected_by_method.items():
         summary, merged, per_track, per_time = evaluate_corrected_vs_groundtruth(df_corr, groundtruth_df)
+        summary["drift_bias_abs"] = float("nan")
         summary["method"] = method
         rows_summary.append(summary)
 
@@ -1260,6 +1261,7 @@ def save_groundtruth_evaluation_outputs(
                 bt["drift_bias_norm"] = bias
                 bt.to_csv(base_out_prefix.with_name(base_out_prefix.name + f"_gt_drift_bias_over_time_{method}.csv"), index=False)
                 per_method_drift_bias[method] = bt
+                summary["drift_bias_abs"] = float(np.nanmean(bt["drift_bias_norm"].to_numpy(float)))
 
         # Publication-quality per-time metrics with CI across tracks.
         time_ci = per_time_groundtruth_metrics(

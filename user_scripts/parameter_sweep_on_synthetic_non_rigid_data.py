@@ -83,6 +83,8 @@ Directory contract
 - `Synthetic files parameter sweep non rigid/<study_tag>`: all benchmark and evaluation outputs.
 """
 
+CM = 1/2.54  # centimeters in inches
+
 CURRENT_ANALYSIS_ROOT = PROJECT_ROOT / "Synthetic files parameter sweep non rigid"
 
 GROUNDTRUTH_ROOT = CURRENT_ANALYSIS_ROOT / "_groundtruth"
@@ -1874,6 +1876,8 @@ def _plot_summary_heatmap(
     metric_name: str,
     out_path: Path,
     title: str,
+    figsize: tuple[float, float] = (6.0, 4.0),
+    clims: tuple[float, float] | None = None,
 ) -> bool:
     """Plot method x mode heatmap of mean metric values."""
     sub = summary_df[summary_df["metric_name"].astype(str) == str(metric_name)].copy()
@@ -1889,20 +1893,32 @@ def _plot_summary_heatmap(
     mat = piv.to_numpy(float)
     cmap = plt.get_cmap("viridis").copy()
     cmap.set_bad("#f0f0f0")
-    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label(metric_name)
+    if clims is not None:
+        im.set_clim(*clims)
+    #cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    #cbar.set_label(metric_name)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.049, pad=0.02)
+    # remove frame around colorbar:
+    cbar.outline.set_visible(False)
+    # replace all "_" with " ":
+    cbar.set_label(metric_name.replace("_", " "), labelpad=1)
+    cbar.ax.tick_params(pad=1)
+    
+    
     ax.set_xticks(np.arange(len(modes)))
-    ax.set_xticklabels(modes, rotation=20, ha="right")
+    # replace all "_" with " " in mode labels:
+    modes_names = [m.replace("_", " ") for m in modes]
+    ax.set_xticklabels(modes_names, rotation=20, ha="right")
     ax.set_yticks(np.arange(len(methods)))
     ax.set_yticklabels(methods)
     ax.set_title(title)
-    ax.set_xlabel("mode")
-    ax.set_ylabel("method")
+    # ax.set_xlabel("mode")
+    # ax.set_ylabel("method")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=300)
+    fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
     return True
 
@@ -2044,10 +2060,10 @@ def _plot_large_regime_benchmark_from_aggregates(out_root: Path) -> list[Path]:
         ("overall_rms_error_migrating", "Large regime benchmark: migrating RMS by regime and method"),
     ]
     for metric_name, title in plot_specs:
-        p_bar = out_root / f"regime_benchmark_large_20seeds_{metric_name}_grouped_bar_plot.png"
+        p_bar = out_root / f"regime_benchmark_large_20seeds_{metric_name}_grouped_bar_plot.pdf"
         if _plot_summary_grouped_bars(summary_regime, metric_name=metric_name, out_path=p_bar, title=title):
             generated.append(p_bar)
-        p_hm = out_root / f"regime_benchmark_large_20seeds_{metric_name}_heatmap_plot.png"
+        p_hm = out_root / f"regime_benchmark_large_20seeds_{metric_name}_heatmap_plot.pdf"
         if _plot_summary_heatmap(summary_regime, metric_name=metric_name, out_path=p_hm, title=title):
             generated.append(p_hm)
 
@@ -2176,15 +2192,19 @@ if RUN_BASELINE_SUITE_AGGREGATION:
     out_dir = results_root("baseline_suite")
     generated: list[Path] = []
     plot_specs = [
-        ("overall_rms_error", "Baseline suite: overall RMS by mode and method"),
-        ("drift_bias_abs", "Baseline suite: drift bias by mode and method"),
+        ("overall_rms_error", "Overall RMS"),
+        ("drift_bias_abs", "Drift bias"),
     ]
     for metric_name, title in plot_specs:
-        p_bar = out_dir / f"baseline_suite_{metric_name}_grouped_bar_plot.png"
+        # metric_name = "overall_rms_error"
+        # title = "Overall RMS by mode and method"
+        p_bar = out_dir / f"baseline_suite_{metric_name}_grouped_bar_plot.pdf"
         if _plot_summary_grouped_bars(summary, metric_name=metric_name, out_path=p_bar, title=title):
             generated.append(p_bar)
-        p_hm = out_dir / f"baseline_suite_{metric_name}_heatmap_plot.png"
-        if _plot_summary_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title):
+        p_hm = out_dir / f"baseline_suite_{metric_name}_heatmap_plot.pdf"
+        if _plot_summary_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title,
+                                 figsize=(6.8*CM, 5.5*CM), 
+                                 clims=(0.001,7.0) if metric_name !="p95_error_norm" else (0.001,11.9)):
             generated.append(p_hm)
 
     if generated:

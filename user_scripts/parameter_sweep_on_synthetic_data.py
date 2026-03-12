@@ -1022,6 +1022,7 @@ def _plot_lines_by_regime(
     title_prefix: str,
     x_label: str,
     legend_label: str,
+    figsize: tuple[float, float] = (5.0, 3.8),
 ) -> list[Path]:
     generated: list[Path] = []
     if df.empty:
@@ -1029,36 +1030,60 @@ def _plot_lines_by_regime(
     regimes = sorted(df["regime"].astype(str).unique().tolist())
     if not regimes:
         return generated
+    # sort regimes: "smooth_spacetime", "piecewise_smooth", "piecewise_abrupt"
+    regime_order = ["smooth_spacetime", "piecewise_smooth", "piecewise_abrupt"]
+    regimes = sorted(regimes, key=lambda x: regime_order.index(x) if x in regime_order else len(regime_order))
     n = len(regimes)
     ncols = min(3, n)
     nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.0 * ncols, 3.8 * nrows), squeeze=False)
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(figsize[0] * ncols, figsize[1] * nrows), squeeze=False)
     for i, regime in enumerate(regimes):
         ax = axes[i // ncols][i % ncols]
         cur = df[df["regime"].astype(str) == regime].copy()
         groups = sorted(cur[line_col].dropna().unique().tolist())
         for gv in groups:
             gg = cur[cur[line_col] == gv].sort_values(x_col)
+            if gv == groups[0]:
+                ls_use = "-"
+                lw = 1.8
+            elif gv == groups[1]:
+                ls_use = "--"
+                lw = 1.8
+            elif gv == groups[2]:
+                ls_use = ":"
+                lw = 1.8
+            else:
+                ls_use = ":"
+                lw = 1.1
             ax.plot(
                 pd.to_numeric(gg[x_col], errors="coerce").to_numpy(float),
                 pd.to_numeric(gg[y_col], errors="coerce").to_numpy(float),
+                ls=ls_use,
                 marker="o",
-                linewidth=1.8,
-                label=f"{legend_label}={gv:g}",
-            )
-        ax.set_title(regime)
-        ax.set_xlabel(x_label)
-        ax.set_ylabel(y_col)
-        ax.set_ylim(bottom=0.0)
-        ax.legend()
+                linewidth=lw,
+                label=f"{legend_label}={gv:g}", alpha=0.8)
+        subtitle_use = regime
+        if "smooth_spacetime" in subtitle_use:
+            subtitle_use = "smooth"
+        ax.set_title(subtitle_use.replace("_", " "), fontsize=8)
+        ax.set_xlabel(x_label.replace("_", " "))
+        # define xticks to match unique x values for this regime, if possible
+        x_vals = sorted(pd.to_numeric(cur[x_col], errors="coerce").dropna().unique().tolist())
+        if x_vals:
+            ax.set_xticks(x_vals)
+            ax.set_xticklabels([f"{v:g}" for v in x_vals])
+        ax.set_ylabel(y_col.replace("_", " "))
+        ax.set_ylim(bottom=0.0, top=ax.get_ylim()[1] * 1.15)
+        if i==0:
+            ax.legend(loc="lower left", frameon=False, fontsize=7)
     for j in range(n, nrows * ncols):
         axes[j // ncols][j % ncols].axis("off")
-    fig.suptitle(title_prefix)
+    fig.suptitle(title_prefix.replace("_", " "), fontsize=8)
     fig.tight_layout()
     png = out_path_base.with_suffix(".png")
     pdf = out_path_base.with_suffix(".pdf")
-    fig.savefig(png, dpi=300)
-    fig.savefig(pdf)
+    #fig.savefig(png, dpi=300)
+    fig.savefig(pdf, dpi=300, transparent=True)
     plt.close(fig)
     generated.extend([png, pdf])
     return generated
@@ -1072,6 +1097,8 @@ def _plot_heatmaps_by_regime(
     title_prefix: str,
     x_label: str,
     y_label: str,
+    figsize: tuple[float, float] = (5.0, 3.8),
+    clim: tuple[float, float] | None = None,
 ) -> list[Path]:
     generated: list[Path] = []
     if df.empty:
@@ -1079,10 +1106,14 @@ def _plot_heatmaps_by_regime(
     regimes = sorted(df["regime"].astype(str).unique().tolist())
     if not regimes:
         return generated
+    # sort regimes: "smooth_spacetime", "piecewise_smooth", "piecewise_abrupt"
+    regime_order = ["smooth_spacetime", "piecewise_smooth", "piecewise_abrupt"]
+    regimes = sorted(regimes, key=lambda x: regime_order.index(x) if x in regime_order else len(regime_order))
+    
     n = len(regimes)
     ncols = min(3, n)
     nrows = int(np.ceil(n / ncols))
-    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(5.2 * ncols, 4.2 * nrows), squeeze=False)
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(figsize[0] * ncols, figsize[1] * nrows), squeeze=False)
     for i, regime in enumerate(regimes):
         ax = axes[i // ncols][i % ncols]
         cur = df[df["regime"].astype(str) == regime].copy()
@@ -1102,23 +1133,32 @@ def _plot_heatmaps_by_regime(
                 mat[y_lookup[yv], x_lookup[xv]] = vv
         cmap = plt.get_cmap("viridis").copy()
         cmap.set_bad(color="#f0f0f0")
-        im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap, clim=clim)
+        cbar = fig.colorbar(im, ax=ax, fraction=0.049, pad=0.02)
+        # remove frame around colorbar:
+        cbar.outline.set_visible(False)
+        # replace all "_" with " ":
+        cbar.set_label(value_col.replace("_", " "), labelpad=1)
+        cbar.ax.tick_params(pad=1)
+        
         ax.set_xticks(np.arange(len(x_vals)))
         ax.set_xticklabels([f"{v:g}" for v in x_vals])
         ax.set_yticks(np.arange(len(y_vals)))
         ax.set_yticklabels([f"{v:g}" for v in y_vals])
-        ax.set_xlabel(x_label)
-        ax.set_ylabel(y_label)
-        ax.set_title(regime)
+        ax.set_xlabel(x_label.replace("_", " "))
+        ax.set_ylabel(y_label.replace("_", " "))
+        subtitle_use = regime
+        if "smooth_spacetime" in subtitle_use:
+            subtitle_use = "smooth"
+        ax.set_title(subtitle_use.replace("_", " "), fontsize=8)
     for j in range(n, nrows * ncols):
         axes[j // ncols][j % ncols].axis("off")
-    fig.suptitle(title_prefix)
+    fig.suptitle(title_prefix.replace("_", " "), fontsize=8)
     fig.tight_layout()
     png = out_path_base.with_suffix(".png")
     pdf = out_path_base.with_suffix(".pdf")
-    fig.savefig(png, dpi=300)
-    fig.savefig(pdf)
+    #fig.savefig(png, dpi=300)
+    fig.savefig(pdf, dpi=300, transparent=True)
     plt.close(fig)
     generated.extend([png, pdf])
     return generated
@@ -1406,7 +1446,7 @@ def _plot_grid_heatmap(
     value_col: str,
     title: str,
     out_path: Path,
-    highlight: tuple[float, float] = (4.0, 0.4),
+    highlight: tuple[float, float] | None = None,
     figsize: tuple[float, float] = (6.2, 4.8),
     clims: tuple[float, float] | None = None) -> bool:
     """Plot grid heatmap (x=ell_time, y=ell_space) from aggregated CSV rows."""
@@ -1435,9 +1475,9 @@ def _plot_grid_heatmap(
         if xv in x_lookup and yv in y_lookup:
             mat[y_lookup[yv], x_lookup[xv]] = float(row[value_col])
 
-    #cmap = plt.get_cmap("viridis").copy()
+    cmap = plt.get_cmap("viridis").copy()
     #cmap = plt.get_cmap("nipy_spectral").copy()
-    cmap = plt.get_cmap("gnuplot2").copy()
+    #cmap = plt.get_cmap("gnuplot2").copy()
     cmap.set_bad(color="#f0f0f0")
     fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
@@ -1458,18 +1498,33 @@ def _plot_grid_heatmap(
     ax.set_yticklabels([f"{v:.2g}" for v in y_vals])
     ax.set_xlabel("ell_time")
     ax.set_ylabel("ell_space")
+    if title =="smooth_spacetime":
+        title = "smooth"
     ax.set_title(title, fontsize=8)
 
-    hs, ht = highlight
-    ix = next((i for i, x in enumerate(x_vals) if np.isclose(float(x), float(ht))), None)
-    iy = next((i for i, y in enumerate(y_vals) if np.isclose(float(y), float(hs))), None)
+    # calculate highlight by calculating the lowest value in mat 
+    # and thus its corresponding (ell_space, ell_time) coordinates,
+    # regardless of clims or the specific highlight parameter passed in:
+    ix = None
+    iy = None
+    if np.isfinite(mat).any():
+        min_idx = np.unravel_index(np.nanargmin(mat), mat.shape)
+        iy, ix = min_idx
     if ix is not None and iy is not None:
         ax.scatter([ix], [iy], s=130, marker="o", facecolors="none", edgecolors="red", linewidths=1.8, zorder=5)
         ax.scatter([ix], [iy], s=20, color="red", zorder=6)
+    
+    if highlight is not None:
+        hs, ht = highlight
+        ix = next((i for i, x in enumerate(x_vals) if np.isclose(float(x), float(ht))), None)
+        iy = next((i for i, y in enumerate(y_vals) if np.isclose(float(y), float(hs))), None)
+        if ix is not None and iy is not None:
+            ax.scatter([ix], [iy], s=130, marker="x", facecolors="chartreuse", linewidths=1.8, zorder=5)
+            ax.scatter([ix], [iy], s=20, color="chartreuse", zorder=6)
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=300)
+    fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
     return True
 
@@ -2089,7 +2144,7 @@ if RUN_BASELINE_SUITE_AGGREGATION:
                                  clims=(0.001,6.5) if metric_name !="p95_error_norm" else (0.001,11.9)):
             generated.append(p_hm)
 
-    # Reviewer figure: RMS vs P95 scatter (points = method x regime).
+    # RMS vs P95 scatter (points = method x regime):
     rms_tab = summary_ext[summary_ext["metric_name"].astype(str) == "overall_rms_error"][
         ["mode", "method", "mean"]
     ].rename(columns={"mean": "rms_mean"})
@@ -2594,27 +2649,21 @@ if RUN_ST_RBF_GRID_AGGREGATION:
     if "regime" in aggregated.columns:
         for regime in sorted(aggregated["regime"].dropna().astype(str).unique().tolist()):
             reg = aggregated[aggregated["regime"].astype(str) == regime].copy()
-            p_rms = grid_root / f"st_rbf_grid_aggregation_mean_rms_all__regime_{regime}.png"
-            if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}: mean_rms_all", p_rms):
+            p_rms = grid_root / f"st_rbf_grid_aggregation_mean_rms_all__regime_{regime}.pdf"
+            if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}: mean_rms_all", p_rms,
+                 figsize=(6.0*CM, 4.6*CM), clims=None):
                 generated.append(p_rms)
-            p_bias = grid_root / f"st_rbf_grid_aggregation_mean_drift_bias_abs__regime_{regime}.png"
-            if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}: mean_drift_bias_abs", p_bias):
+            p_bias = grid_root / f"st_rbf_grid_aggregation_mean_drift_bias_abs__regime_{regime}.pdf"
+            if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}: mean_drift_bias_abs", p_bias,
+                 figsize=(6.0*CM, 4.6*CM), clims=None):
                 generated.append(p_bias)
-    p_all_rms = grid_root / "st_rbf_grid_aggregation_mean_rms_all__across_regimes.png"
-    if _plot_grid_heatmap(
-        aggregated,
-        "mean_rms_all",
-        "ST-RBF grid: mean_rms_all across regimes",
-        p_all_rms,
-    ):
+    p_all_rms = grid_root / "st_rbf_grid_aggregation_mean_rms_all__across_regimes.pdf"
+    if _plot_grid_heatmap(aggregated,"mean_rms_all", "ST-RBF grid: mean_rms_all across regimes",
+        p_all_rms, figsize=(6.0*CM, 4.6*CM), clims=None):
         generated.append(p_all_rms)
-    p_all_bias = grid_root / "st_rbf_grid_aggregation_mean_drift_bias_abs__across_regimes.png"
-    if _plot_grid_heatmap(
-        aggregated,
-        "mean_drift_bias_abs",
-        "ST-RBF grid: mean_drift_bias_abs across regimes",
-        p_all_bias,
-    ):
+    p_all_bias = grid_root / "st_rbf_grid_aggregation_mean_drift_bias_abs__across_regimes.pdf"
+    if _plot_grid_heatmap(aggregated, "mean_drift_bias_abs", "ST-RBF grid: mean_drift_bias_abs across regimes",
+        p_all_bias, figsize=(6.0*CM, 4.6*CM), clims=None):
         generated.append(p_all_bias)
 
     (grid_root / "st_rbf_grid_aggregated_README.txt").write_text(
@@ -2681,14 +2730,24 @@ if RUN_ST_RBF_SELECTION_PLOTS:
         if "regime" in grid.columns:
             for regime in sorted(grid["regime"].dropna().astype(str).unique().tolist()):
                 reg = grid[grid["regime"].astype(str) == regime].copy()
+                
+                # in reg, search for the ell_space and ell_time combination, where mean_rms_all
+                # and mean_drift_bias_abs most possible the lowest. We can use a simple heuristic: we can compute a combined score as the product of mean_rms_all and mean_drift_bias_abs, and find the row with the minimum combined score:
+                grid_point = reg.copy()                
+                grid_point["combined_score"] = grid_point["mean_rms_all"] * grid_point["mean_drift_bias_abs"]
+                best_point = grid_point.loc[grid_point["combined_score"].idxmin()]
+                #print(f"Best grid point for regime {regime}: {best_point}")
+                highlight = best_point[["ell_space", "ell_time"]].values
+                
                 p1 = selection_root / f"st_rbf_grid_heatmap_mean_rms_all__regime_{regime}.pdf"
-                if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}", p1,
-                                    figsize=(6.0*CM, 4.6*CM), clims=(0,8)):
+                if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}", p1, highlight=highlight,
+                                    figsize=(6.0*CM, 4.6*CM)):
                     generated.append(p1)
                 p2 = selection_root / f"st_rbf_grid_heatmap_mean_drift_bias_abs__regime_{regime}.pdf"
-                if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}: mean drift bias abs", p2,
+                if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}", p2, highlight=highlight,
                                     figsize=(6.0*CM, 4.6*CM), clims=None):
                     generated.append(p2)
+                
     if ab_csv.exists():
         ab = pd.read_csv(ab_csv)
         if "regime" in ab.columns:
@@ -2713,8 +2772,9 @@ Artifacts:
 - Sweep folders + aggregated CSV + line/heatmap plots under `Synthetic files parameter sweep/rigid_fairness_sweep` and `Synthetic files parameter sweep/local_fairness_sweep`.
 """
 
-RUN_RIGID_FAIRNESS_SWEEP = True
-RUN_LOCAL_FAIRNESS_SWEEP = True
+RUN_RIGID_FAIRNESS_SWEEP = False # I ran it already
+RUN_LOCAL_FAIRNESS_SWEEP = False # I ran it already
+RUN_RIGID_LOCAL_FAIRNESS_SWEEP_AGGREGATION_PLOTS = True
 
 if RUN_RIGID_FAIRNESS_SWEEP:
     baseline_dir = ensure_baseline_groundtruth()
@@ -2823,6 +2883,82 @@ if RUN_LOCAL_FAIRNESS_SWEEP:
                 y_label="ell_um_field",
             )
         )
+        _write_fairness_sweep_readme(
+            sweep_root=local_root,
+            synthetic_dir=baseline_dir,
+            aggregated_csv=local_csv,
+            generated_plots=local_plots,
+            sweep_desc="local fairness sweep",
+            grid_desc=f"k_neighbors={LOCAL_K_NEIGHBORS}, ell_um_field={LOCAL_ELL_FIELD}, n_seeds={FAIRNESS_SYNTHETIC_N_SEEDS}",
+            n_regimes=int(local_agg["regime"].nunique()),
+        )
+
+
+if RUN_RIGID_LOCAL_FAIRNESS_SWEEP_AGGREGATION_PLOTS:
+    baseline_dir = ensure_baseline_groundtruth()
+    
+    rigid_root = results_root("rigid_fairness_sweep")
+    rigid_agg = _aggregate_fairness_sweep(rigid_root, method="rigid", sweep_kind="rigid")
+    if not rigid_agg.empty:
+        rigid_csv = rigid_root / "rigid_fairness_aggregated.csv"
+        #rigid_agg.to_csv(rigid_csv, index=False)
+        rigid_plots: list[Path] = []
+        rigid_plots.extend(
+            _plot_lines_by_regime(
+                rigid_agg,
+                x_col="keep_fraction",
+                line_col="inlier_reestimate_iters",
+                y_col="mean_rms_all",
+                out_path_base=rigid_root / "plot_rigid_lines_by_regime_mean_rms_all",
+                title_prefix="Rigid fairness sweep: mean_rms_all by regime",
+                x_label="keep_fraction",
+                legend_label="inlier_reestimate_iters", figsize=(5.0*CM, 4.5*CM)) )
+        rigid_plots.extend(
+            _plot_heatmaps_by_regime(
+                rigid_agg,
+                x_col="keep_fraction",
+                y_col="inlier_reestimate_iters",
+                value_col="mean_rms_all",
+                out_path_base=rigid_root / "plot_rigid_heatmaps_by_regime_mean_rms_all",
+                title_prefix="Rigid fairness sweep heatmaps: mean_rms_all",
+                x_label="keep_fraction",
+                y_label="inlier_reestimate_iters", figsize=(5.0*CM, 4.5*CM)))
+        _write_fairness_sweep_readme(
+            sweep_root=rigid_root,
+            synthetic_dir=baseline_dir,
+            aggregated_csv=rigid_csv,
+            generated_plots=rigid_plots,
+            sweep_desc="rigid fairness sweep",
+            grid_desc=f"keep_fraction={RIGID_KEEP_FRACTIONS}, inlier_reestimate_iters={RIGID_INLIER_ITERS}, n_seeds={FAIRNESS_SYNTHETIC_N_SEEDS}",
+            n_regimes=int(rigid_agg["regime"].nunique()),
+        )
+    
+    local_root = results_root("local_fairness_sweep")
+    local_agg = _aggregate_fairness_sweep(local_root, method="local", sweep_kind="local")
+    if not local_agg.empty:
+        local_csv = local_root / "local_fairness_aggregated.csv"
+        local_agg.to_csv(local_csv, index=False)
+        local_plots: list[Path] = []
+        local_plots.extend(
+            _plot_lines_by_regime(
+                local_agg,
+                x_col="k_neighbors",
+                line_col="ell_um_field",
+                y_col="mean_rms_all",
+                out_path_base=local_root / "plot_local_lines_by_regime_mean_rms_all",
+                title_prefix="Local fairness sweep: mean_rms_all by regime",
+                x_label="k_neighbors",
+                legend_label="ell_um_field", figsize=(5.0*CM, 4.5*CM)))
+        local_plots.extend(
+            _plot_heatmaps_by_regime(
+                local_agg,
+                x_col="k_neighbors",
+                y_col="ell_um_field",
+                value_col="mean_rms_all",
+                out_path_base=local_root / "plot_local_heatmaps_by_regime_mean_rms_all",
+                title_prefix="Local fairness sweep heatmaps: mean_rms_all",
+                x_label="k_neighbors",
+                y_label="ell_um_field", figsize=(5.0*CM, 4.5*CM)))
         _write_fairness_sweep_readme(
             sweep_root=local_root,
             synthetic_dir=baseline_dir,

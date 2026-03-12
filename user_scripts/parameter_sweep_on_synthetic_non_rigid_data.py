@@ -154,8 +154,8 @@ OPTIONS = {
 }
 
 # ST-RBF grid/stationary subset benchmark parameters.
-ES_VALUES = [1.0, 2.0, 4.0]
-ET_VALUES = [0.4, 0.8, 1.6]
+ES_VALUES = [1.0, 2.0, 4.0, 6.0, 8.0, 10.0]
+ET_VALUES = [0.1, 0.2, 0.4, 0.8, 1.6, 3.2]
 STATIONARY_AB_CANDIDATES = [
     {"name": "fast", "ell_space": 4.0, "ell_time": 0.4},
     {"name": "conservative", "ell_space": 1.0, "ell_time": 1.6},
@@ -1646,7 +1646,7 @@ def _plot_grid_heatmap(
     plt.close(fig)
     return True
 
-def _plot_stationary_subset_ab(
+def _plot_stationary_subset_ab_OLD(
     df: pd.DataFrame,
     regime: str | None,
     out_path: Path,
@@ -1727,6 +1727,105 @@ def _plot_stationary_subset_ab(
     fig.savefig(out_path, dpi=300)
     plt.close(fig)
     return True
+
+def _plot_stationary_subset_ab(
+    df: pd.DataFrame,
+    regime: str | None,
+    out_path: Path,
+    highlight: tuple[float, float] = (4.0, 0.4),
+    figsize: tuple[float, float] = (7.2, 4.6)) -> bool:
+    """Plot stationary subset A/B bars (per regime) or combined line plot (across regimes)."""
+    req = {"regime", "ell_space", "ell_time", "use_stationary_subset", "mean_rms_all", "std_rms_all"}
+    if not req.issubset(df.columns):
+        print(f"[WARN] Stationary A/B plot skipped ({out_path.name}): missing columns {sorted(req - set(df.columns))}")
+        return False
+    cur = df.copy()
+    for c in ["ell_space", "ell_time", "use_stationary_subset", "mean_rms_all", "std_rms_all"]:
+        cur[c] = pd.to_numeric(cur[c], errors="coerce")
+    cur = cur.dropna(subset=["use_stationary_subset"])
+    cur["use_stationary_subset"] = cur["use_stationary_subset"].astype(int)
+    cur = cur[cur["use_stationary_subset"].isin([0, 1])]
+    if cur.empty:
+        return False
+
+    if regime is not None:
+        cur = cur[cur["regime"].astype(str) == str(regime)].copy()
+        if cur.empty:
+            return False
+        cur["cfg"] = cur.apply(lambda row: f"es={float(row['ell_space']):.1f}, et={float(row['ell_time']):.1f}", axis=1)
+        cfg_order = (
+            cur[["cfg", "ell_space", "ell_time"]].drop_duplicates().sort_values(["ell_space", "ell_time"])["cfg"].tolist()
+        )
+        piv_mean = cur.pivot_table(index="cfg", columns="use_stationary_subset", values="mean_rms_all", aggfunc="mean").reindex(cfg_order)
+        piv_std = cur.pivot_table(index="cfg", columns="use_stationary_subset", values="std_rms_all", aggfunc="mean").reindex(cfg_order)
+        x = np.arange(len(cfg_order), dtype=float)
+        w = 0.36
+        fig, ax = plt.subplots(figsize=figsize)
+        y0 = piv_mean.get(0, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        y1 = piv_mean.get(1, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        e0 = piv_std.get(0, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        e1 = piv_std.get(1, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
+        ax.bar(x - w / 2.0, y0, width=w, yerr=e0, capsize=3, label="Full track set")
+        ax.bar(x + w / 2.0, y1, width=w, yerr=e1, capsize=3, label="Stationary-only fit")
+        ax.set_xticks(x)
+        ax.set_xticklabels(cfg_order, rotation=20, ha="right")
+        ax.set_ylabel("mean_rms_all".replace("_", " "))
+        # if regime == "smooth_spacetime" rename to "smooth":
+        if regime == "smooth_spacetime":
+            regime = "smooth"
+        ax.set_title(f"Stationary-subset ablation:\n{regime}", fontsize=8)
+        ax.set_ylim(bottom=0.0, top=15)
+        ax.legend(frameon=False, fontsize=7, loc="upper left")
+        fig.tight_layout()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=300, transparent=True)
+        plt.close(fig)
+        return True
+
+    hs, ht = highlight
+    pick = cur[np.isclose(cur["ell_space"].to_numpy(float), hs) & np.isclose(cur["ell_time"].to_numpy(float), ht)].copy()
+    if pick.empty:
+        pick = cur.groupby(["regime", "use_stationary_subset"], as_index=False).agg(
+            mean_rms_all=("mean_rms_all", "mean"),
+            std_rms_all=("std_rms_all", "mean"),
+        )
+    regimes = sorted(pick["regime"].astype(str).unique().tolist())
+    # regimes is a list of unique regime names (strings) present in the data, sorted alphabetically:
+    # piecewise_abrupt, piecewise_smooth, smooth_spacetime. 
+    # let's resort to smooth, piecewise_smooth and piecewise_abrupt order:
+    #regime_order = ["smooth_spacetime", "piecewise_smooth", "piecewise_abrupt"]
+    #regimes = [r for r in regime_order if r in regimes] + [r for r in regimes if r not in regime_order]
+    
+    regime_order = ["rotation_drift", "piecewise_spatial_drift", "jump_events"]
+    regimes_found = pick["regime"].astype(str).unique().tolist()
+    regimes = [r for r in regime_order if r in regimes_found] + [r for r in regimes_found if r not in regime_order]
+    
+    if not regimes:
+        return False
+    p0 = pick[pick["use_stationary_subset"] == 0].set_index("regime")
+    p1 = pick[pick["use_stationary_subset"] == 1].set_index("regime")
+    x = np.arange(len(regimes), dtype=float)
+    y0 = np.array([float(p0.loc[r, "mean_rms_all"]) if r in p0.index else np.nan for r in regimes], dtype=float)
+    y1 = np.array([float(p1.loc[r, "mean_rms_all"]) if r in p1.index else np.nan for r in regimes], dtype=float)
+    e0 = np.array([float(p0.loc[r, "std_rms_all"]) if r in p0.index else np.nan for r in regimes], dtype=float)
+    e1 = np.array([float(p1.loc[r, "std_rms_all"]) if r in p1.index else np.nan for r in regimes], dtype=float)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.errorbar(x, y0, yerr=e0, marker="o", capsize=3, label="Full track set")      # subset=0
+    ax.errorbar(x, y1, yerr=e1, marker="o", capsize=3, label="Stationary-only fit") # subset=1
+    ax.set_xticks(x)
+    # rename "smooth_spacetime" to "smooth":
+    regimes = ["smooth" if r == "smooth_spacetime" else r for r in regimes]
+    ax.set_xticklabels(regimes, rotation=20, ha="right")
+    ax.set_ylabel("mean_rms_all".replace("_", " "))
+    ax.set_title("Stationary-subset ablation\nacross regimes", fontsize=8)
+    ax.legend(frameon=False, fontsize=7, loc="lower right")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+    return True
+
 
 def _write_st_rbf_plot_readme(out_root: Path, generated_paths: list[Path], grid_csv: Path, ab_csv: Path) -> Path:
     """Write README for ST-RBF grid/stationary subset selection plots."""
@@ -1968,7 +2067,7 @@ def _plot_config_grouped_bars(
     return True
 
 
-def _plot_config_heatmap(
+def _plot_config_heatmap_OLD(
     summary_df: pd.DataFrame,
     metric_name: str,
     out_path: Path,
@@ -2005,6 +2104,58 @@ def _plot_config_heatmap(
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
+def _plot_config_heatmap(
+    summary_df: pd.DataFrame,
+    metric_name: str,
+    out_path: Path,
+    title: str,
+    method_name: str = "rbf",
+    figsize: tuple[float, float] = (6.0, 4.0),
+    clims: tuple[float, float] | None = None,
+) -> bool:
+    """Plot config x mode heatmap of mean metric values for a single method."""
+    sub = summary_df[
+        (summary_df["metric_name"].astype(str) == str(metric_name))
+        & (summary_df["method"].astype(str) == str(method_name))
+    ].copy()
+    if sub.empty:
+        return False
+    modes = _ordered_modes(sorted(sub["mode"].astype(str).unique().tolist()))
+    configs = sorted(sub["config"].astype(str).unique().tolist())
+    piv = sub.pivot_table(index="config", columns="mode", values="mean", aggfunc="mean").reindex(index=configs, columns=modes)
+    if piv.shape[0] == 0 or piv.shape[1] == 0:
+        return False
+
+    mat = piv.to_numpy(float)
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad("#f0f0f0")
+    fig, ax = plt.subplots(figsize=figsize)
+    im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
+    if clims is not None:
+        im.set_clim(*clims)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.049, pad=0.02)
+    # remove frame around colorbar:
+    cbar.outline.set_visible(False)
+    # replace all "_" with " ":
+    cbar.set_label(metric_name.replace("_", " "), labelpad=1)
+    cbar.ax.tick_params(pad=1)
+    # cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    # cbar.set_label(metric_name)
+    ax.set_xticks(np.arange(len(modes)))
+    modes_names = [m.replace("_", " ") for m in modes]
+    ax.set_xticklabels(modes_names, rotation=20, ha="right")
+    ax.set_yticks(np.arange(len(configs)))
+    ax.set_yticklabels(configs)
+    ax.set_title(title, fontsize=8)
+    # ax.set_xlabel("mode")
+    # ax.set_ylabel("config")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
     return True
 
@@ -2188,24 +2339,91 @@ if RUN_BASELINE_SUITE_AGGREGATION:
     print(f"[OK] {tidy_path}")
     print(f"[OK] {summary_path}")
 
-    summary = pd.read_csv(summary_path)
     out_dir = results_root("baseline_suite")
+    summary = pd.read_csv(summary_path)
+    tidy = pd.read_csv(tidy_path)
+    metrics_extended = ["overall_rms_error", "median_error_norm", "p95_error_norm", "drift_bias_abs"]
+    sub_ext = tidy[tidy["metric_name"].astype(str).isin(metrics_extended)].copy()
+    if sub_ext.empty:
+        summary_ext = pd.DataFrame(columns=["mode", "config", "method", "metric_name", "mean", "std", "n"])
+    else:
+        summary_ext = (
+            sub_ext.groupby(["mode", "config", "method", "metric_name"], as_index=False)["metric_value"]
+            .agg(mean="mean", std="std", n="count")
+            .sort_values(["mode", "config", "method", "metric_name"])
+            .reset_index(drop=True)
+        )
+    summary_ext_path = out_dir / "baseline_suite_summary_extended.csv"
+    summary_ext.to_csv(summary_ext_path, index=False)
+    print(f"[OK] {summary_ext_path}")
+
     generated: list[Path] = []
     plot_specs = [
         ("overall_rms_error", "Overall RMS"),
+        ("median_error_norm", "Median error"),
+        ("p95_error_norm", "P95 error"),
         ("drift_bias_abs", "Drift bias"),
     ]
     for metric_name, title in plot_specs:
         # metric_name = "overall_rms_error"
-        # title = "Overall RMS by mode and method"
+        # title = "Overall RMS"
         p_bar = out_dir / f"baseline_suite_{metric_name}_grouped_bar_plot.pdf"
-        if _plot_summary_grouped_bars(summary, metric_name=metric_name, out_path=p_bar, title=title):
+        if _plot_summary_grouped_bars(summary_ext, metric_name=metric_name, out_path=p_bar, title=title):
             generated.append(p_bar)
         p_hm = out_dir / f"baseline_suite_{metric_name}_heatmap_plot.pdf"
-        if _plot_summary_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title,
+        if _plot_summary_heatmap(summary_ext, metric_name=metric_name, out_path=p_hm, title=title,
                                  figsize=(6.8*CM, 5.5*CM), 
-                                 clims=(0.001,7.0) if metric_name !="p95_error_norm" else (0.001,11.9)):
+                                 clims=(0.001,6.5) if metric_name !="p95_error_norm" else (0.001,11.9)):
             generated.append(p_hm)
+
+    # RMS vs P95 scatter (points = method x regime):
+    rms_tab = summary_ext[summary_ext["metric_name"].astype(str) == "overall_rms_error"][
+        ["mode", "method", "mean"]
+    ].rename(columns={"mean": "rms_mean"})
+    p95_tab = summary_ext[summary_ext["metric_name"].astype(str) == "p95_error_norm"][
+        ["mode", "method", "mean"]
+    ].rename(columns={"mean": "p95_mean"})
+    scatter_df = rms_tab.merge(p95_tab, on=["mode", "method"], how="inner")
+    if scatter_df.shape[0] > 0:
+        modes = _ordered_modes(sorted(scatter_df["mode"].astype(str).unique().tolist()))
+        methods = _ordered_methods(sorted(scatter_df["method"].astype(str).unique().tolist()))
+        marker_map = {m: mk for m, mk in zip(modes, ["o", "s", "^", "D", "v", "P", "X", "*"])}
+        color_map = {m: plt.cm.tab10(i % 10) for i, m in enumerate(methods)}
+        fig, ax = plt.subplots(figsize=(10*CM, 6*CM))
+        # add some dummy plots for legend to plot a) colors of methods and b) markers of modes:
+        for m in methods:
+            ax.scatter([], [], color=color_map.get(m, "C0"), s=30,
+                       label=m, alpha=0.8, edgecolor="black", linewidth=0.0)
+        for m in modes:
+            ax.scatter([], [], marker=marker_map.get(m, "o"), color="gray", label=m, s=30,
+                       alpha=0.8, edgecolor="black", linewidth=0.0)
+
+        for _, r in scatter_df.iterrows():
+            mode = str(r["mode"])
+            method = str(r["method"])
+            x = float(r["rms_mean"])
+            y = float(r["p95_mean"])
+            ax.scatter(
+                x,
+                y,
+                s=30,
+                marker=marker_map.get(mode, "o"),
+                color=color_map.get(method, "C0"),
+                alpha=0.8,
+                edgecolor="black",
+                linewidth=0.0,
+            )
+        ax.set_xlabel("RMS (mean)")
+        ax.set_ylabel("P95 error norm (mean)")
+        ax.set_title("RMS vs P95 (method x mode)")
+        ax.set_xlim(left=0.0)
+        ax.set_ylim(bottom=0.0)
+        plt.legend(title="method / mode", bbox_to_anchor=(1.05, 1), loc="upper left", frameon=False)
+        fig.tight_layout()
+        p_sc = out_dir / "baseline_suite_rms_vs_p95_scatter_plot.pdf"
+        fig.savefig(p_sc, dpi=300, transparent=True)
+        plt.close(fig)
+        generated.append(p_sc)
 
     if generated:
         readme = out_dir / "baseline_suite_plots_README.txt"
@@ -2214,6 +2432,7 @@ if RUN_BASELINE_SUITE_AGGREGATION:
                 [
                     f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
                     f"summary_csv: {summary_path}",
+                    f"summary_extended_csv: {summary_ext_path}",
                     "description: Means and std over baseline files, grouped by mode and method.",
                     "plots:",
                     *[f"- {p.name}" for p in generated],
@@ -2284,15 +2503,17 @@ if RUN_RBF_ROBUST_MODE_AGGREGATION:
     out_dir = results_root("rbf_robust_sweep")
     generated: list[Path] = []
     plot_specs = [
-        ("overall_rms_error", "RBF robust sweep: overall RMS by mode and config"),
-        ("drift_bias_abs", "RBF robust sweep: drift bias by mode and config"),
+        ("overall_rms_error", "RBF robust sweep"),
+        ("drift_bias_abs", "RBF robust sweep"),
     ]
     for metric_name, title in plot_specs:
-        p_bar = out_dir / f"rbf_robust_{metric_name}_grouped_bar_plot.png"
-        if _plot_config_grouped_bars(summary, metric_name=metric_name, out_path=p_bar, title=title, method_name="rbf"):
+        p_bar = out_dir / f"rbf_robust_{metric_name}_grouped_bar_plot.pdf"
+        if _plot_config_grouped_bars(summary, metric_name=metric_name, out_path=p_bar, title=title, 
+                                     method_name="rbf"):
             generated.append(p_bar)
-        p_hm = out_dir / f"rbf_robust_{metric_name}_heatmap_plot.png"
-        if _plot_config_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title, method_name="rbf"):
+        p_hm = out_dir / f"rbf_robust_{metric_name}_heatmap_plot.pdf"
+        if _plot_config_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title, 
+                                method_name="rbf", figsize=(6.2*CM, 3.3*CM), clims=None):
             generated.append(p_hm)
 
     if generated:
@@ -2374,11 +2595,11 @@ if RUN_ST_RBF_ROBUST_MODE_AGGREGATION:
     out_dir = results_root("st_rbf_robust_sweep")
     generated: list[Path] = []
     plot_specs = [
-        ("overall_rms_error", "ST-RBF robust sweep: overall RMS by mode and config"),
-        ("drift_bias_abs", "ST-RBF robust sweep: drift bias by mode and config"),
+        ("overall_rms_error", "ST-RBF robust sweep"),
+        ("drift_bias_abs", "ST-RBF robust sweep"),
     ]
     for metric_name, title in plot_specs:
-        p_bar = out_dir / f"st_rbf_robust_{metric_name}_grouped_bar_plot.png"
+        p_bar = out_dir / f"st_rbf_robust_{metric_name}_grouped_bar_plot.pdf"
         if _plot_config_grouped_bars(
             summary,
             metric_name=metric_name,
@@ -2387,14 +2608,9 @@ if RUN_ST_RBF_ROBUST_MODE_AGGREGATION:
             method_name="st_rbf",
         ):
             generated.append(p_bar)
-        p_hm = out_dir / f"st_rbf_robust_{metric_name}_heatmap_plot.png"
-        if _plot_config_heatmap(
-            summary,
-            metric_name=metric_name,
-            out_path=p_hm,
-            title=title,
-            method_name="st_rbf",
-        ):
+        p_hm = out_dir / f"st_rbf_robust_{metric_name}_heatmap_plot.pdf"
+        if _plot_config_heatmap(summary, metric_name=metric_name, out_path=p_hm,
+            title=title, method_name="st_rbf", figsize=(6.68*CM, 3.7*CM), clims=None):
             generated.append(p_hm)
 
     if generated:
@@ -2522,11 +2738,11 @@ if RUN_ST_RBF_EXPRESSIVITY_AGGREGATION:
     out_dir = results_root("st_rbf_expressivity_sweep")
     generated: list[Path] = []
     plot_specs = [
-        ("overall_rms_error", "ST-RBF expressivity sweep: overall RMS by mode and config"),
-        ("drift_bias_abs", "ST-RBF expressivity sweep: drift bias by mode and config"),
+        ("overall_rms_error", "ST-RBF expressivity sweep"),
+        ("drift_bias_abs", "ST-RBF expressivity sweep"),
     ]
     for metric_name, title in plot_specs:
-        p_bar = out_dir / f"st_rbf_expressivity_{metric_name}_grouped_bar_plot.png"
+        p_bar = out_dir / f"st_rbf_expressivity_{metric_name}_grouped_bar_plot.pdf"
         if _plot_config_grouped_bars(
             summary,
             metric_name=metric_name,
@@ -2535,14 +2751,9 @@ if RUN_ST_RBF_EXPRESSIVITY_AGGREGATION:
             method_name="st_rbf",
         ):
             generated.append(p_bar)
-        p_hm = out_dir / f"st_rbf_expressivity_{metric_name}_heatmap_plot.png"
-        if _plot_config_heatmap(
-            summary,
-            metric_name=metric_name,
-            out_path=p_hm,
-            title=title,
-            method_name="st_rbf",
-        ):
+        p_hm = out_dir / f"st_rbf_expressivity_{metric_name}_heatmap_plot.pdf"
+        if _plot_config_heatmap(summary, metric_name=metric_name, out_path=p_hm, title=title,
+            method_name="st_rbf", figsize=(6.55*CM, 4.35*CM), clims=None ):
             generated.append(p_hm)
 
     if generated:
@@ -2623,7 +2834,7 @@ if RUN_LARGE_REGIME_BENCHMARK and RUN_LARGE_REGIME_BENCHMARK_PLOTS:
     generated = _plot_large_regime_benchmark_from_aggregates(large_root)
     if generated:
         print(f"[OK] Wrote large-regime evaluation plots: {len(generated)}")
-# %% ST-RBF Parameter Grid Sweep (3x3)
+# %% ST-RBF Parameter Grid Sweep
 """Run ST-RBF parameter grid sweep using baseline datasets across all modes.
 
 Question answered:
@@ -2635,6 +2846,13 @@ Datasets:
 Artifacts:
 - Grid run folders and aggregated tables under `Synthetic files parameter sweep non rigid/st_rbf_parameter_selection`.
 """
+
+# temporary manual grid override for benchmarking the remaining cases:
+ES_VALUES = [1.0, 2.0, 4.0, 6.0, 8.0, 10.0] # full set
+ET_VALUES = [0.1, 0.2, 0.4, 0.8, 1.6, 3.2]  # full set
+# current set to evaluate: 
+ES_VALUES = [2.0]
+ET_VALUES = [0.2, 3.2]
 
 RUN_ST_RBF_GRID_SWEEP = True
 if RUN_ST_RBF_GRID_SWEEP:
@@ -2727,7 +2945,6 @@ if RUN_ST_RBF_GRID_AGGREGATION:
     )
     if generated:
         print(f"[OK] Wrote ST-RBF grid aggregation plots: {len(generated)}")
-
 # %% ST-RBF Stationary Subset A/B
 """Run and aggregate stationary subset A/B tests for ST-RBF parameter selection.
 
@@ -2751,7 +2968,7 @@ if RUN_ST_RBF_STATIONARY_AB_TESTS:
     summary_csv = selection_root / "st_rbf_stationary_ab_summary.csv"
     summary.to_csv(summary_csv, index=False)
     _write_stationary_ab_report(summary, selection_root / "st_rbf_stationary_ab_report.md")
-# %% ST-RBF Parameter Selection Plots
+# %% ST-RBF Parameter Selection Plots for Grid Sweep and Stationary Subset A/B
 """Generate compact parameter-selection plots from canonical ST-RBF aggregate CSVs.
 
 Question answered:
@@ -2775,21 +2992,37 @@ if RUN_ST_RBF_SELECTION_PLOTS:
         if "regime" in grid.columns:
             for regime in sorted(grid["regime"].dropna().astype(str).unique().tolist()):
                 reg = grid[grid["regime"].astype(str) == regime].copy()
-                p1 = selection_root / f"st_rbf_grid_heatmap_mean_rms_all__regime_{regime}.png"
+                p1 = selection_root / f"st_rbf_grid_heatmap_mean_rms_all__regime_{regime}.pdf"
                 if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}: mean_rms_all", p1):
                     generated.append(p1)
-                p2 = selection_root / f"st_rbf_grid_heatmap_mean_drift_bias_abs__regime_{regime}.png"
+                p2 = selection_root / f"st_rbf_grid_heatmap_mean_drift_bias_abs__regime_{regime}.pdf"
                 if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}: mean_drift_bias_abs", p2):
                     generated.append(p2)
-    if ab_csv.exists():
+    """ if ab_csv.exists():
         ab = pd.read_csv(ab_csv)
         if "regime" in ab.columns:
             for regime in sorted(ab["regime"].dropna().astype(str).unique().tolist()):
                 p = selection_root / f"st_rbf_stationary_subset_ab__mean_rms_all__regime_{regime}.png"
                 if _plot_stationary_subset_ab(ab, regime=regime, out_path=p):
                     generated.append(p)
-            p_all = selection_root / "st_rbf_stationary_subset_ab__mean_rms_all__all_regimes.png"
+            p_all = selection_root / "st_rbf_stationary_subset_ab__mean_rms_all__all_regimes.pdf"
             if _plot_stationary_subset_ab(ab, regime=None, out_path=p_all):
+                generated.append(p_all) """
+    if ab_csv.exists():
+        ab = pd.read_csv(ab_csv)
+        if "regime" in ab.columns:
+            # sort ab in such away, that the "regime" order is "rotation_drift", "piecewise_spatial_drift", and "jump_events":
+            regime_order = ["rotation_drift", "piecewise_spatial_drift", "jump_events"]
+            ab["regime"] = pd.Categorical(ab["regime"], categories=regime_order, ordered=True)
+            ab = ab.sort_values("regime").reset_index(drop=True)
+
+            present_regimes = [r for r in regime_order if r in ab["regime"].astype(str).unique()]
+            for regime in present_regimes:
+                p = selection_root / f"st_rbf_stationary_subset_ab__mean_rms_all__regime_{regime}.pdf"
+                if _plot_stationary_subset_ab(ab, regime=regime, out_path=p, figsize=(5*CM, 4.5*CM)):
+                    generated.append(p)
+            p_all = selection_root / "st_rbf_stationary_subset_ab__mean_rms_all__all_regimes.pdf"
+            if _plot_stationary_subset_ab(ab, regime=None, out_path=p_all, figsize=(5.2*CM, 5*CM)):
                 generated.append(p_all)
     _write_st_rbf_plot_readme(selection_root, generated, grid_csv, ab_csv)
 # %% Rigid/Local Fairness Sweeps

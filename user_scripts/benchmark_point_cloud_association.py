@@ -791,9 +791,14 @@ def _prepare_param_sweep_config_table(agg: pd.DataFrame) -> pd.DataFrame:
     ]
     for c in metric_cols:
         d[c] = pd.to_numeric(d[c], errors="coerce")
-    gcols = ["method", "dx_scale", "config_id", "max_dist_factor", "keep_percentile", "motion_refine_iters"]
+    opt_param_cols = [c for c in ["nn_scale_factor", "sigma_init_mode"] if c in d.columns]
+    if "nn_scale_factor" in opt_param_cols:
+        d["nn_scale_factor"] = pd.to_numeric(d["nn_scale_factor"], errors="coerce")
+    if "sigma_init_mode" in opt_param_cols:
+        d["sigma_init_mode"] = d["sigma_init_mode"].astype(str)
+    gcols = ["method", "dx_scale", "config_id", "max_dist_factor", "keep_percentile", "motion_refine_iters", *opt_param_cols]
     cfg = d.groupby(gcols, as_index=False)[metric_cols].mean(numeric_only=True)
-    cfg = cfg.sort_values(["method", "dx_scale", "max_dist_factor", "keep_percentile", "motion_refine_iters"]).reset_index(drop=True)
+    cfg = cfg.sort_values(["method", "dx_scale", "max_dist_factor", "keep_percentile", "motion_refine_iters", *opt_param_cols]).reset_index(drop=True)
     return cfg
 
 def _best_config_by_metric(cfg: pd.DataFrame, metric: str) -> pd.DataFrame:
@@ -1023,17 +1028,22 @@ def _plot_hcv_variants_overview(out_root: Path, agg: pd.DataFrame) -> list[str]:
                     best_variant_method = m
                     break
 
-    # Group 1: best achievable value heatmaps + selected parameters.
+    # Group 1: value heatmaps + selected parameters using configs chosen by best link_f1_mean.
+    # This keeps parameter selection consistent across all reported metrics.
+    best_by_f1 = _best_config_by_metric(cfg, "link_f1_mean") if "link_f1_mean" in cfg.columns else pd.DataFrame()
     for metric in metrics:
-        best = _best_config_by_metric(cfg, metric)
+        best = best_by_f1.copy()
         if best.empty:
+            # Fallback when F1 is unavailable: keep legacy per-metric behavior.
+            best = _best_config_by_metric(cfg, metric)
+        if best.empty or metric not in best.columns:
             continue
         piv_val = best.pivot_table(index="method", columns="dx_scale", values=metric, aggfunc="mean")
         piv_val = piv_val.reindex(index=sorted([str(v) for v in piv_val.index.tolist()]), columns=sorted([float(v) for v in piv_val.columns.tolist()]))
         p_val = out_root / f"best_value__{metric}.png"
         if _plot_heatmap_from_pivot(
             piv_val,
-            title=f"HCV variants: best {metric}",
+            title=f"HCV variants: {metric} at config selected by best link_f1_mean",
             cbar_label=metric,
             out_path=p_val,
         ):
@@ -1047,7 +1057,7 @@ def _plot_hcv_variants_overview(out_root: Path, agg: pd.DataFrame) -> list[str]:
             p = out_root / f"best_param__{metric}__{pname}.png"
             if _plot_heatmap_from_pivot(
                 piv_p,
-                title=f"HCV variants: selected {pname} for best {metric}",
+                title=f"HCV variants: selected {pname} (config chosen by best link_f1_mean)",
                 cbar_label=pname,
                 out_path=p,
             ):
@@ -1108,8 +1118,36 @@ def _plot_hcv_variants_overview(out_root: Path, agg: pd.DataFrame) -> list[str]:
             sub = sub.dropna(subset=["link_f1_mean"])
             if sub.empty:
                 continue
-            top = sub.sort_values(["link_f1_mean", "rms_mean"], ascending=[False, True]).head(5).copy()
-            top = top[cols]
+            top_raw = sub.sort_values(["link_f1_mean", "rms_mean"], ascending=[False, True]).head(5).copy()
+            top = top_raw[cols].copy()
+
+            # Export the same top-5 table as CSV with an explicit parameter-set column.
+            def _fmt_num(v: object) -> str:
+                vn = pd.to_numeric(pd.Series([v]), errors="coerce").iloc[0]
+                return f"{float(vn):g}" if np.isfinite(vn) else str(v)
+
+            def _param_set_label(r: pd.Series) -> str:
+                parts: list[str] = []
+                for key in ["max_dist_factor", "keep_percentile", "motion_refine_iters", "nn_scale_factor", "sigma_init_mode"]:
+                    if key in r.index:
+                        vv = r.get(key)
+                        if key == "sigma_init_mode":
+                            if isinstance(vv, str) and vv.strip():
+                                parts.append(f"{key}={vv}")
+                        else:
+                            vn = pd.to_numeric(pd.Series([vv]), errors="coerce").iloc[0]
+                            if np.isfinite(vn):
+                                parts.append(f"{key}={_fmt_num(vn)}")
+                cfg = str(r.get("config_id", "")).strip()
+                if cfg:
+                    parts.append(f"config_id={cfg}")
+                return "; ".join(parts)
+
+            top_csv = top.copy()
+            top_csv.insert(1, "parameter set", top_raw.apply(_param_set_label, axis=1).tolist())
+            p_csv = out_root / f"top5_hcv_byF1__dx{_fmt_token(float(dx))}.csv"
+            top_csv.to_csv(p_csv, index=False)
+
             fig, ax = plt.subplots(figsize=(12.6, 2.7))
             ax.axis("off")
             cell_text: list[list[str]] = []
@@ -2721,6 +2759,8 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP:
         agg = pd.DataFrame(rows)
         agg_path = out_root / "aggregated_hcv_nis_dx_blind.csv"
         agg.to_csv(agg_path, index=False)
+        # reload agg from saved CSV to ensure consistent dtypes for plotting/stats
+        agg = pd.read_csv(agg_path)
 
         metric_cols = [
             c

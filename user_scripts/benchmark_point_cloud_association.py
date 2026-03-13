@@ -291,11 +291,12 @@ HUNGARIAN_CV_VARIANTS = [
 HCV_NIS_KEEP_PERCENTILE = 99.0
 HCV_NIS_FIXED_MAX_DIST_FACTOR = 6.0
 HCV_NIS_DX_BLIND_NN_SCALE_FACTORS = [0.2, 0.3, 0.4]
-HCV_MAX_FILES_VARYING_DX = 1 # defines how many files to generate and run per dx_scale in the varying dx sweep
-HCV_MAX_FILES_BIRTHDEATH = 1
-HCV_MAX_FILES_BIRTHDEATH_DRIFT = 1
-HCV_MAX_FILES_BIRTHDEATH_STATIONARY = 1
-HCV_MAX_FILES_DENSITY = 1
+HCV_TARGET_N_FILES = 5
+HCV_MAX_FILES_VARYING_DX = HCV_TARGET_N_FILES
+HCV_MAX_FILES_BIRTHDEATH = HCV_TARGET_N_FILES
+HCV_MAX_FILES_BIRTHDEATH_DRIFT = HCV_TARGET_N_FILES
+HCV_MAX_FILES_BIRTHDEATH_STATIONARY = HCV_TARGET_N_FILES
+HCV_MAX_FILES_DENSITY = HCV_TARGET_N_FILES
 HCV_NIS_METHODS = [
     {
         "name": "hungarian_gating_cv",
@@ -734,7 +735,9 @@ def _plot_heatmap_from_pivot(
     cbar_label: str,
     out_path: Path,
     cmap_name: str = "viridis",
-) -> bool:
+    figsize: tuple = (7.2, 4.8),
+    show_title: bool = True,
+    clim: tuple | None = None) -> bool:
     if pivot.empty:
         return False
     mat = pivot.to_numpy(float)
@@ -744,20 +747,47 @@ def _plot_heatmap_from_pivot(
     cmap.set_bad("#f0f0f0")
     fig_w = max(7.0, 1.2 * max(1, pivot.shape[1]))
     fig_h = max(4.8, 0.45 * max(3, pivot.shape[0]))
-    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label(cbar_label)
+    if clim is not None:
+        im.set_clim(*clim)
+    #cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    #cbar.set_label(cbar_label)
+    
+    
+    cbar = fig.colorbar(im, ax=ax, fraction=0.5, pad=0.02)
+    # remove frame around colorbar:
+    cbar.outline.set_visible(False)
+    # replace all "_" with " ":
+    cbar_label_use = cbar_label.replace("_", " ")
+    # scan cbar_label_use: every 16 characters, insert a newline if there is a space to break on:
+    if len(cbar_label_use) > 18:
+        parts = []
+        start = 0
+        while start < len(cbar_label_use):
+            end = min(start + 16, len(cbar_label_use))
+            if end < len(cbar_label_use):
+                # try to break on last space:
+                space_pos = cbar_label_use.rfind(" ", start, end)
+                if space_pos != -1 and space_pos > start:
+                    end = space_pos
+            parts.append(cbar_label_use[start:end].strip())
+            start = end
+        cbar_label_use = "\n".join(parts)
+    cbar.set_label(cbar_label_use, labelpad=1)
+    cbar.ax.tick_params(pad=1)
+    
     ax.set_xticks(np.arange(pivot.shape[1]))
     ax.set_xticklabels([str(v) for v in pivot.columns.tolist()])
     ax.set_yticks(np.arange(pivot.shape[0]))
     ax.set_yticklabels([str(v) for v in pivot.index.tolist()])
     ax.set_xlabel("dx_scale")
-    ax.set_ylabel("method")
-    ax.set_title(title)
+    #ax.set_ylabel("method")
+    if show_title:
+        ax.set_title(title, fontsize=8)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=300)
+    fig.savefig(out_path, dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
     return True
 
@@ -996,7 +1026,12 @@ def _plot_param_sweep_overview(out_root: Path) -> list[str]:
     return generated
 
 
-def _plot_hcv_variants_overview(out_root: Path, agg: pd.DataFrame) -> list[str]:
+def _plot_hcv_variants_overview(out_root: Path, 
+                                agg: pd.DataFrame, 
+                                figsize_heatmaps=None,
+                                clim_heatmaps: tuple | None = None,
+                                show_title: bool = False
+                                    ) -> list[str]:
     """Create compact overview plots for Hungarian-CV variants sweep."""
     generated: list[str] = []
     if agg.empty:
@@ -1040,28 +1075,32 @@ def _plot_hcv_variants_overview(out_root: Path, agg: pd.DataFrame) -> list[str]:
             continue
         piv_val = best.pivot_table(index="method", columns="dx_scale", values=metric, aggfunc="mean")
         piv_val = piv_val.reindex(index=sorted([str(v) for v in piv_val.index.tolist()]), columns=sorted([float(v) for v in piv_val.columns.tolist()]))
-        p_val = out_root / f"best_value__{metric}.png"
+        p_val = out_root / f"best_value__{metric}.pdf"
         if _plot_heatmap_from_pivot(
             piv_val,
             title=f"HCV variants: {metric} at config selected by best link_f1_mean",
             cbar_label=metric,
             out_path=p_val,
-        ):
+            figsize=figsize_heatmaps,
+            show_title=show_title,
+            clim=clim_heatmaps):
             generated.append(p_val.name)
-
+        """ 
         for pname in ["max_dist_factor", "motion_refine_iters"]:
             if pname not in best.columns:
                 continue
             piv_p = best.pivot_table(index="method", columns="dx_scale", values=pname, aggfunc="mean")
             piv_p = piv_p.reindex(index=sorted([str(v) for v in piv_p.index.tolist()]), columns=sorted([float(v) for v in piv_p.columns.tolist()]))
-            p = out_root / f"best_param__{metric}__{pname}.png"
+            p = out_root / f"best_param__{metric}__{pname}.pdf"
             if _plot_heatmap_from_pivot(
                 piv_p,
                 title=f"HCV variants: selected {pname} (config chosen by best link_f1_mean)",
                 cbar_label=pname,
                 out_path=p,
-            ):
-                generated.append(p.name)
+                figsize=figsize_heatmaps,
+                show_title=show_title,
+                clim=clim_heatmaps):
+                generated.append(p.name) """
 
     # Group 2: Pareto per dx using best-by-F1 configs.
     if "link_f1_mean" in cfg.columns and "rms_mean" in cfg.columns:
@@ -1742,6 +1781,8 @@ Success criteria:
 """
 
 if RUN_GENERATE_DATASETS:
+    n_files_hcv_sweeps = int(max(N_FILES, HCV_TARGET_N_FILES))
+
     # Generate nodrift datasets over dx scales.
     for dx in DX_SCALES:
         tag = f"nodrift_dx_{_fmt_token(dx)}"
@@ -1773,7 +1814,7 @@ if RUN_GENERATE_DATASETS:
     synthetic_generate_blind_pair(
         synthetic_dir=varying_root,
         seed=BASE_SEED,
-        n_files=N_FILES,
+        n_files=n_files_hcv_sweeps,
         n_tracks=N_TRACKS,
         n_times=N_TIMES,
         regimes=[NODRIFT_VARYING_DX_REGIME],
@@ -1801,7 +1842,7 @@ if RUN_GENERATE_DATASETS:
     synthetic_generate_blind_pair(
         synthetic_dir=varying_bd_root,
         seed=BASE_SEED,
-        n_files=N_FILES,
+        n_files=n_files_hcv_sweeps,
         n_tracks=N_TRACKS,
         n_times=N_TIMES,
         regimes=[NODRIFT_VARYING_DX_BIRTHDEATH_REGIME],
@@ -1837,7 +1878,7 @@ if RUN_GENERATE_DATASETS:
     synthetic_generate_blind_pair(
         synthetic_dir=varying_sta_root,
         seed=BASE_SEED,
-        n_files=N_FILES,
+        n_files=n_files_hcv_sweeps,
         n_tracks=N_TRACKS,
         n_times=N_TIMES,
         regimes=[NODRIFT_VARYING_DX_STATIONARY_REGIME],
@@ -1893,7 +1934,7 @@ if RUN_GENERATE_DATASETS:
         synthetic_generate_blind_pair(
             synthetic_dir=varying_density_root,
             seed=BASE_SEED,
-            n_files=N_FILES,
+            n_files=n_files_hcv_sweeps,
             n_tracks=n_tracks_density,
             n_times=N_TIMES,
             regimes=[NODRIFT_VARYING_DX_DENSITY_REGIME],
@@ -1954,7 +1995,7 @@ if RUN_GENERATE_DATASETS:
     synthetic_generate_blind_pair_varying_dx_birthdeath_drift(
         synthetic_dir=varying_bd_drift_root,
         seed=BASE_SEED,
-        n_files=N_FILES,
+        n_files=n_files_hcv_sweeps,
         n_tracks=N_TRACKS,
         n_times=N_TIMES,
         drift_params=dict(DRIFT_PARAMS_BIRTHDEATH),
@@ -2138,6 +2179,7 @@ if RUN_NODRIFT_DX_SWEEP:
         agg = pd.DataFrame(rows)
         agg_csv = out_root / "aggregated_summary.csv"
         agg.to_csv(agg_csv, index=False)
+        agg = pd.read_csv(agg_csv)  # Reload to ensure consistent dtypes for plotting.
 
         # Compact summary tables.
         metric_cols = [
@@ -2187,7 +2229,7 @@ if RUN_NODRIFT_DX_SWEEP:
             p2 = out_root / f"plot_dx_sweep_{metric}_heatmap.pdf"
             if _plot_metric_heatmap_dx_method(agg, metric=metric, out_path=p2, 
                                               title=f"{metric}", 
-                                              figsize=(9.0*CM, 5.1*CM), clims=None, title_on=False):
+                                              figsize=(8.5*CM, 5.1*CM), clims=None, title_on=False):
                 generated.append(p2.name)
 
         (out_root / "README.txt").write_text(
@@ -2851,7 +2893,11 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_VARYING_DX:
         print(f"[WARN] Missing varying-dx dataset, skip: {data_root}")
     else:
         mapping_all = pd.read_csv(map_path)
-        blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))[: int(max(1, HCV_MAX_FILES_VARYING_DX))]
+        blind_files_all = sorted(blind_reg_dir.glob("*_blind.csv"))
+        req_files = int(max(1, HCV_MAX_FILES_VARYING_DX))
+        if len(blind_files_all) < req_files:
+            print(f"[WARN] varying-dx has only {len(blind_files_all)} files (< requested {req_files})")
+        blind_files = blind_files_all[:req_files]
 
         for blind_file in blind_files:
             file_stem = blind_file.name.replace("_blind.csv", "")
@@ -2945,6 +2991,7 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_VARYING_DX:
         agg = pd.DataFrame(rows)
         agg_path = out_root / "aggregated_hcv_nis_dx_blind_varying_dx.csv"
         agg.to_csv(agg_path, index=False)
+        agg = pd.read_csv(agg_path)  # reload to ensure consistent dtypes for plotting/stats
 
         metric_cols = [
             c
@@ -2999,7 +3046,7 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_VARYING_DX:
             stats_path = out_root / "aggregated_hcv_nis_dx_blind_varying_dx_stats.csv"
             pd.DataFrame().to_csv(stats_path, index=False)
 
-        generated = _plot_hcv_variants_overview(out_root, agg)
+        generated = _plot_hcv_variants_overview(out_root, agg, figsize_heatmaps=(6.2*CM,4.6*CM), clim_heatmaps=(0,1))
         generated.extend(_plot_nis_gate_diagnostics(out_root, agg))
         generated = sorted(set(generated))
 
@@ -3246,7 +3293,11 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_DRIFT:
         print(f"[WARN] Missing varying-dx birthdeath+drift dataset, skip: {data_root}")
     else:
         mapping_all = pd.read_csv(map_path)
-        blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))[: int(max(1, HCV_MAX_FILES_BIRTHDEATH_DRIFT))]
+        blind_files_all = sorted(blind_reg_dir.glob("*_blind.csv"))
+        req_files = int(max(1, HCV_MAX_FILES_BIRTHDEATH_DRIFT))
+        if len(blind_files_all) < req_files:
+            print(f"[WARN] birthdeath+drift has only {len(blind_files_all)} files (< requested {req_files})")
+        blind_files = blind_files_all[:req_files]
 
         for blind_file in blind_files:
             file_stem = blind_file.name.replace("_blind.csv", "")
@@ -3405,7 +3456,7 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_DRIFT:
             stats_path = out_root / "aggregated_hcv_nis_dx_blind_birthdeath_drift_stats.csv"
             pd.DataFrame().to_csv(stats_path, index=False)
 
-        generated = _plot_hcv_variants_overview(out_root, agg)
+        generated = _plot_hcv_variants_overview(out_root, agg, figsize_heatmaps=(6.2*CM,4.6*CM), clim_heatmaps=(0,1))
         generated.extend(_plot_nis_gate_diagnostics(out_root, agg))
         generated = sorted(set(generated))
 
@@ -3457,7 +3508,11 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_STATIONARY:
         print(f"[WARN] Missing varying-dx birthdeath+stationary dataset, skip: {data_root}")
     else:
         mapping_all = pd.read_csv(map_path)
-        blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))[: int(max(1, HCV_MAX_FILES_BIRTHDEATH_STATIONARY))]
+        blind_files_all = sorted(blind_reg_dir.glob("*_blind.csv"))
+        req_files = int(max(1, HCV_MAX_FILES_BIRTHDEATH_STATIONARY))
+        if len(blind_files_all) < req_files:
+            print(f"[WARN] birthdeath+stationary has only {len(blind_files_all)} files (< requested {req_files})")
+        blind_files = blind_files_all[:req_files]
 
         for blind_file in blind_files:
             file_stem = blind_file.name.replace("_blind.csv", "")
@@ -3610,7 +3665,7 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_STATIONARY:
             stats_path = out_root / "aggregated_hcv_nis_dx_blind_birthdeath_stationary_stats.csv"
             pd.DataFrame().to_csv(stats_path, index=False)
 
-        generated = _plot_hcv_variants_overview(out_root, agg)
+        generated = _plot_hcv_variants_overview(out_root, agg, figsize_heatmaps=(6.2*CM,4.6*CM), clim_heatmaps=(0,1))
         generated.extend(_plot_nis_gate_diagnostics(out_root, agg))
         generated = sorted(set(generated))
 
@@ -3648,6 +3703,9 @@ What is tested:
   while retaining varying dx, births/deaths, and stationary subset.
 """
 
+# tmp:
+DENSITY_SCALES = [4.5,5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 15.0, 20.0]
+
 if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
     out_root = _results_root("hungarian_cv_variants_sweep_nis_dx_blind_density")
     out_root.mkdir(parents=True, exist_ok=True)
@@ -3664,7 +3722,11 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
             continue
 
         mapping_all = pd.read_csv(map_path)
-        blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))[: int(max(1, HCV_MAX_FILES_DENSITY))]
+        blind_files_all = sorted(blind_reg_dir.glob("*_blind.csv"))
+        req_files = int(max(1, HCV_MAX_FILES_DENSITY))
+        if len(blind_files_all) < req_files:
+            print(f"[WARN] density sweep has only {len(blind_files_all)} files (< requested {req_files})")
+        blind_files = blind_files_all[:req_files]
 
         for blind_file in blind_files:
             file_stem = blind_file.name.replace("_blind.csv", "")

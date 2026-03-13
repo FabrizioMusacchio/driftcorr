@@ -1533,7 +1533,11 @@ def _plot_stationary_subset_ab(
     regime: str | None,
     out_path: Path,
     highlight: tuple[float, float] = (4.0, 0.4),
-    figsize: tuple[float, float] = (7.2, 4.6)) -> bool:
+    figsize: tuple[float, float] = (7.2, 4.6),
+    figsize_bars: tuple[float, float] = (6.2, 4.8),
+    ylim_bars: tuple[float, float] = (0.0, 70.0),
+    legend_bar_on: bool = True,
+    ) -> bool:
     """Plot stationary subset A/B bars (per regime) or combined line plot (across regimes)."""
     req = {"regime", "ell_space", "ell_time", "use_stationary_subset", "mean_rms_all", "std_rms_all"}
     if not req.issubset(df.columns):
@@ -1560,7 +1564,7 @@ def _plot_stationary_subset_ab(
         piv_std = cur.pivot_table(index="cfg", columns="use_stationary_subset", values="std_rms_all", aggfunc="mean").reindex(cfg_order)
         x = np.arange(len(cfg_order), dtype=float)
         w = 0.36
-        fig, ax = plt.subplots(figsize=figsize)
+        fig, ax = plt.subplots(figsize=figsize_bars)
         y0 = piv_mean.get(0, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
         y1 = piv_mean.get(1, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
         e0 = piv_std.get(0, pd.Series(index=cfg_order, dtype=float)).to_numpy(float)
@@ -1574,8 +1578,9 @@ def _plot_stationary_subset_ab(
         if regime == "smooth_spacetime":
             regime = "smooth"
         ax.set_title(f"Stationary-subset ablation:\n{regime}", fontsize=8)
-        ax.set_ylim(bottom=0.0, top=70)
-        ax.legend(frameon=False, fontsize=7, loc="upper left")
+        ax.set_ylim(ylim_bars)
+        if legend_bar_on:
+            ax.legend(frameon=False, fontsize=7, loc="upper left")
         fig.tight_layout()
         out_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(out_path, dpi=300, transparent=True)
@@ -2753,7 +2758,17 @@ if RUN_ST_RBF_SELECTION_PLOTS:
         if "regime" in ab.columns:
             for regime in sorted(ab["regime"].dropna().astype(str).unique().tolist()):
                 p = selection_root / f"st_rbf_stationary_subset_ab__mean_rms_all__regime_{regime}.pdf"
-                if _plot_stationary_subset_ab(ab, regime=regime, out_path=p, figsize=(5*CM, 6*CM)):
+                if regime == "piecewise_smooth":
+                    ylims_use = (0,70)
+                    legend_bar_on = True
+                elif regime == "smooth_spacetime":
+                    ylims_use = (0,30)
+                    legend_bar_on = False
+                elif regime == "piecewise_abrupt":
+                    ylims_use = (0,45)
+                    legend_bar_on = False
+                if _plot_stationary_subset_ab(ab, regime=regime, out_path=p, figsize=(5*CM, 6*CM), 
+                                              figsize_bars=(4*CM, 4*CM), ylim_bars=ylims_use, legend_bar_on=legend_bar_on):
                     generated.append(p)
             p_all = selection_root / "st_rbf_stationary_subset_ab__mean_rms_all__all_regimes.pdf"
             if _plot_stationary_subset_ab(ab, regime=None, out_path=p_all, figsize=(4.8*CM, 5*CM)):

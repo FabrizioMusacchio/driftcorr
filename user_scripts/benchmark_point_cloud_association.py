@@ -114,6 +114,8 @@ Why it matters:
 - Optional drift strategy runs test registration and EM integration paths.
 """
 
+CM = 1/2.54  # centimeters in inches
+
 ASSOC_ROOT = PROJECT_ROOT / "Synthetic files track inference parameter sweep" 
 DATA_ROOT = ASSOC_ROOT / "_blind_pairs"
 DATA_ROOT_VARYING_DX = ASSOC_ROOT / "_blind_pairs_varying_dx"
@@ -547,7 +549,13 @@ def _plot_metric_vs_dx(agg: pd.DataFrame, metric: str, out_path: Path, title: st
     plt.close(fig)
     return True
 
-def _plot_metric_heatmap_dx_method(agg: pd.DataFrame, metric: str, out_path: Path, title: str) -> bool:
+def _plot_metric_heatmap_dx_method(agg: pd.DataFrame, 
+                                   metric: str, 
+                                   out_path: Path, 
+                                   title: str,
+                                   figsize: tuple = (7.2, 4.8),
+                                   clims: tuple = None,
+                                   title_on: bool = True) -> bool:
     if agg.empty or metric not in agg.columns or "dx_scale" not in agg.columns or "method" not in agg.columns:
         return False
     d = agg.copy()
@@ -565,20 +573,32 @@ def _plot_metric_heatmap_dx_method(agg: pd.DataFrame, metric: str, out_path: Pat
     mat = piv.to_numpy(float)
     cmap = plt.get_cmap("viridis").copy()
     cmap.set_bad("#f0f0f0")
-    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+    fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label(metric)
+    if clims is not None:
+        im.set_clim(*clims)
+    #cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    #cbar.set_label(metric)
+    
+    cbar = fig.colorbar(im, ax=ax, fraction=0.052, pad=0.02)
+    # remove frame around colorbar:
+    cbar.outline.set_visible(False)
+    # replace all "_" with " ":
+    cbar.set_label(metric.replace("_", " "), labelpad=1)
+    cbar.ax.tick_params(pad=1)
+    
+    
     ax.set_xticks(np.arange(len(x_vals)))
     ax.set_xticklabels([f"{v:g}" for v in x_vals])
     ax.set_yticks(np.arange(len(methods)))
     ax.set_yticklabels(methods)
-    ax.set_xlabel("dx_scale (um)")
-    ax.set_ylabel("method")
-    ax.set_title(title)
+    ax.set_xlabel("dx scale ($\mu$m)")
+    #ax.set_ylabel("method")
+    if title_on:
+        ax.set_title(title.replace("_", " "), fontsize=8)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=300)
+    fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
     return True
 
@@ -1968,12 +1988,63 @@ Interpretation:
 - Constant-velocity should help at moderate dx if trajectories are smooth.
 """
 
+""" 
+out_root = _results_root("nodrift_dx_sweep")
+rows: list[dict[str, float | str]] = []
+diag_file_rows: list[dict[str, float | str]] = []
+
+dx =  DX_SCALES[-1]
+tag = f"nodrift_dx_{_fmt_token(dx)}"
+data_root = DATA_ROOT / tag
+blind_reg_dir = data_root / "blind" / "nodrift_dx_sweep"
+gt_reg_dir = data_root / "gt" / "nodrift_dx_sweep"
+map_path = data_root / "unblinding.csv"
+
+mapping_all = pd.read_csv(map_path)
+blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))
+blind_file = blind_files[0]
+file_stem = blind_file.name.replace("_blind.csv", "")
+map_sub = mapping_all[
+    (mapping_all["Regime"].astype(str) == "nodrift_dx_sweep")
+    & (mapping_all["File"].astype(str) == file_stem)
+].copy()
+
+
+blind_frames = load_blind_frames(blind_file)
+gt_tracks = _gt_tracks_with_pointindex(data_root / "gt", "nodrift_dx_sweep", file_stem, mapping_all)
+file_diag_dir = out_root / f"dx_{_fmt_token(dx)}" / file_stem / "_diagnostics"
+file_diag = _compute_and_save_diagnostics(file_diag_dir, blind_frames, gt_tracks)
+diag_file_rows.append(
+    {
+        "dx_scale": float(dx),
+        "file_stem": str(file_stem),
+        **{k: float(v) for k, v in file_diag.items()},
+    }
+)
+        
+m= NODRIFT_METHODS[0]
+assoc = _dispatch_association_method(blind_frames, m, dx_scale=float(dx))
+run_dir = out_root / f"dx_{_fmt_token(dx)}" / file_stem / str(m["name"])
+row = _evaluate_and_save_run(
+    out_dir=run_dir,
+    assoc_result=assoc,
+    gt_tracks_df=gt_tracks,
+    mapping_df=map_sub,
+    blind_frames=blind_frames,
+    regime="nodrift_dx_sweep",
+    file_stem=file_stem,
+    method_name=str(m["name"]),
+    extras={"dx_scale": float(dx)},
+) """
+
+
 if RUN_NODRIFT_DX_SWEEP:
     out_root = _results_root("nodrift_dx_sweep")
     rows: list[dict[str, float | str]] = []
     diag_file_rows: list[dict[str, float | str]] = []
 
     for dx in DX_SCALES:
+        # dx =  DX_SCALES[-1]
         tag = f"nodrift_dx_{_fmt_token(dx)}"
         data_root = DATA_ROOT / tag
         blind_reg_dir = data_root / "blind" / "nodrift_dx_sweep"
@@ -1987,6 +2058,7 @@ if RUN_NODRIFT_DX_SWEEP:
         blind_files = sorted(blind_reg_dir.glob("*_blind.csv"))
 
         for blind_file in blind_files:
+            # blind_file = blind_files[0]
             file_stem = blind_file.name.replace("_blind.csv", "")
             map_sub = mapping_all[
                 (mapping_all["Regime"].astype(str) == "nodrift_dx_sweep")
@@ -2008,6 +2080,7 @@ if RUN_NODRIFT_DX_SWEEP:
             )
 
             for m in NODRIFT_METHODS:
+                # m= NODRIFT_METHODS[0]
                 assoc = _dispatch_association_method(blind_frames, m, dx_scale=float(dx))
                 run_dir = out_root / f"dx_{_fmt_token(dx)}" / file_stem / str(m["name"])
                 row = _evaluate_and_save_run(
@@ -2070,11 +2143,13 @@ if RUN_NODRIFT_DX_SWEEP:
         for metric in plot_metrics:
             if metric not in agg.columns:
                 continue
-            p1 = out_root / f"plot_dx_sweep_{metric}_lines.png"
+            p1 = out_root / f"plot_dx_sweep_{metric}_lines.pdf"
             if _plot_metric_vs_dx(agg, metric=metric, out_path=p1, title=f"No-drift dx sweep: {metric}"):
                 generated.append(p1.name)
-            p2 = out_root / f"plot_dx_sweep_{metric}_heatmap.png"
-            if _plot_metric_heatmap_dx_method(agg, metric=metric, out_path=p2, title=f"No-drift dx sweep: {metric} (method x dx)"):
+            p2 = out_root / f"plot_dx_sweep_{metric}_heatmap.pdf"
+            if _plot_metric_heatmap_dx_method(agg, metric=metric, out_path=p2, 
+                                              title=f"{metric}", 
+                                              figsize=(9.0*CM, 5.1*CM), clims=None, title_on=False):
                 generated.append(p2.name)
 
         (out_root / "README.txt").write_text(

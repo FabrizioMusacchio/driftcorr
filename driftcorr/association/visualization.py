@@ -302,18 +302,20 @@ def plot_3d_frames_comparison(
         (1, "GT tracks", "gt_tracks"),
         (2, "Blind point clouds", "blind_point_clouds"),
         (3, "Inferred pseudo tracks", "inferred_pseudo_tracks"),
-        (4, "Overlay: GT tracks (thin) vs inferred tracks (thick)", "overlay_gt_vs_inferred"),
+        (4, "Overlay GT vs inferred tracks", "overlay_gt_vs_inferred"),
     ]
 
+    CM = 1 / 2.54  # inches to cm
     for i, title_use, name_stub in panel_specs:
-        fig, ax = plt.subplots(figsize=(5.5, 4.0), subplot_kw={"projection": "3d"})
+        fig, ax = plt.subplots(figsize=(6*CM, 6*CM), subplot_kw={"projection": "3d"})
         #print("..plotting each panel into separate files...")
         if i == 1 and not gt_tracks.empty:
             _plot_tracks(ax, gt_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=1.2, alpha=0.75)
             #print("true for i=1")
         elif i == 2 and not blind_pts.empty:
             times = blind_pts["Time"].to_numpy(float)
-            ax.scatter(blind_pts["x"], blind_pts["y"], blind_pts["z"], c=times, cmap="viridis", s=6, alpha=0.55)
+            ax.scatter(blind_pts["x"], blind_pts["y"], blind_pts["z"], c=times, cmap="viridis", s=6, alpha=0.55,
+                       lw=0)
             # print("true for i=2")
         elif i == 3 and not inf_tracks.empty:
             _plot_tracks(ax, inf_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=1.4, alpha=0.8)
@@ -326,10 +328,19 @@ def plot_3d_frames_comparison(
                 _plot_tracks(ax, inf_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=2.0, alpha=0.5)
                 # print("true for i=4.2")
 
-        ax.set_title(title_use)
+        ax.set_title(title_use, pad=-55, fontsize=8)
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.set_zlabel("Z")
+        
+        ax.set_position([0.1, 0.1, 0.7, 0.8])
+        ax.tick_params(axis="both", which="major", pad=-3)
+        ax.xaxis.labelpad = -7
+        ax.yaxis.labelpad = -7
+        ax.zaxis.labelpad = -7
+        
+
+        
         fig.tight_layout()
 
         out_i = out.parent / f"{out.stem}_panel_{i}_{_safe_name(name_stub)}.pdf"

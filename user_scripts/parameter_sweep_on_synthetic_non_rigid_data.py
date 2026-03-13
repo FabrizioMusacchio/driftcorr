@@ -324,15 +324,18 @@ def postprocess_outputs(
     imaris_file: Path,
     out_prefix: Path,
     corr_by_method: dict[str, pd.DataFrame],
+    enable_extra_plots: bool = True,
 ) -> None:
     """Create standard evaluation + visual plots + optional groundtruth evaluation."""
-    summary_df, details = run_all_methods_and_compare(df_orig, corr_by_method)
-    save_evaluation_outputs(out_prefix, summary_df, details)
+    if bool(enable_extra_plots):
+        summary_df, details = run_all_methods_and_compare(df_orig, corr_by_method)
+        save_evaluation_outputs(out_prefix, summary_df, details)
 
     gt = load_groundtruth_for_imaris_file(imaris_file)
     drift_gt = load_drift_field_for_imaris_file(imaris_file)
-    for method_name, df_corr in corr_by_method.items():
-        save_visual_inspection_plots(df_orig, df_corr, out_prefix, method_name, df_groundtruth=gt)
+    if bool(enable_extra_plots):
+        for method_name, df_corr in corr_by_method.items():
+            save_visual_inspection_plots(df_orig, df_corr, out_prefix, method_name, df_groundtruth=gt)
 
     if gt is not None:
         save_groundtruth_evaluation_outputs(out_prefix, gt, corr_by_method, drift_field_groundtruth=drift_gt)
@@ -557,6 +560,7 @@ def _run_non_rigid_regime_benchmark(
     synthetic_temporal_smoothness: float = 0.9,
     reuse_existing: bool = True,
     use_stationary_subset: bool = False,
+    enable_extra_plots: bool = True,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run non-rigid synthetic regimes and emit synthetic_regime-like aggregate CSVs."""
     synthetic_dir = Path(synthetic_dir)
@@ -611,7 +615,13 @@ def _run_non_rigid_regime_benchmark(
                     opts=opts,
                     use_stationary_subset=bool(use_stationary_subset),
                 )
-                postprocess_outputs(df_syn, imaris_file, out_prefix, corr)
+                postprocess_outputs(
+                    df_syn,
+                    imaris_file,
+                    out_prefix,
+                    corr,
+                    enable_extra_plots=bool(enable_extra_plots),
+                )
                 base = out_prefix
                 gt_summary_path = base.with_name(base.name + "_gt_metrics_summary.csv")
                 if gt_summary_path.exists():
@@ -1591,8 +1601,9 @@ def _plot_grid_heatmap(
     value_col: str,
     title: str,
     out_path: Path,
-    highlight: tuple[float, float] = (4.0, 0.4),
-) -> bool:
+    highlight: tuple[float, float] | None = None,
+    figsize: tuple[float, float] = (6.2, 4.8),
+    clims: tuple[float, float] | None = None) -> bool:
     """Plot grid heatmap (x=ell_time, y=ell_space) from aggregated CSV rows."""
     required = {"ell_space", "ell_time", value_col}
     if not required.issubset(df.columns):
@@ -1620,29 +1631,55 @@ def _plot_grid_heatmap(
             mat[y_lookup[yv], x_lookup[xv]] = float(row[value_col])
 
     cmap = plt.get_cmap("viridis").copy()
+    #cmap = plt.get_cmap("nipy_spectral").copy()
+    #cmap = plt.get_cmap("gnuplot2").copy()
     cmap.set_bad(color="#f0f0f0")
-    fig, ax = plt.subplots(figsize=(6.2, 4.8))
+    fig, ax = plt.subplots(figsize=figsize)
     im = ax.imshow(mat, origin="lower", aspect="auto", cmap=cmap)
-    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label(value_col)
+    if clims is not None:
+        im.set_clim(*clims)
+    #cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar = fig.colorbar(im, ax=ax, fraction=0.049, pad=0.02)
+    # remove frame around colorbar:
+    cbar.outline.set_visible(False)
+    # replace all "_" with " ":
+    cbar.set_label(value_col.replace("_", " "), labelpad=1)
+    cbar.ax.tick_params(pad=1)
+    
+    
     ax.set_xticks(np.arange(len(x_vals)))
     ax.set_xticklabels([f"{v:.2g}" for v in x_vals])
     ax.set_yticks(np.arange(len(y_vals)))
     ax.set_yticklabels([f"{v:.2g}" for v in y_vals])
     ax.set_xlabel("ell_time")
     ax.set_ylabel("ell_space")
-    ax.set_title(title)
+    if title =="smooth_spacetime":
+        title = "smooth"
+    ax.set_title(title, fontsize=8)
 
-    hs, ht = highlight
-    ix = next((i for i, x in enumerate(x_vals) if np.isclose(float(x), float(ht))), None)
-    iy = next((i for i, y in enumerate(y_vals) if np.isclose(float(y), float(hs))), None)
+    # calculate highlight by calculating the lowest value in mat 
+    # and thus its corresponding (ell_space, ell_time) coordinates,
+    # regardless of clims or the specific highlight parameter passed in:
+    ix = None
+    iy = None
+    if np.isfinite(mat).any():
+        min_idx = np.unravel_index(np.nanargmin(mat), mat.shape)
+        iy, ix = min_idx
     if ix is not None and iy is not None:
         ax.scatter([ix], [iy], s=130, marker="o", facecolors="none", edgecolors="red", linewidths=1.8, zorder=5)
         ax.scatter([ix], [iy], s=20, color="red", zorder=6)
+    
+    if highlight is not None:
+        hs, ht = highlight
+        ix = next((i for i, x in enumerate(x_vals) if np.isclose(float(x), float(ht))), None)
+        iy = next((i for i, y in enumerate(y_vals) if np.isclose(float(y), float(hs))), None)
+        if ix is not None and iy is not None:
+            ax.scatter([ix], [iy], s=130, marker="x", facecolors="chartreuse", linewidths=1.8, zorder=5)
+            ax.scatter([ix], [iy], s=20, color="chartreuse", zorder=6)
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_path, dpi=300)
+    fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
     return True
 
@@ -2848,13 +2885,12 @@ Artifacts:
 """
 
 # temporary manual grid override for benchmarking the remaining cases:
-ES_VALUES = [1.0, 2.0, 4.0, 6.0, 8.0, 10.0] # full set
+ES_VALUES = [4.0, 6.0, 8.0, 10.0] # full set
 ET_VALUES = [0.1, 0.2, 0.4, 0.8, 1.6, 3.2]  # full set
-# current set to evaluate: 
-ES_VALUES = [2.0]
-ET_VALUES = [0.2, 3.2]
+
 
 RUN_ST_RBF_GRID_SWEEP = True
+RUN_ST_RBF_GRID_ENABLE_EXTRA_PLOTS = False
 if RUN_ST_RBF_GRID_SWEEP:
     baseline_dir = ensure_large_groundtruth_regimes()
     grid_root = results_root("st_rbf_parameter_selection")
@@ -2878,7 +2914,9 @@ if RUN_ST_RBF_GRID_SWEEP:
                 synthetic_temporal_smoothness=0.9,
                 reuse_existing=True,
                 use_stationary_subset=False,
+                enable_extra_plots=bool(RUN_ST_RBF_GRID_ENABLE_EXTRA_PLOTS),
             )
+    print(f"[OK] Completed ST-RBF grid sweep for {len(ES_VALUES) * len(ET_VALUES)} configurations.")
 
 # ST-RBF Grid Aggregation:
 """Aggregate ST-RBF grid sweep into canonical CSV artifacts.
@@ -2992,11 +3030,22 @@ if RUN_ST_RBF_SELECTION_PLOTS:
         if "regime" in grid.columns:
             for regime in sorted(grid["regime"].dropna().astype(str).unique().tolist()):
                 reg = grid[grid["regime"].astype(str) == regime].copy()
+                
+                # in reg, search for the ell_space and ell_time combination, where mean_rms_all
+                # and mean_drift_bias_abs most possible the lowest. We can use a simple heuristic: we can compute a combined score as the product of mean_rms_all and mean_drift_bias_abs, and find the row with the minimum combined score:
+                grid_point = reg.copy()                
+                grid_point["combined_score"] = grid_point["mean_rms_all"] * grid_point["mean_drift_bias_abs"]
+                best_point = grid_point.loc[grid_point["combined_score"].idxmin()]
+                #print(f"Best grid point for regime {regime}: {best_point}")
+                highlight = best_point[["ell_space", "ell_time"]].values
+                
                 p1 = selection_root / f"st_rbf_grid_heatmap_mean_rms_all__regime_{regime}.pdf"
-                if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}: mean_rms_all", p1):
+                if _plot_grid_heatmap(reg, "mean_rms_all", f"{regime}", p1, highlight=highlight,
+                                    figsize=(6.0*CM, 4.6*CM)):
                     generated.append(p1)
                 p2 = selection_root / f"st_rbf_grid_heatmap_mean_drift_bias_abs__regime_{regime}.pdf"
-                if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}: mean_drift_bias_abs", p2):
+                if _plot_grid_heatmap(reg, "mean_drift_bias_abs", f"{regime}", p2, highlight=highlight,
+                                    figsize=(6.0*CM, 4.6*CM), clims=None):
                     generated.append(p2)
     """ if ab_csv.exists():
         ab = pd.read_csv(ab_csv)

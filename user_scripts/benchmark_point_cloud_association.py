@@ -26,6 +26,7 @@ import shutil
 import sys
 
 import matplotlib.pyplot as plt
+from matplotlib import colors as mcolors
 import numpy as np
 import pandas as pd
 
@@ -1029,6 +1030,7 @@ def _plot_param_sweep_overview(out_root: Path) -> list[str]:
 def _plot_hcv_variants_overview(out_root: Path, 
                                 agg: pd.DataFrame, 
                                 figsize_heatmaps=None,
+                                figsize_sensitivity=None,
                                 clim_heatmaps: tuple | None = None,
                                 show_title: bool = False
                                     ) -> list[str]:
@@ -1211,8 +1213,13 @@ def _plot_hcv_variants_overview(out_root: Path,
             generated.append(p.name)
 
     # Group 4: sensitivity for all tested methods with one line per dx.
+    # Export one PDF per parameter (instead of multi-panel PNGs).
     dx_values = sorted(pd.to_numeric(cfg["dx_scale"], errors="coerce").dropna().unique().tolist())
+    xcols = [c for c in ["max_dist_factor", "motion_refine_iters", "nn_scale_factor"] if c in cfg.columns]
     if dx_values:
+        cmap = plt.get_cmap("viridis")
+        use_continuous_color = len(dx_values) > 1
+        norm = mcolors.Normalize(vmin=float(min(dx_values)), vmax=float(max(dx_values))) if use_continuous_color else None
         for method in sorted(cfg["method"].astype(str).unique().tolist()):
             sub_m = cfg[cfg["method"].astype(str) == str(method)].copy()
             if sub_m.empty:
@@ -1220,8 +1227,8 @@ def _plot_hcv_variants_overview(out_root: Path,
             for metric in metrics:
                 if metric not in sub_m.columns:
                     continue
-                fig, axs = plt.subplots(1, 2, figsize=(10.2, 3.9))
-                for ax, xcol in zip(axs, ["max_dist_factor", "motion_refine_iters"]):
+                for xcol in xcols:
+                    fig, ax = plt.subplots(figsize=figsize_sensitivity)
                     has_line = False
                     for dx in dx_values:
                         d = sub_m[np.isclose(pd.to_numeric(sub_m["dx_scale"], errors="coerce").to_numpy(float), float(dx))].copy()
@@ -1235,23 +1242,40 @@ def _plot_hcv_variants_overview(out_root: Path,
                         st = d.groupby(xcol, as_index=False)[metric].mean().sort_values(xcol)
                         if st.empty:
                             continue
-                        ax.plot(st[xcol].to_numpy(float), st[metric].to_numpy(float), marker="o", label=f"dx={float(dx):g}")
+                        color = cmap(norm(float(dx))) if norm is not None else cmap(0.6)
+                        label = None if use_continuous_color else f"dx={float(dx):g}"
+                        ax.plot(
+                            st[xcol].to_numpy(float),
+                            st[metric].to_numpy(float),
+                            marker="o", markersize=5.0,
+                            color=color,
+                            label=label)
                         has_line = True
-                    ax.set_xlabel(xcol)
-                    ax.set_ylabel(metric)
+                    ax.set_xlabel(xcol.replace("_", " "))
+                    ax.set_ylabel(metric.replace("_", " "))
+                    # ensure that the xticks match the plottet x-values:
+                    ax.set_xticks(st[xcol].to_numpy(float))
                     if metric == "link_f1_mean":
-                        ax.set_ylim(0.0, 1.0)
+                        ax.set_ylim(0.0, 1.09)
                     else:
                         ax.set_ylim(bottom=0.0)
-                    ax.set_title(xcol)
+                    ax.set_title(f"{metric.replace('_', ' ')} vs {xcol.replace('_', ' ')}", fontsize=8)
+                    ax.set_title(f"{method}", fontsize=8)
                     if has_line:
-                        ax.legend(fontsize=8)
-                fig.suptitle(f"Sensitivity | {method} | all dx | {metric}")
-                fig.tight_layout()
-                p = out_root / f"sensitivity__{_fmt_method_token(method)}__all_dx__{metric}.png"
-                fig.savefig(p, dpi=300)
-                plt.close(fig)
-                generated.append(p.name)
+                        if use_continuous_color and norm is not None:
+                            sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+                            sm.set_array([])
+                            cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+                            cbar.set_label("density dx-scale")
+                            cbar.outline.set_visible(False)
+                        else:
+                            ax.legend(fontsize=7, frameon=False)
+                        #fig.suptitle(f"Sensitivity | {method} | all dx", fontsize=8)
+                        fig.tight_layout()
+                        p = out_root / f"sensitivity__{_fmt_method_token(method)}__all_dx__{metric}__{xcol}.pdf"
+                        fig.savefig(p, dpi=300, transparent=True)
+                        generated.append(p.name)
+                    plt.close(fig)
 
     return sorted(set(generated))
 
@@ -1599,7 +1623,10 @@ def _density_stats_for_file(data_root: Path, regime: str, file_stem: str) -> dic
     return out
 
 
-def _plot_density_sweep_summary(out_root: Path, agg: pd.DataFrame) -> list[str]:
+def _plot_density_sweep_summary(out_root: Path, 
+                                agg: pd.DataFrame,
+                                figsize: tuple[float, float] = (8.2, 4.8),
+                                show_title: bool = True) -> list[str]:
     """Create density-dependent performance plots."""
     generated: list[str] = []
     if agg.empty or "density_scale" not in agg.columns or "method" not in agg.columns:
@@ -1611,39 +1638,63 @@ def _plot_density_sweep_summary(out_root: Path, agg: pd.DataFrame) -> list[str]:
     if d.empty:
         return generated
 
+    # Use one consistent config selection: best link_f1_mean per method+density.
+    if "link_f1_mean" not in d.columns:
+        return generated
+    best_by_f1 = d.copy()
+    best_by_f1["link_f1_mean"] = pd.to_numeric(best_by_f1["link_f1_mean"], errors="coerce")
+    best_by_f1 = best_by_f1.dropna(subset=["link_f1_mean"])
+    if best_by_f1.empty:
+        return generated
+    sort_cols = ["method", "density_scale", "link_f1_mean"]
+    ascending = [True, True, False]
+    if "rms_mean" in best_by_f1.columns:
+        best_by_f1["rms_mean"] = pd.to_numeric(best_by_f1["rms_mean"], errors="coerce")
+        sort_cols.append("rms_mean")
+        ascending.append(True)
+    best_by_f1 = best_by_f1.sort_values(sort_cols, ascending=ascending)
+    best_by_f1 = best_by_f1.groupby(["method", "density_scale"], as_index=False).first()
+
     metric_specs = [
-        ("link_f1_mean", True),
-        ("id_switches_mean_per_track", False),
-        ("fragmentation_rate", False),
+        "link_f1_mean",
+        "id_switches_mean_per_track",
+        "fragmentation_rate",
     ]
-    for metric, higher_is_better in metric_specs:
-        if metric not in d.columns:
+    for metric in metric_specs:
+        if metric not in best_by_f1.columns:
             continue
-        tmp = d.copy()
-        tmp[metric] = pd.to_numeric(tmp[metric], errors="coerce")
-        tmp = tmp.dropna(subset=[metric])
-        if tmp.empty:
+        best = best_by_f1.copy()
+        best[metric] = pd.to_numeric(best[metric], errors="coerce")
+        best = best.dropna(subset=[metric])
+        if best.empty:
             continue
-        tmp = tmp.sort_values(
-            ["method", "density_scale", metric],
-            ascending=[True, True, not higher_is_better],
-        )
-        best = tmp.groupby(["method", "density_scale"], as_index=False).first()
-        fig, ax = plt.subplots(figsize=(8.2, 4.8))
+        fig, ax = plt.subplots(figsize=figsize)
+        method_count=0
         for method in sorted(best["method"].astype(str).unique().tolist()):
             sm = best[best["method"].astype(str) == str(method)].sort_values("density_scale")
-            ax.plot(sm["density_scale"].to_numpy(float), sm[metric].to_numpy(float), marker="o", label=method)
-        ax.set_xlabel("density_scale")
-        ax.set_ylabel(metric)
-        ax.set_title(f"Best-by-config {metric} vs density")
+            # define an alternating ls per method:
+            if method_count % 3 == 0:
+                ls = "-."
+            elif method_count % 3 == 1:
+                ls = "--"
+            else:
+                ls = "-"
+            ax.plot(sm["density_scale"].to_numpy(float), sm[metric].to_numpy(float), marker="o", 
+                    label=method, markersize=3.0, linestyle=ls, alpha=0.7)
+            method_count += 1
+        ax.set_xlabel("density scale")
+        ax.set_ylabel(metric.replace("_", " "))
+        if show_title:
+            ax.set_title(f"{metric} at config selected by best link_f1_mean")
         if metric == "link_f1_mean":
-            ax.set_ylim(0.0, 1.0)
+            ax.set_ylim(0.0, 1.05)
         else:
-            ax.set_ylim(bottom=0.0)
-        ax.legend(fontsize=8)
+            top = np.max((np.nanmax(best[metric].to_numpy(float))*1.05,1.0))
+            ax.set_ylim(bottom=0.0, top=top)
+        ax.legend(fontsize=6.5, frameon=False)
         fig.tight_layout()
-        p = out_root / f"plot_density_{metric}_vs_density_scale.png"
-        fig.savefig(p, dpi=300)
+        p = out_root / f"plot_density_{metric}_vs_density_scale.pdf"
+        fig.savefig(p, dpi=300, transparent=True)
         plt.close(fig)
         generated.append(p.name)
 
@@ -1659,16 +1710,17 @@ def _plot_density_sweep_summary(out_root: Path, agg: pd.DataFrame) -> list[str]:
         rr["gate_ratio"] = rr["gate_radius"] / rr["mean_nn_distance"].replace(0.0, np.nan)
         rr = rr.dropna(subset=["link_f1_mean", "gate_ratio", "method"])
         if not rr.empty:
-            fig, ax = plt.subplots(figsize=(8.2, 4.8))
+            fig, ax = plt.subplots(figsize=figsize)
             for method in sorted(rr["method"].astype(str).unique().tolist()):
                 sm = rr[rr["method"].astype(str) == str(method)].copy()
                 sm = sm.sort_values("gate_ratio")
                 ax.plot(sm["gate_ratio"].to_numpy(float), sm["link_f1_mean"].to_numpy(float), marker="o", linestyle="-", alpha=0.7, label=method)
             ax.set_xlabel("gate_radius / mean_nn_distance")
             ax.set_ylabel("link_f1_mean")
-            ax.set_title("Association quality vs normalized gate radius")
+            if show_title:
+                ax.set_title("Association quality vs normalized gate radius")
             ax.set_ylim(0.0, 1.0)
-            ax.legend(fontsize=8)
+            ax.legend(fontsize=7, frameon=False)
             fig.tight_layout()
             p = out_root / "plot_link_f1_vs_gate_ratio.png"
             fig.savefig(p, dpi=300)
@@ -3046,7 +3098,8 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_VARYING_DX:
             stats_path = out_root / "aggregated_hcv_nis_dx_blind_varying_dx_stats.csv"
             pd.DataFrame().to_csv(stats_path, index=False)
 
-        generated = _plot_hcv_variants_overview(out_root, agg, figsize_heatmaps=(6.2*CM,4.6*CM), clim_heatmaps=(0,1))
+        generated = _plot_hcv_variants_overview(out_root, agg, figsize_heatmaps=(6.2*CM,4.6*CM), 
+                                                clim_heatmaps=(0,1), figsize_sensitivity=(5.5*CM, 4.0*CM))
         generated.extend(_plot_nis_gate_diagnostics(out_root, agg))
         generated = sorted(set(generated))
 
@@ -3704,7 +3757,8 @@ What is tested:
 """
 
 # tmp:
-DENSITY_SCALES = [4.5,5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 15.0, 20.0]
+DENSITY_SCALES = [9.0, 10.0, 11.0, 12.0, 15.0, 20.0]
+DENSITY_SCALES = [10.0, 20.0]
 
 if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
     out_root = _results_root("hungarian_cv_variants_sweep_nis_dx_blind_density")
@@ -3818,6 +3872,8 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
         agg = pd.DataFrame(rows)
         agg_path = out_root / "aggregated_density.csv"
         agg.to_csv(agg_path, index=False)
+        agg = pd.read_csv(agg_path)  # re-read to ensure consistent dtypes for plotting and stats
+    
 
         metric_cols = [
             c
@@ -3874,9 +3930,9 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
             stats_path = out_root / "aggregated_density_stats.csv"
             pd.DataFrame().to_csv(stats_path, index=False)
 
-        generated = _plot_hcv_variants_overview(out_root, agg)
+        generated = _plot_hcv_variants_overview(out_root, agg, figsize_sensitivity=(5.5*CM, 4.0*CM))
         generated.extend(_plot_nis_gate_diagnostics(out_root, agg))
-        generated.extend(_plot_density_sweep_summary(out_root, agg))
+        generated.extend(_plot_density_sweep_summary(out_root, agg, figsize=(5.5*CM, 4.5*CM), show_title=False))
         generated = sorted(set(generated))
 
         (out_root / "README.txt").write_text(

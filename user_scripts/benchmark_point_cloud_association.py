@@ -1277,6 +1277,57 @@ def _plot_hcv_variants_overview(out_root: Path,
                         generated.append(p.name)
                     plt.close(fig)
 
+    # Group 5: single-dx method-comparison sensitivity (link_f1 only).
+    # Trigger only when each method has exactly one dx value.
+    if "link_f1_mean" in cfg.columns and "dx_scale" in cfg.columns:
+        dx_tab = cfg.copy()
+        dx_tab["dx_scale"] = pd.to_numeric(dx_tab["dx_scale"], errors="coerce")
+        dx_tab = dx_tab.dropna(subset=["method", "dx_scale"])
+        if not dx_tab.empty:
+            dx_counts = dx_tab.groupby("method", as_index=False)["dx_scale"].nunique()
+            if not dx_counts.empty and bool((dx_counts["dx_scale"] == 1).all()):
+                for xcol in [c for c in ["motion_refine_iters", "nn_scale_factor"] if c in cfg.columns]:
+                    fig, ax = plt.subplots(figsize=figsize_sensitivity)
+                    has_line = False
+                    xticks_all: set[float] = set()
+                    method_counter=0
+                    for method in sorted(cfg["method"].astype(str).unique().tolist()):
+                        d = cfg[cfg["method"].astype(str) == str(method)].copy()
+                        d[xcol] = pd.to_numeric(d[xcol], errors="coerce")
+                        d["link_f1_mean"] = pd.to_numeric(d["link_f1_mean"], errors="coerce")
+                        d = d.dropna(subset=[xcol, "link_f1_mean"])
+                        if d.empty:
+                            continue
+                        st = d.groupby(xcol, as_index=False)["link_f1_mean"].mean().sort_values(xcol)
+                        if st.empty:
+                            continue
+                        x = st[xcol].to_numpy(float)
+                        y = st["link_f1_mean"].to_numpy(float)
+                        if method_counter % 3 == 0:
+                            ls_use = "-"
+                        elif method_counter % 3 == 1:
+                            ls_use = "--"
+                        else:
+                            ls_use = ":"
+                        method_counter += 1
+                        ax.plot(x, y, marker="o", markersize=5.0, label=method, linestyle=ls_use, alpha=0.7)
+                        xticks_all.update(float(v) for v in x.tolist())
+                        has_line = True
+
+                    if has_line:
+                        if xticks_all:
+                            ax.set_xticks(sorted(xticks_all))
+                        ax.set_xlabel(xcol.replace("_", " "))
+                        ax.set_ylabel("link f1 mean")
+                        ax.set_ylim(0.0, 1.09)
+                        #ax.set_title(f"All methods | link f1 mean vs {xcol.replace('_', ' ')}", fontsize=8)
+                        ax.legend(fontsize=6.5, frameon=False)
+                        fig.tight_layout()
+                        p = out_root / f"sensitivity__all_methods__single_dx__link_f1_mean__{xcol}.pdf"
+                        fig.savefig(p, dpi=300, transparent=True)
+                        generated.append(p.name)
+                    plt.close(fig)
+
     return sorted(set(generated))
 
 
@@ -3757,8 +3808,8 @@ What is tested:
 """
 
 # tmp:
-DENSITY_SCALES = [9.0, 10.0, 11.0, 12.0, 15.0, 20.0]
-DENSITY_SCALES = [10.0, 20.0]
+DENSITY_SCALES = [9.0,  11.0, 12.0, 15.0]
+#DENSITY_SCALES = [10.0, 20.0]
 
 if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
     out_root = _results_root("hungarian_cv_variants_sweep_nis_dx_blind_density")

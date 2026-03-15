@@ -53,6 +53,7 @@ try:
         em_associate_and_driftfit,
         load_blind_frames,
         synthetic_generate_blind_pair,
+        synthetic_generate_blind_pair_random_pointcloud,
         synthetic_generate_blind_pair_varying_dx_birthdeath_drift,
     )
     from driftcorr.association.scoring import evaluate_against_groundtruth
@@ -88,6 +89,7 @@ except ModuleNotFoundError as exc:
             em_associate_and_driftfit,
             load_blind_frames,
             synthetic_generate_blind_pair,
+            synthetic_generate_blind_pair_random_pointcloud,
             synthetic_generate_blind_pair_varying_dx_birthdeath_drift,
         )
         from driftcorr.association.scoring import evaluate_against_groundtruth
@@ -124,6 +126,7 @@ DATA_ROOT_VARYING_DX_BIRTHDEATH = ASSOC_ROOT / "_blind_pairs_varying_dx_birthdea
 DATA_ROOT_VARYING_DX_BIRTHDEATH_DRIFT = ASSOC_ROOT / "_blind_pairs_varying_dx_birthdeath_drift"
 DATA_ROOT_VARYING_DX_STATIONARY = ASSOC_ROOT / "_blind_pairs_varying_dx_stationary"
 DATA_ROOT_VARYING_DX_DENSITY = ASSOC_ROOT / "_blind_pairs_varying_dx_density"
+DATA_ROOT_RANDOM_NULL = ASSOC_ROOT / "_blind_pairs_random_pointcloud_null"
 NODRIFT_VARYING_DX_REGIME = "nodrift_varying_dx"
 NODRIFT_VARYING_DX_TAG = "varying_dx_0p20_4p00"
 NODRIFT_VARYING_DX_NOMINAL_SCALE = 1.0
@@ -139,6 +142,8 @@ NODRIFT_VARYING_DX_STATIONARY_NOMINAL_SCALE = 1.0
 NODRIFT_VARYING_DX_STATIONARY_STATIONARY_FRACTION = 0.25
 NODRIFT_VARYING_DX_DENSITY_REGIME = "varying_dx_birthdeath_stationary_density"
 NODRIFT_VARYING_DX_DENSITY_TAG = "varying_dx_birthdeath_stationary_density"
+RANDOM_POINTCLOUD_NULL_REGIME = "random_pointcloud_null"
+RANDOM_POINTCLOUD_NULL_TAG = "random_pointcloud_uniform"
 DENSITY_INITIAL_TRACKS = 80
 DENSITY_SCALES = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 15.0, 20.0]
 VOLUME_SIZE = (700.0, 700.0, 350.0)
@@ -168,6 +173,8 @@ RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH = True
 RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_DRIFT = True
 RUN_HCV_NIS_DX_BLIND_SWEEP_BIRTHDEATH_STATIONARY = True
 RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY = True
+AGG_HCV_NIS_DX_BLIND_SWEEP_DENSITY = False
+RUN_HCV_NIS_RANDOM_POINTCLOUD_NULL = True
 RUN_DRIFT_STRATEGY_COMPARISON = False
 OVERWRITE_DATASETS = True
 
@@ -298,6 +305,7 @@ HCV_MAX_FILES_BIRTHDEATH = HCV_TARGET_N_FILES
 HCV_MAX_FILES_BIRTHDEATH_DRIFT = HCV_TARGET_N_FILES
 HCV_MAX_FILES_BIRTHDEATH_STATIONARY = HCV_TARGET_N_FILES
 HCV_MAX_FILES_DENSITY = HCV_TARGET_N_FILES
+HCV_MAX_FILES_RANDOM_NULL = HCV_TARGET_N_FILES
 HCV_NIS_METHODS = [
     {
         "name": "hungarian_gating_cv",
@@ -1780,6 +1788,109 @@ def _plot_density_sweep_summary(out_root: Path,
     return generated
 
 
+def _postprocess_hcv_density_aggregation(
+    out_root: Path,
+    agg_rows: pd.DataFrame,
+    density_scales_desc: object,
+    source_tag: str = "run",
+) -> bool:
+    """Persist density aggregation tables and regenerate diagnostic plots."""
+    if agg_rows.empty:
+        return False
+
+    agg = agg_rows.copy()
+    agg_path = out_root / "aggregated_density.csv"
+    agg.to_csv(agg_path, index=False)
+    agg = pd.read_csv(agg_path)  # keep behavior consistent with normal run path
+
+    metric_cols = [
+        c
+        for c in [
+            "link_f1_mean",
+            "fragmentation_rate",
+            "id_switches_mean_per_track",
+            "rms_mean",
+            "unmatched_rate_mean",
+        ]
+        if c in agg.columns
+    ]
+    if metric_cols:
+        long = agg.melt(
+            id_vars=[
+                "method",
+                "density_scale",
+                "dx_scale",
+                "dx_regime",
+                "max_dist_factor",
+                "keep_percentile",
+                "motion_refine_iters",
+                "config_id",
+                "nn_scale_factor",
+                "sigma_init_mode",
+            ],
+            value_vars=metric_cols,
+            var_name="metric",
+            value_name="value",
+        )
+        stats = (
+            long.groupby(
+                [
+                    "method",
+                    "density_scale",
+                    "dx_scale",
+                    "dx_regime",
+                    "max_dist_factor",
+                    "keep_percentile",
+                    "motion_refine_iters",
+                    "nn_scale_factor",
+                    "sigma_init_mode",
+                    "metric",
+                ],
+                as_index=False,
+            )["value"]
+            .agg(mean="mean", std="std", n="count")
+            .sort_values(["metric", "method", "density_scale", "nn_scale_factor", "motion_refine_iters"])
+            .reset_index(drop=True)
+        )
+        stats_path = out_root / "aggregated_density_stats.csv"
+        stats.to_csv(stats_path, index=False)
+    else:
+        stats_path = out_root / "aggregated_density_stats.csv"
+        pd.DataFrame().to_csv(stats_path, index=False)
+
+    generated = _plot_hcv_variants_overview(out_root, agg, figsize_sensitivity=(5.5 * CM, 4.0 * CM))
+    generated.extend(_plot_nis_gate_diagnostics(out_root, agg))
+    generated.extend(_plot_density_sweep_summary(out_root, agg, figsize=(5.5 * CM, 4.5 * CM), show_title=False))
+    generated = sorted(set(generated))
+
+    (out_root / "README.txt").write_text(
+        "\n".join(
+            [
+                f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
+                f"source: {source_tag}",
+                f"dataset_root: {DATA_ROOT_VARYING_DX_DENSITY}",
+                f"regime: {NODRIFT_VARYING_DX_DENSITY_REGIME}",
+                f"density_scales: {density_scales_desc}",
+                f"density_initial_tracks: {DENSITY_INITIAL_TRACKS}",
+                f"volume_size_um: {VOLUME_SIZE}",
+                f"max_dist_factor_fixed: {HCV_NIS_FIXED_MAX_DIST_FACTOR}",
+                f"keep_percentile_fixed: {HCV_NIS_KEEP_PERCENTILE}",
+                f"motion_refine_iters: {HCV_REFINE_ITERS}",
+                f"nn_scale_factors: {HCV_NIS_DX_BLIND_NN_SCALE_FACTORS}",
+                f"methods: {[m['name'] for m in HCV_NIS_METHODS]}",
+                f"aggregated_csv: {agg_path.name}",
+                f"aggregated_stats_csv: {stats_path.name}",
+                "extra_aggregated_columns: density_scale,active_tracks_mean,volume,density_mean,mean_nn_distance,median_r_eq,gate_radius_nominal",
+                "plots:",
+                *[f"- {p}" for p in generated],
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return True
+
+
 def _frames_from_gt_tracks(gt_tracks: pd.DataFrame) -> list[PointCloudFrame]:
     frames: list[PointCloudFrame] = []
     for t, grp in gt_tracks.groupby("Time"):
@@ -2092,6 +2203,22 @@ if RUN_GENERATE_DATASETS:
                 "mean_nn_distance=",
                 round(float(ds["mean_nn_distance"]), 3) if np.isfinite(ds["mean_nn_distance"]) else "nan",
             )
+
+    # Generate random-pointcloud null-control dataset (no true temporal continuity).
+    random_null_root = DATA_ROOT_RANDOM_NULL / RANDOM_POINTCLOUD_NULL_TAG
+    synthetic_generate_blind_pair_random_pointcloud(
+        synthetic_dir=random_null_root,
+        seed=BASE_SEED,
+        n_files=n_files_hcv_sweeps,
+        n_points=N_TRACKS,
+        n_times=N_TIMES,
+        regimes=[RANDOM_POINTCLOUD_NULL_REGIME],
+        bounds_xyz=((0.0, float(VOLUME_SIZE[0])), (0.0, float(VOLUME_SIZE[1])), (0.0, float(VOLUME_SIZE[2]))),
+        out_blind_dir=random_null_root / "blind",
+        out_gt_dir=random_null_root / "gt",
+        unblinding_path=random_null_root / "unblinding.csv",
+        overwrite=bool(OVERWRITE_DATASETS),
+    )
 
     # Generate heteroscedastic varying-dx + birth/death + global-drift dataset.
     varying_bd_drift_root = DATA_ROOT_VARYING_DX_BIRTHDEATH_DRIFT / NODRIFT_VARYING_DX_BIRTHDEATH_DRIFT_TAG
@@ -3808,7 +3935,7 @@ What is tested:
 """
 
 # tmp:
-DENSITY_SCALES = [9.0,  11.0, 12.0, 15.0]
+#DENSITY_SCALES = [15.0]
 #DENSITY_SCALES = [10.0, 20.0]
 
 if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
@@ -3920,11 +4047,167 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
                         rows.append(row)
 
     if rows:
+        _postprocess_hcv_density_aggregation(
+            out_root=out_root,
+            agg_rows=pd.DataFrame(rows),
+            density_scales_desc=DENSITY_SCALES,
+            source_tag="live_density_sweep",
+        )
+
+AGG_HCV_NIS_DX_BLIND_SWEEP_DENSITY = True
+if AGG_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
+    out_root = _results_root("hungarian_cv_variants_sweep_nis_dx_blind_density")
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    summary_paths_all = sorted(out_root.rglob("*_metrics_summary_*.csv"))
+    summary_paths: list[Path] = []
+    for p in summary_paths_all:
+        try:
+            rel = p.relative_to(out_root)
+        except Exception:
+            continue
+        if len(rel.parts) >= 5 and str(rel.parts[0]).startswith("density_"):
+            summary_paths.append(p)
+
+    if not summary_paths:
+        print(f"[WARN] No density run summary CSVs found in {out_root}.")
+    else:
+        row_parts: list[pd.DataFrame] = []
+        for p in summary_paths:
+            try:
+                tab = pd.read_csv(p)
+            except Exception as exc:
+                print(f"[WARN] Could not read run summary {p}: {exc}")
+                continue
+            if tab.empty:
+                continue
+            row_parts.append(tab)
+
+        if not row_parts:
+            print(f"[WARN] Density re-aggregation found no non-empty run summaries in {out_root}.")
+        else:
+            agg_re = pd.concat(row_parts, ignore_index=True)
+            dedup_cols = [c for c in ["regime", "file_stem", "method", "density_scale", "config_id"] if c in agg_re.columns]
+            if dedup_cols:
+                agg_re = agg_re.drop_duplicates(subset=dedup_cols, keep="last").reset_index(drop=True)
+
+            density_scales_found = (
+                sorted(pd.to_numeric(agg_re.get("density_scale", np.nan), errors="coerce").dropna().unique().tolist())
+                if "density_scale" in agg_re.columns
+                else []
+            )
+            _postprocess_hcv_density_aggregation(
+                out_root=out_root,
+                agg_rows=agg_re,
+                density_scales_desc=density_scales_found,
+                source_tag=f"reaggregated_from_existing_runs ({len(summary_paths)} summaries)",
+            )
+
+
+
+
+# %% HCV_NIS_RANDOM_POINTCLOUD_NULL
+"""Run HCV/NIS association on random i.i.d. point-cloud sequences (null control).
+
+What is tested:
+- Same HCV NIS method family and parameter sweep style as other association suites,
+  but on synthetic data with no true temporal identity continuity.
+
+Why it matters:
+- Negative control to quantify over-linking behavior: robust methods should avoid
+  creating long confident tracks when no true links exist.
+"""
+
+if RUN_HCV_NIS_RANDOM_POINTCLOUD_NULL:
+    out_root = _results_root("hungarian_cv_variants_sweep_nis_random_pointcloud_null")
+    out_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, float | str]] = []
+
+    data_root = DATA_ROOT_RANDOM_NULL / RANDOM_POINTCLOUD_NULL_TAG
+    blind_reg_dir = data_root / "blind" / RANDOM_POINTCLOUD_NULL_REGIME
+    gt_reg_dir = data_root / "gt" / RANDOM_POINTCLOUD_NULL_REGIME
+    map_path = data_root / "unblinding.csv"
+    if not map_path.exists() or not blind_reg_dir.exists() or not gt_reg_dir.exists():
+        print(f"[WARN] Missing random-pointcloud null dataset, skip: {data_root}")
+    else:
+        mapping_all = pd.read_csv(map_path)
+        blind_files_all = sorted(blind_reg_dir.glob("*_blind.csv"))
+        req_files = int(max(1, HCV_MAX_FILES_RANDOM_NULL))
+        if len(blind_files_all) < req_files:
+            print(f"[WARN] random-null sweep has only {len(blind_files_all)} files (< requested {req_files})")
+        blind_files = blind_files_all[:req_files]
+
+        for blind_file in blind_files:
+            file_stem = blind_file.name.replace("_blind.csv", "")
+            map_sub = mapping_all[
+                (mapping_all["Regime"].astype(str) == RANDOM_POINTCLOUD_NULL_REGIME)
+                & (mapping_all["File"].astype(str) == file_stem)
+            ].copy()
+            if map_sub.empty:
+                continue
+
+            blind_frames = load_blind_frames(blind_file)
+            gt_tracks = _gt_tracks_with_pointindex(data_root / "gt", RANDOM_POINTCLOUD_NULL_REGIME, file_stem, mapping_all)
+
+            for m in HCV_NIS_METHODS:
+                method_name = str(m.get("name", ""))
+                nn_scales = HCV_NIS_DX_BLIND_NN_SCALE_FACTORS if "_nis_" in method_name else [0.3]
+                for nn_scale in nn_scales:
+                    for iters in HCV_REFINE_ITERS:
+                        gating_override = {
+                            "max_dist": float(max(0.5, float(HCV_NIS_FIXED_MAX_DIST_FACTOR) * 1.0)),
+                            "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                        }
+                        params_override = {
+                            "motion_refine_iters": int(iters),
+                            "max_dist_factor": float(HCV_NIS_FIXED_MAX_DIST_FACTOR),
+                            "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                            "dx_scale": 1.0,
+                            "sigma_init_mode": "nn_based" if "_nis_" in method_name else "dx",
+                            "nn_scale_factor": float(nn_scale),
+                        }
+                        assoc = _dispatch_association_method(
+                            blind_frames,
+                            m,
+                            dx_scale=1.0,
+                            gating_override=gating_override,
+                            params_override=params_override,
+                        )
+                        cfg_id = (
+                            f"md{_fmt_token(float(HCV_NIS_FIXED_MAX_DIST_FACTOR))}"
+                            f"_kp{int(HCV_NIS_KEEP_PERCENTILE)}"
+                            f"_it{int(iters)}"
+                            f"_nn{_fmt_token(float(nn_scale))}"
+                        )
+                        run_dir = out_root / "random_null" / file_stem / method_name / cfg_id
+                        row = _evaluate_and_save_run(
+                            out_dir=run_dir,
+                            assoc_result=assoc,
+                            gt_tracks_df=gt_tracks,
+                            mapping_df=map_sub,
+                            blind_frames=blind_frames,
+                            regime=RANDOM_POINTCLOUD_NULL_REGIME,
+                            file_stem=file_stem,
+                            method_name=method_name,
+                            extras={
+                                "dx_scale": 1.0,
+                                "dx_regime": RANDOM_POINTCLOUD_NULL_TAG,
+                                "config_id": cfg_id,
+                                "max_dist_factor": float(HCV_NIS_FIXED_MAX_DIST_FACTOR),
+                                "keep_percentile": float(HCV_NIS_KEEP_PERCENTILE),
+                                "motion_refine_iters": int(iters),
+                                "nn_scale_factor": float(nn_scale),
+                                "sigma_init_mode": "nn_based" if "_nis_" in method_name else "dx",
+                                "null_control_random_pointcloud": 1.0,
+                            },
+                        )
+                        rows.append(row)
+
+    if rows:
         agg = pd.DataFrame(rows)
-        agg_path = out_root / "aggregated_density.csv"
+        agg_path = out_root / "aggregated_hcv_nis_random_pointcloud_null.csv"
         agg.to_csv(agg_path, index=False)
-        agg = pd.read_csv(agg_path)  # re-read to ensure consistent dtypes for plotting and stats
-    
+        agg = pd.read_csv(agg_path)
 
         metric_cols = [
             c
@@ -3934,6 +4217,12 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
                 "id_switches_mean_per_track",
                 "rms_mean",
                 "unmatched_rate_mean",
+                "spurious_link_rate_mean",
+                "fraction_tracks_len",
+                "fraction_tracks_len_gt1",
+                "mean_track_length",
+                "median_track_length",
+                "assoc_mean_confidence",
             ]
             if c in agg.columns
         ]
@@ -3941,7 +4230,6 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
             long = agg.melt(
                 id_vars=[
                     "method",
-                    "density_scale",
                     "dx_scale",
                     "dx_regime",
                     "max_dist_factor",
@@ -3959,7 +4247,6 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
                 long.groupby(
                     [
                         "method",
-                        "density_scale",
                         "dx_scale",
                         "dx_regime",
                         "max_dist_factor",
@@ -3972,29 +4259,64 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
                     as_index=False,
                 )["value"]
                 .agg(mean="mean", std="std", n="count")
-                .sort_values(["metric", "method", "density_scale", "nn_scale_factor", "motion_refine_iters"])
+                .sort_values(["metric", "method", "nn_scale_factor", "motion_refine_iters"])
                 .reset_index(drop=True)
             )
-            stats_path = out_root / "aggregated_density_stats.csv"
+            stats_path = out_root / "aggregated_hcv_nis_random_pointcloud_null_stats.csv"
             stats.to_csv(stats_path, index=False)
         else:
-            stats_path = out_root / "aggregated_density_stats.csv"
+            stats_path = out_root / "aggregated_hcv_nis_random_pointcloud_null_stats.csv"
             pd.DataFrame().to_csv(stats_path, index=False)
 
-        generated = _plot_hcv_variants_overview(out_root, agg, figsize_sensitivity=(5.5*CM, 4.0*CM))
+        generated = _plot_hcv_variants_overview(out_root, agg, figsize_sensitivity=(5.5 * CM, 4.0 * CM))
         generated.extend(_plot_nis_gate_diagnostics(out_root, agg))
-        generated.extend(_plot_density_sweep_summary(out_root, agg, figsize=(5.5*CM, 4.5*CM), show_title=False))
+
+        # Null-control summaries for added metrics.
+        null_metrics = [
+            "spurious_link_rate_mean",
+            "fraction_tracks_len",
+            "mean_track_length",
+            "median_track_length",
+            "unmatched_rate_mean",
+            "assoc_mean_confidence",
+        ]
+        for metric in null_metrics:
+            if metric not in agg.columns:
+                continue
+            tab = agg.copy()
+            tab[metric] = pd.to_numeric(tab[metric], errors="coerce")
+            tab = tab.dropna(subset=["method", metric])
+            if tab.empty:
+                continue
+            stat = tab.groupby("method", as_index=False)[metric].agg(mean="mean", std="std").sort_values("mean", ascending=False)
+            fig, ax = plt.subplots(figsize=(7.2, 4.8))
+            x = np.arange(stat.shape[0], dtype=float)
+            y = stat["mean"].to_numpy(float)
+            e = pd.to_numeric(stat["std"], errors="coerce").fillna(0.0).to_numpy(float)
+            ax.bar(x, y, yerr=e, capsize=2.5)
+            ax.set_xticks(x)
+            ax.set_xticklabels(stat["method"].astype(str).tolist(), rotation=30, ha="right")
+            ax.set_ylabel(metric.replace("_", " "))
+            ax.set_title(f"Random null control: {metric.replace('_', ' ')} by method")
+            if metric in {"link_f1_mean", "fraction_tracks_len", "fraction_tracks_len_gt1", "spurious_link_rate_mean", "unmatched_rate_mean", "assoc_mean_confidence"}:
+                ax.set_ylim(0.0, 1.0)
+            else:
+                ax.set_ylim(bottom=0.0)
+            fig.tight_layout()
+            p = out_root / f"plot_random_null_{metric}_by_method.pdf"
+            fig.savefig(p, dpi=300, transparent=True)
+            plt.close(fig)
+            generated.append(p.name)
+
         generated = sorted(set(generated))
 
         (out_root / "README.txt").write_text(
             "\n".join(
                 [
                     f"timestamp: {datetime.now().isoformat(timespec='seconds')}",
-                    f"dataset_root: {DATA_ROOT_VARYING_DX_DENSITY}",
-                    f"regime: {NODRIFT_VARYING_DX_DENSITY_REGIME}",
-                    f"density_scales: {DENSITY_SCALES}",
-                    f"density_initial_tracks: {DENSITY_INITIAL_TRACKS}",
-                    f"volume_size_um: {VOLUME_SIZE}",
+                    f"dataset_root: {data_root}",
+                    f"regime: {RANDOM_POINTCLOUD_NULL_REGIME}",
+                    "description: Random i.i.d. point-cloud null control with no true temporal links.",
                     f"max_dist_factor_fixed: {HCV_NIS_FIXED_MAX_DIST_FACTOR}",
                     f"keep_percentile_fixed: {HCV_NIS_KEEP_PERCENTILE}",
                     f"motion_refine_iters: {HCV_REFINE_ITERS}",
@@ -4002,7 +4324,6 @@ if RUN_HCV_NIS_DX_BLIND_SWEEP_DENSITY:
                     f"methods: {[m['name'] for m in HCV_NIS_METHODS]}",
                     f"aggregated_csv: {agg_path.name}",
                     f"aggregated_stats_csv: {stats_path.name}",
-                    "extra_aggregated_columns: density_scale,active_tracks_mean,volume,density_mean,mean_nn_distance,median_r_eq,gate_radius_nominal",
                     "plots:",
                     *[f"- {p}" for p in generated],
                 ]

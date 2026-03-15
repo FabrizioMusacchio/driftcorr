@@ -65,11 +65,17 @@ EXPECTED_SHAPE = (12, 38, 512, 512)
 EXPECTED_AXES = "TZYX"
 
 GAUSSIAN_SIGMA_ZYX = (0.7, 1.0, 1.0)
-MIN_COMPONENT_SIZE = 150
+BACKGROUND_SIGMA_ZYX = (2.0, 8.0, 8.0)
+PRIMARY_MIN_COMPONENT_SIZE = 150
+RESCUE_MIN_COMPONENT_SIZE = 120
+FINAL_MIN_COMPONENT_SIZE = 120
 LOW_THRESHOLD_FRACTION = 0.35
 LOW_THRESHOLD_FLOOR = 0.12
+RESCUE_LOW_THRESHOLD_FRACTION = 0.60
+RESCUE_LOW_THRESHOLD_FLOOR = 0.008
+RESCUE_PEAK_MIN = 0.24
 MAX_TRACK_LINK_DISTANCE = 18.0
-ROTATION_MAX_DEG_XYZ = (3.0, -2.5, 2.0)
+ROTATION_TOTAL_DEG_XYZ = (3.0, -2.5, 2.0)
 IMARIS_UNIT = "px"
 VOXEL_SIZE_XYZ = (1.0, 1.0, 1.0)
 
@@ -149,8 +155,28 @@ def relabel_consecutive(mask: np.ndarray) -> np.ndarray:
         return labels.astype(np.uint32)
     return labels.astype(np.uint32)
 
+
+def filter_components_by_peak(mask: np.ndarray, reference: np.ndarray, min_size: int, min_peak: float) -> np.ndarray:
+    """Keep only components with sufficient size and peak response."""
+    labels, _ = ndi.label(mask)
+    if labels.max() == 0:
+        return np.zeros_like(mask, dtype=bool)
+
+    sizes = np.bincount(labels.ravel())
+    out = np.zeros_like(mask, dtype=bool)
+    for comp_id in range(1, int(labels.max()) + 1):
+        if int(sizes[comp_id]) < int(min_size):
+            continue
+        comp_mask = labels == comp_id
+        peak_value = float(np.max(reference[comp_mask]))
+        if peak_value < float(min_peak):
+            continue
+        out[comp_mask] = True
+    return out
+
+
 def segment_volume(volume_zyx: np.ndarray) -> tuple[np.ndarray, dict[str, float]]:
-    """Segment one 3D frame using robust normalization + hysteresis thresholding."""
+    """Segment one 3D frame using primary + rescue 3D segmentation branches."""
     vol = np.asarray(volume_zyx, dtype=np.float32)
     p_low, p_high = np.percentile(vol, [5.0, 99.8])
     denom = max(float(p_high - p_low), 1e-6)
@@ -162,10 +188,33 @@ def segment_volume(volume_zyx: np.ndarray) -> tuple[np.ndarray, dict[str, float]
 
     seeds = smoothed > high_thr
     support = smoothed > low_thr
-    mask = ndi.binary_propagation(seeds, mask=support)
+    primary_mask = ndi.binary_propagation(seeds, mask=support)
+    primary_mask = ndi.binary_closing(primary_mask, structure=ndi.generate_binary_structure(3, 1), iterations=1)
+    primary_mask = ndi.binary_fill_holes(primary_mask)
+    primary_mask = remove_small_components(primary_mask, min_size=PRIMARY_MIN_COMPONENT_SIZE)
+
+    background = ndi.gaussian_filter(normalized, sigma=BACKGROUND_SIGMA_ZYX)
+    enhanced = np.clip(smoothed - background, 0.0, None)
+    rescue_thr = otsu_threshold(
+        enhanced[enhanced > 0.0],
+        bins=256,
+        value_range=(0.0, max(float(enhanced.max()), 1e-6)),
+    )
+    rescue_low_thr = max(float(RESCUE_LOW_THRESHOLD_FLOOR), float(RESCUE_LOW_THRESHOLD_FRACTION) * float(rescue_thr))
+    rescue_mask = ndi.binary_propagation(enhanced > rescue_thr, mask=enhanced > rescue_low_thr)
+    rescue_mask = ndi.binary_closing(rescue_mask, structure=ndi.generate_binary_structure(3, 1), iterations=1)
+    rescue_mask = ndi.binary_fill_holes(rescue_mask)
+    rescue_mask = filter_components_by_peak(
+        rescue_mask,
+        reference=smoothed,
+        min_size=RESCUE_MIN_COMPONENT_SIZE,
+        min_peak=RESCUE_PEAK_MIN,
+    )
+
+    mask = primary_mask | rescue_mask
     mask = ndi.binary_closing(mask, structure=ndi.generate_binary_structure(3, 1), iterations=1)
     mask = ndi.binary_fill_holes(mask)
-    mask = remove_small_components(mask, min_size=MIN_COMPONENT_SIZE)
+    mask = remove_small_components(mask, min_size=FINAL_MIN_COMPONENT_SIZE)
     labels = relabel_consecutive(mask)
 
     stats = {
@@ -173,7 +222,11 @@ def segment_volume(volume_zyx: np.ndarray) -> tuple[np.ndarray, dict[str, float]
         "p_high": float(p_high),
         "high_threshold": float(high_thr),
         "low_threshold": float(low_thr),
+        "rescue_threshold": float(rescue_thr),
+        "rescue_low_threshold": float(rescue_low_thr),
         "seed_voxels": int(seeds.sum()),
+        "primary_mask_voxels": int(primary_mask.sum()),
+        "rescue_mask_voxels": int(rescue_mask.sum()),
         "mask_voxels": int(mask.sum()),
         "n_components": int(labels.max()),
     }
@@ -331,28 +384,40 @@ def rotation_matrix_xyz(angle_x: float, angle_y: float, angle_z: float) -> np.nd
 
 
 def apply_rotational_drift(df: pd.DataFrame, max_deg_xyz: tuple[float, float, float]) -> pd.DataFrame:
-    """Apply a mild time-dependent rotation around the global centroid center."""
+    """Apply a mild cumulative frame-to-frame rotational drift around the global centroid center."""
     out = df.copy()
     times = np.array(sorted(out["Time"].astype(float).unique()), dtype=np.float64)
-    t_min = float(times.min())
-    t_max = float(times.max())
     center = out[["Position X", "Position Y", "Position Z"]].to_numpy(np.float64).mean(axis=0)
-    max_rad_xyz = np.deg2rad(np.array(max_deg_xyz, dtype=np.float64))
+    total_deg_xyz = np.array(max_deg_xyz, dtype=np.float64)
+
+    n_steps = max(len(times) - 1, 1)
+    step_idx = np.arange(1, n_steps + 1, dtype=np.float64)
+    weight_x = 1.0 + 0.20 * np.sin(np.pi * step_idx / max(n_steps, 1))
+    weight_y = 1.0 + 0.15 * np.cos(np.pi * step_idx / max(n_steps, 1))
+    weight_z = 1.0 + 0.10 * np.sin(2.0 * np.pi * step_idx / max(n_steps, 1))
+    weights = np.column_stack([weight_x, weight_y, weight_z])
+
+    step_deg = np.zeros((len(times), 3), dtype=np.float64)
+    if len(times) > 1:
+        step_deg[1:, :] = total_deg_xyz[None, :] * (weights / np.sum(weights, axis=0, keepdims=True))
+    cum_deg = np.cumsum(step_deg, axis=0)
+    cum_rad = np.deg2rad(cum_deg)
 
     rotated_rows: list[pd.DataFrame] = []
-    for time_value in times.tolist():
+    for time_idx, time_value in enumerate(times.tolist()):
         frame = out[out["Time"] == float(time_value)].copy()
-        alpha = 0.0 if t_max <= t_min else (float(time_value) - t_min) / (t_max - t_min)
-        rot = rotation_matrix_xyz(*(alpha * max_rad_xyz))
+        rot = rotation_matrix_xyz(*cum_rad[time_idx])
         points = frame[["Position X", "Position Y", "Position Z"]].to_numpy(np.float64)
         rotated = ((points - center[None, :]) @ rot.T) + center[None, :]
         frame["Position X"] = rotated[:, 0]
         frame["Position Y"] = rotated[:, 1]
         frame["Position Z"] = rotated[:, 2]
-        frame["Rotation Alpha"] = float(alpha)
-        frame["Rotation X deg"] = float(np.rad2deg(alpha * max_rad_xyz[0]))
-        frame["Rotation Y deg"] = float(np.rad2deg(alpha * max_rad_xyz[1]))
-        frame["Rotation Z deg"] = float(np.rad2deg(alpha * max_rad_xyz[2]))
+        frame["Rotation Step X deg"] = float(step_deg[time_idx, 0])
+        frame["Rotation Step Y deg"] = float(step_deg[time_idx, 1])
+        frame["Rotation Step Z deg"] = float(step_deg[time_idx, 2])
+        frame["Rotation Cum X deg"] = float(cum_deg[time_idx, 0])
+        frame["Rotation Cum Y deg"] = float(cum_deg[time_idx, 1])
+        frame["Rotation Cum Z deg"] = float(cum_deg[time_idx, 2])
         rotated_rows.append(frame)
 
     out_rot = pd.concat(rotated_rows, ignore_index=True)
@@ -487,6 +552,39 @@ def save_tracked_label_tiff(labels_tzyx: np.ndarray, out_path: Path) -> Path:
     return out_path
 
 
+def save_qc_overlay_frames(raw_stack_tzyx: np.ndarray, labels_tzyx: np.ndarray, out_dir: Path) -> list[Path]:
+    """Save max-projection QC overlays for a few representative frames."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    frame_indices = sorted({0, raw_stack_tzyx.shape[0] // 2, raw_stack_tzyx.shape[0] - 1})
+    saved: list[Path] = []
+
+    for frame_idx in frame_indices:
+        raw_proj = np.max(raw_stack_tzyx[frame_idx], axis=0)
+        label_proj = np.max(labels_tzyx[frame_idx], axis=0)
+        out_path = out_dir / f"qc_overlay_frame_{frame_idx + 1:02d}.png"
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        axes[0].imshow(raw_proj, cmap="gray")
+        axes[0].set_title(f"Raw Max Projection t={frame_idx + 1}")
+
+        axes[1].imshow(raw_proj, cmap="gray")
+        axes[1].imshow(np.ma.masked_where(label_proj == 0, label_proj), cmap="nipy_spectral", alpha=0.45)
+        axes[1].set_title(f"Overlay t={frame_idx + 1}")
+
+        axes[2].imshow(label_proj > 0, cmap="gray")
+        axes[2].set_title(f"Binary Label Projection t={frame_idx + 1}")
+
+        for ax in axes:
+            ax.axis("off")
+
+        fig.tight_layout()
+        fig.savefig(out_path, dpi=220)
+        plt.close(fig)
+        saved.append(out_path)
+
+    return saved
+
+
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     MPL_DIR.mkdir(parents=True, exist_ok=True)
@@ -525,8 +623,13 @@ def main() -> None:
     gt_tracks_df.to_csv(gt_imaris_path, index=False)
     summary_df.to_csv(summary_path, index=False)
     plot_tracks_3d(gt_tracks_df, gt_tracks_plot, title="Ground-truth centroids from tracked 3D segmentation")
+    qc_paths = save_qc_overlay_frames(
+        raw_stack_tzyx=stack_tzyx,
+        labels_tzyx=tracked_labels_tzyx,
+        out_dir=OUTPUT_DIR / "qc_overlays",
+    )
 
-    rotated_df = apply_rotational_drift(gt_tracks_df, max_deg_xyz=ROTATION_MAX_DEG_XYZ)
+    rotated_df = apply_rotational_drift(gt_tracks_df, max_deg_xyz=ROTATION_TOTAL_DEG_XYZ)
     rotated_imaris_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_rotated_imaris.csv"
     rotated_plot_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_rotated_tracks_3d.png"
     rotated_df.to_csv(rotated_imaris_path, index=False)
@@ -556,6 +659,8 @@ def main() -> None:
     print(f"  GT plot: {gt_tracks_plot}")
     print(f"  Rotated plot: {rotated_plot_path}")
     print(f"  Blind point-cloud plot: {blind_plot_path}")
+    for qc_path in qc_paths:
+        print(f"  QC overlay: {qc_path}")
 # %% MAIN
 if __name__ == "__main__":
     main()

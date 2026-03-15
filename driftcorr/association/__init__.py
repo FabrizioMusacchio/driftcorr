@@ -45,6 +45,7 @@ from .synthetic import (
     load_blind_frames,
     load_groundtruth_mapping,
     synthetic_generate_blind_pair,
+    synthetic_generate_blind_pair_random_pointcloud,
     synthetic_generate_blind_pair_varying_dx_birthdeath_drift,
 )
 from .types import AssociationResult, GroundTruthMapping, PointCloudFrame
@@ -75,6 +76,7 @@ __all__ = [
     "load_blind_frames",
     "load_groundtruth_mapping",
     "synthetic_generate_blind_pair",
+    "synthetic_generate_blind_pair_random_pointcloud",
     "synthetic_generate_blind_pair_varying_dx_birthdeath_drift",
     "compute_nn_distance",
     "compute_displacement_from_gt",

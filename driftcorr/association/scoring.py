@@ -500,6 +500,15 @@ def evaluate_against_groundtruth(
                 )
             )
         )
+        inf_links = per_time["n_links_inferred"].to_numpy(float)
+        corr_links = per_time["n_links_correct"].to_numpy(float)
+        valid_inf = inf_links > 0
+        if bool(np.any(valid_inf)):
+            spurious_link_rate_mean = float(
+                np.nanmean((inf_links[valid_inf] - corr_links[valid_inf]) / np.maximum(inf_links[valid_inf], 1.0))
+            )
+        else:
+            spurious_link_rate_mean = float(0.0)
     else:
         per_time = pd.DataFrame(
             columns=[
@@ -523,6 +532,16 @@ def evaluate_against_groundtruth(
         rms_mean = float("nan")
         rms_std = float("nan")
         unmatched_rate_mean = float("nan")
+        spurious_link_rate_mean = float("nan")
+
+    track_lengths = (
+        inferred_tracks_df.groupby("TrackID").size().to_numpy(float)
+        if (inferred_tracks_df is not None and not inferred_tracks_df.empty and "TrackID" in inferred_tracks_df.columns)
+        else np.array([], dtype=float)
+    )
+    mean_track_length = float(np.mean(track_lengths)) if track_lengths.size else float("nan")
+    median_track_length = float(np.median(track_lengths)) if track_lengths.size else float("nan")
+    fraction_tracks_len_gt1 = float(np.mean(track_lengths > 1.0)) if track_lengths.size else float("nan")
 
     summary = {
         "coverage": coverage,
@@ -538,6 +557,11 @@ def evaluate_against_groundtruth(
         "rms_mean": rms_mean,
         "rms_std": rms_std,
         "unmatched_rate_mean": unmatched_rate_mean,
+        "spurious_link_rate_mean": spurious_link_rate_mean,
+        "fraction_tracks_len": fraction_tracks_len_gt1,
+        "fraction_tracks_len_gt1": fraction_tracks_len_gt1,
+        "mean_track_length": mean_track_length,
+        "median_track_length": median_track_length,
     }
 
     eps = 1e-6

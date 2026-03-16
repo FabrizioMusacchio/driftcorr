@@ -1457,6 +1457,20 @@ def compute_track_average_displacements(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows).sort_values("TrackID").reset_index(drop=True)
 
 
+def corrected_tracks_csv_path(drift_root: Path, regime_name: str, method_name: str) -> Path:
+    """Return the corrected-track CSV path for one drift-correction method."""
+    prefix = drift_root / f"{INPUT_TIF.stem}_{regime_name}_inferred"
+    suffix_by_method = {
+        "rigid": "_positions_corrected_rigid.csv",
+        "local": "_positions_corrected_localdrift.csv",
+        "rbf": "_positions_corrected_rbf.csv",
+        "st_rbf": "_positions_corrected_st_rbf.csv",
+    }
+    if method_name not in suffix_by_method:
+        raise ValueError(f"Unsupported drift-correction method: {method_name}")
+    return prefix.with_name(prefix.name + suffix_by_method[method_name])
+
+
 def determine_stationary_threshold(avg_disp_df: pd.DataFrame) -> float:
     """Estimate a GT-based threshold separating semi-stationary and migrating cells."""
     vals = pd.to_numeric(avg_disp_df["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64)
@@ -1595,40 +1609,45 @@ def annotate_pvalue(ax: Any, x0: float, x1: float, y: float, p_value: float) -> 
 
 def plot_two_group_bar(
     values_gt: np.ndarray,
-    values_pca: np.ndarray,
+    values_other: np.ndarray,
     title: str,
     ylabel: str,
     out_path: Path,
     stats_csv_path: Path | None = None,
     paired: bool = False,
-) -> None:
+    group_labels: tuple[str, str] = ("GT", "PCA"),
+    show_title: bool = True,
+    figsize: tuple[float, float] = (5.0 * CM, 4.2 * CM)) -> None:
     """Plot GT vs PCA mean bars with SEM, points, and optional test annotation."""
     gt = np.asarray(values_gt, dtype=np.float64)
-    pca = np.asarray(values_pca, dtype=np.float64)
+    other = np.asarray(values_other, dtype=np.float64)
     gt = gt[np.isfinite(gt)]
-    pca = pca[np.isfinite(pca)]
-    means = [float(np.mean(gt)) if gt.size else 0.0, float(np.mean(pca)) if pca.size else 0.0]
-    sems = [sem_or_zero(gt), sem_or_zero(pca)]
+    other = other[np.isfinite(other)]
+    means = [float(np.mean(gt)) if gt.size else 0.0, float(np.mean(other)) if other.size else 0.0]
+    sems = [sem_or_zero(gt), sem_or_zero(other)]
 
-    fig, ax = plt.subplots(figsize=(5.0 * CM, 4.2 * CM))
+    fig, ax = plt.subplots(figsize=figsize)
     x = np.array([0.0, 1.0], dtype=np.float64)
     ax.bar(x, means, yerr=sems, capsize=4, color=["#4C72B0", "#DD8452"], alpha=0.85, width=0.65)
 
     rng = np.random.default_rng(0)
-    for xi, arr, color in zip(x.tolist(), [gt, pca], ["#1f3552", "#7a3d14"]):
+    for xi, arr, color in zip(x.tolist(), [gt, other], ["#1f3552", "#7a3d14"]):
         if arr.size:
             jitter = rng.uniform(-0.08, 0.08, size=arr.size)
-            ax.scatter(np.full(arr.size, xi) + jitter, arr, s=16, color=color, alpha=0.8, zorder=3)
+            ax.scatter(np.full(arr.size, xi) + jitter, arr, s=16, color=color, alpha=0.8, zorder=3, lw=0)
 
     ax.set_xticks(x)
-    ax.set_xticklabels(["GT", "PCA"])
+    ax.set_xticklabels([str(group_labels[0]), str(group_labels[1])])
     ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    ax.set_ylim(bottom=0.0)
+    if show_title:
+        ax.set_title(title)
+    
 
-    stats_row = run_statistical_test(gt, pca, paired=paired)
-    ymax = max([m + s for m, s in zip(means, sems)] + ([float(np.max(gt))] if gt.size else [0.0]) + ([float(np.max(pca))] if pca.size else [0.0]))
+    stats_row = run_statistical_test(gt, other, paired=paired)
+    ymax = max([m + s for m, s in zip(means, sems)] + ([float(np.max(gt))] if gt.size else [0.0]) + ([float(np.max(other))] if other.size else [0.0]))
     annotate_pvalue(ax, x0=0.0, x1=1.0, y=max(ymax * 1.03, 0.5), p_value=float(stats_row["p_value"]) if np.isfinite(stats_row["p_value"]) else np.nan)
+
+    ax.set_ylim(bottom=0.0)
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1639,18 +1658,27 @@ def plot_two_group_bar(
         pd.DataFrame([stats_row]).to_csv(stats_csv_path, index=False)
 
 
-def plot_total_count_bars(count_gt: int, count_pca: int, title: str, ylabel: str, out_path: Path) -> None:
+def plot_total_count_bars(
+    count_gt: int,
+    count_other: int,
+    title: str,
+    ylabel: str,
+    out_path: Path,
+    group_labels: tuple[str, str] = ("GT", "PCA"),
+    show_title: bool = True,
+    figsize: tuple[float, float] = (5.0 * CM, 4.2 * CM)) -> None:
     """Plot simple GT vs PCA total counts."""
-    fig, ax = plt.subplots(figsize=(5.0 * CM, 4.2 * CM))
+    fig, ax = plt.subplots(figsize=figsize)
     x = np.array([0.0, 1.0], dtype=np.float64)
-    heights = [float(count_gt), float(count_pca)]
+    heights = [float(count_gt), float(count_other)]
     bars = ax.bar(x, heights, color=["#4C72B0", "#DD8452"], alpha=0.85, width=0.65)
     for bar, val in zip(bars, heights):
         ax.text(bar.get_x() + bar.get_width() / 2.0, val, f"{int(round(val))}", ha="center", va="bottom", fontsize=8)
     ax.set_xticks(x)
-    ax.set_xticklabels(["GT", "PCA"])
+    ax.set_xticklabels([str(group_labels[0]), str(group_labels[1])])
     ax.set_ylabel(ylabel)
-    ax.set_title(title)
+    if show_title:
+        ax.set_title(title, fontsize=8)
     ax.set_ylim(bottom=0.0)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1660,34 +1688,37 @@ def plot_total_count_bars(count_gt: int, count_pca: int, title: str, ylabel: str
 
 def plot_birth_death_bars(
     gt_counts: pd.DataFrame,
-    pca_counts: pd.DataFrame,
+    other_counts: pd.DataFrame,
     out_path: Path,
     stats_csv_path: Path,
-) -> None:
+    group_labels: tuple[str, str] = ("GT", "PCA"),
+    show_title: bool = True,
+    figsize: tuple[float, float] = (10.0 * CM, 4.2 * CM)) -> None:
     """Plot births/deaths GT vs PCA as mean-per-frame bars with SEM and paired tests."""
-    merged = gt_counts.merge(pca_counts, on="Time", suffixes=("_gt", "_pca"), how="inner")
+    merged = gt_counts.merge(other_counts, on="Time", suffixes=("_gt", "_other"), how="inner")
     rows: list[dict[str, Any]] = []
-    fig, axes = plt.subplots(1, 2, figsize=(10.0 * CM, 4.2 * CM), sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=False)
     for ax, metric, title in zip(axes, ["births", "deaths"], ["Births after t0", "Deaths after t0"]):
         gt = pd.to_numeric(merged[f"{metric}_gt"], errors="coerce").dropna().to_numpy(np.float64)
-        pca = pd.to_numeric(merged[f"{metric}_pca"], errors="coerce").dropna().to_numpy(np.float64)
-        means = [float(np.mean(gt)) if gt.size else 0.0, float(np.mean(pca)) if pca.size else 0.0]
-        sems = [sem_or_zero(gt), sem_or_zero(pca)]
+        other = pd.to_numeric(merged[f"{metric}_other"], errors="coerce").dropna().to_numpy(np.float64)
+        means = [float(np.mean(gt)) if gt.size else 0.0, float(np.mean(other)) if other.size else 0.0]
+        sems = [sem_or_zero(gt), sem_or_zero(other)]
         x = np.array([0.0, 1.0], dtype=np.float64)
         ax.bar(x, means, yerr=sems, capsize=4, color=["#4C72B0", "#DD8452"], alpha=0.85, width=0.65)
         rng = np.random.default_rng(0)
-        for xi, arr, color in zip(x.tolist(), [gt, pca], ["#1f3552", "#7a3d14"]):
+        for xi, arr, color in zip(x.tolist(), [gt, other], ["#1f3552", "#7a3d14"]):
             if arr.size:
                 jitter = rng.uniform(-0.08, 0.08, size=arr.size)
-                ax.scatter(np.full(arr.size, xi) + jitter, arr, s=14, color=color, alpha=0.8, zorder=3)
-        stats_row = run_statistical_test(gt, pca, paired=True)
+                ax.scatter(np.full(arr.size, xi) + jitter, arr, s=14, color=color, alpha=0.8, zorder=3, lw=0)
+        stats_row = run_statistical_test(gt, other, paired=True)
         stats_row["comparison"] = metric
         rows.append(stats_row)
-        ymax = max([m + s for m, s in zip(means, sems)] + ([float(np.max(gt))] if gt.size else [0.0]) + ([float(np.max(pca))] if pca.size else [0.0]))
+        ymax = max([m + s for m, s in zip(means, sems)] + ([float(np.max(gt))] if gt.size else [0.0]) + ([float(np.max(other))] if other.size else [0.0]))
         annotate_pvalue(ax, 0.0, 1.0, max(ymax * 1.03, 0.5), float(stats_row["p_value"]) if np.isfinite(stats_row["p_value"]) else np.nan)
         ax.set_xticks(x)
-        ax.set_xticklabels(["GT", "PCA"])
-        ax.set_title(title)
+        ax.set_xticklabels([str(group_labels[0]), str(group_labels[1])])
+        if show_title:
+            ax.set_title(title)
         ax.set_ylim(bottom=0.0)
         ax.set_ylabel("count / frame")
     fig.tight_layout()
@@ -1699,24 +1730,27 @@ def plot_birth_death_bars(
 
 def plot_stationary_migrating_count_bars(
     gt_class_df: pd.DataFrame,
-    pca_class_df: pd.DataFrame,
+    other_class_df: pd.DataFrame,
     out_path: Path,
-) -> None:
+    group_labels: tuple[str, str] = ("GT", "PCA"),
+    show_title: bool = True,
+    figsize: tuple[float, float] = (6.0 * CM, 4.5 * CM)) -> None:
     """Plot total stationary vs migrating track counts for GT and PCA."""
     categories = ["stationary", "migrating"]
     gt_counts = gt_class_df["motion_class"].value_counts().to_dict()
-    pca_counts = pca_class_df["motion_class"].value_counts().to_dict()
+    other_counts = other_class_df["motion_class"].value_counts().to_dict()
     x = np.arange(len(categories), dtype=np.float64)
     width = 0.35
-    fig, ax = plt.subplots(figsize=(6.0 * CM, 4.5 * CM))
+    fig, ax = plt.subplots(figsize=figsize)
     vals_gt = [float(gt_counts.get(cat, 0)) for cat in categories]
-    vals_pca = [float(pca_counts.get(cat, 0)) for cat in categories]
-    ax.bar(x - width / 2.0, vals_gt, width=width, color="#4C72B0", alpha=0.85, label="GT")
-    ax.bar(x + width / 2.0, vals_pca, width=width, color="#DD8452", alpha=0.85, label="PCA")
+    vals_other = [float(other_counts.get(cat, 0)) for cat in categories]
+    ax.bar(x - width / 2.0, vals_gt, width=width, color="#4C72B0", alpha=0.85, label=str(group_labels[0]))
+    ax.bar(x + width / 2.0, vals_other, width=width, color="#DD8452", alpha=0.85, label=str(group_labels[1]))
     ax.set_xticks(x)
     ax.set_xticklabels(["stationary", "migrating"])
     ax.set_ylabel("unique tracks")
-    ax.set_title("Stationary vs migrating cells")
+    if show_title:
+        ax.set_title("Stationary vs migrating cells")
     ax.set_ylim(bottom=0.0)
     ax.legend(frameon=False)
     fig.tight_layout()
@@ -1727,24 +1761,27 @@ def plot_stationary_migrating_count_bars(
 
 def plot_average_displacement_histogram(
     gt_avg_disp: pd.DataFrame,
-    pca_avg_disp: pd.DataFrame,
+    other_avg_disp: pd.DataFrame,
     threshold: float,
     out_path: Path,
-) -> None:
+    group_labels: tuple[str, str] = ("GT", "PCA"),
+    show_title: bool = True,
+    figsize: tuple[float, float] = (6.2 * CM, 4.5 * CM)) -> None:
     """Plot GT/PCA average-displacement histograms with threshold marker."""
     gt = pd.to_numeric(gt_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64)
-    pca = pd.to_numeric(pca_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64)
-    max_val = max(float(np.max(gt)) if gt.size else 0.0, float(np.max(pca)) if pca.size else 0.0, float(threshold))
+    other = pd.to_numeric(other_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64)
+    max_val = max(float(np.max(gt)) if gt.size else 0.0, float(np.max(other)) if other.size else 0.0, float(threshold))
     bins = np.linspace(0.0, max(max_val * 1.05, 1.0), 20)
-    fig, ax = plt.subplots(figsize=(6.2 * CM, 4.5 * CM))
+    fig, ax = plt.subplots(figsize=figsize)
     if gt.size:
-        ax.hist(gt, bins=bins, alpha=0.45, color="#4C72B0", label="GT")
-    if pca.size:
-        ax.hist(pca, bins=bins, alpha=0.45, color="#DD8452", label="PCA")
-    ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"threshold={threshold:.3f}")
+        ax.hist(gt, bins=bins, alpha=0.45, color="#4C72B0", label=str(group_labels[0]))
+    if other.size:
+        ax.hist(other, bins=bins, alpha=0.45, color="#DD8452", label=str(group_labels[1]))
+    ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"migration\nthreshold={threshold:.3f}")
     ax.set_xlabel("average step displacement")
     ax.set_ylabel("tracks")
-    ax.set_title("Average displacement histogram")
+    if show_title:
+        ax.set_title("Average displacement histogram")
     ax.set_xlim(left=0.0)
     ax.set_ylim(bottom=0.0)
     ax.legend(frameon=False, fontsize=7)
@@ -1757,9 +1794,11 @@ def plot_average_displacement_histogram(
 def run_regime_summary_analysis(
     gt_tracks_df: pd.DataFrame,
     association_root: Path,
-    out_dir: Path,
-) -> dict[str, Path]:
-    """Create GT-vs-PCA summary plots for one regime using the best PCA method."""
+    drift_root: Path,
+    drift_summary_df: pd.DataFrame,
+    regime_name: str,
+    out_dir: Path) -> dict[str, Path]:
+    """Create regime summary plots: counts/birth-death vs PCA, motion vs drift-corrected result."""
     out_dir.mkdir(parents=True, exist_ok=True)
     method_dir = association_root / BEST_ASSOCIATION_METHOD
     inferred_tracks_path = method_dir / f"{BEST_ASSOCIATION_METHOD}_inferred_tracks.csv"
@@ -1767,53 +1806,70 @@ def run_regime_summary_analysis(
         raise FileNotFoundError(f"Best PCA inferred tracks not found: {inferred_tracks_path}")
     pca_tracks_df = ensure_numeric_tracks(pd.read_csv(inferred_tracks_path))
     gt_tracks_df = ensure_numeric_tracks(gt_tracks_df)
+    if drift_summary_df.empty:
+        raise ValueError("Drift-correction summary is empty; cannot build motion comparison plots.")
+    best_drift_method = str(drift_summary_df.sort_values(["overall_rms_error", "drift_bias_abs"]).iloc[0]["method"])
+    corrected_tracks_path = corrected_tracks_csv_path(drift_root=drift_root, regime_name=regime_name, method_name=best_drift_method)
+    if not corrected_tracks_path.exists():
+        raise FileNotFoundError(f"Best drift-corrected tracks not found: {corrected_tracks_path}")
+    driftcorr_tracks_df = ensure_numeric_tracks(pd.read_csv(corrected_tracks_path))
 
     gt_unique = int(pd.to_numeric(gt_tracks_df["TrackID"], errors="coerce").dropna().nunique())
     pca_unique = int(pd.to_numeric(pca_tracks_df["TrackID"], errors="coerce").dropna().nunique())
     unique_counts_plot = out_dir / "gt_vs_pca_unique_cell_counts.pdf"
-    plot_total_count_bars(gt_unique, pca_unique, title="Total unique cells over all frames", ylabel="unique tracks", out_path=unique_counts_plot)
+    plot_total_count_bars(gt_unique, pca_unique, title="Total unique cells\nover all frames", 
+                          ylabel="unique tracks", out_path=unique_counts_plot,
+                          show_title=False, figsize=(2.9 * CM, 3.0 * CM))
 
     gt_birthdeath = compute_birth_death_counts_by_time(gt_tracks_df)
     pca_birthdeath = compute_birth_death_counts_by_time(pca_tracks_df)
     birthdeath_plot = out_dir / "gt_vs_pca_births_deaths_barplot.pdf"
     birthdeath_stats = out_dir / "gt_vs_pca_births_deaths_stats.csv"
-    plot_birth_death_bars(gt_birthdeath, pca_birthdeath, out_path=birthdeath_plot, stats_csv_path=birthdeath_stats)
+    plot_birth_death_bars(gt_birthdeath, pca_birthdeath, out_path=birthdeath_plot, stats_csv_path=birthdeath_stats,
+                          show_title=False, figsize=(5.15 * CM, 3.0 * CM))
 
     gt_avg_disp = compute_track_average_displacements(gt_tracks_df)
-    pca_avg_disp = compute_track_average_displacements(pca_tracks_df)
+    driftcorr_avg_disp = compute_track_average_displacements(driftcorr_tracks_df)
     threshold = determine_stationary_threshold(gt_avg_disp)
     gt_class = classify_tracks_by_displacement(gt_avg_disp, threshold)
-    pca_class = classify_tracks_by_displacement(pca_avg_disp, threshold)
+    driftcorr_class = classify_tracks_by_displacement(driftcorr_avg_disp, threshold)
 
-    class_count_plot = out_dir / "gt_vs_pca_stationary_migrating_counts.pdf"
-    plot_stationary_migrating_count_bars(gt_class, pca_class, out_path=class_count_plot)
+    class_count_plot = out_dir / "gt_vs_driftcorr_stationary_migrating_counts.pdf"
+    plot_stationary_migrating_count_bars(
+        gt_class, driftcorr_class, out_path=class_count_plot, group_labels=("GT", "DriftCorr"),
+        show_title=False, figsize=(4.05 * CM, 3.0 * CM))
 
-    hist_plot = out_dir / "gt_vs_pca_average_displacement_histogram.pdf"
-    plot_average_displacement_histogram(gt_avg_disp, pca_avg_disp, threshold=threshold, out_path=hist_plot)
+    hist_plot = out_dir / "gt_vs_driftcorr_average_displacement_histogram.pdf"
+    plot_average_displacement_histogram(
+        gt_avg_disp, driftcorr_avg_disp, threshold=threshold,
+        out_path=hist_plot, group_labels=("GT", "DriftCorr"),
+        show_title=False, figsize=(6.2 * CM, 3.5 * CM))
 
-    stationary_bar = out_dir / "gt_vs_pca_stationary_average_displacement.pdf"
-    stationary_stats = out_dir / "gt_vs_pca_stationary_average_displacement_stats.csv"
+    stationary_bar = out_dir / "gt_vs_driftcorr_stationary_average_displacement.pdf"
+    stationary_stats = out_dir / "gt_vs_driftcorr_stationary_average_displacement_stats.csv"
     plot_two_group_bar(
         gt_class.loc[gt_class["motion_class"] == "stationary", "mean_step_displacement"].to_numpy(np.float64),
-        pca_class.loc[pca_class["motion_class"] == "stationary", "mean_step_displacement"].to_numpy(np.float64),
+        driftcorr_class.loc[driftcorr_class["motion_class"] == "stationary", "mean_step_displacement"].to_numpy(np.float64),
         title="Average displacement of stationary cells",
-        ylabel="average step displacement",
+        ylabel="average step\ndisplacement",
         out_path=stationary_bar,
         stats_csv_path=stationary_stats,
         paired=False,
-    )
+        group_labels=("GT", "DriftCorr"),
+        show_title=False, figsize=(3.0 * CM, 3.0 * CM))
 
-    migrating_bar = out_dir / "gt_vs_pca_migrating_average_displacement.pdf"
-    migrating_stats = out_dir / "gt_vs_pca_migrating_average_displacement_stats.csv"
+    migrating_bar = out_dir / "gt_vs_driftcorr_migrating_average_displacement.pdf"
+    migrating_stats = out_dir / "gt_vs_driftcorr_migrating_average_displacement_stats.csv"
     plot_two_group_bar(
         gt_class.loc[gt_class["motion_class"] == "migrating", "mean_step_displacement"].to_numpy(np.float64),
-        pca_class.loc[pca_class["motion_class"] == "migrating", "mean_step_displacement"].to_numpy(np.float64),
+        driftcorr_class.loc[driftcorr_class["motion_class"] == "migrating", "mean_step_displacement"].to_numpy(np.float64),
         title="Average displacement of migrating cells",
-        ylabel="average step displacement",
+        ylabel="average step\ndisplacement",
         out_path=migrating_bar,
         stats_csv_path=migrating_stats,
         paired=False,
-    )
+        group_labels=("GT", "DriftCorr"),
+        show_title=False, figsize=(3.0 * CM, 3.0 * CM))
 
     summary_csv = out_dir / "gt_vs_pca_regime_summary.csv"
     pd.DataFrame(
@@ -1822,10 +1878,11 @@ def run_regime_summary_analysis(
                 "gt_unique_tracks": gt_unique,
                 "pca_unique_tracks": pca_unique,
                 "stationary_threshold": float(threshold),
+                "best_driftcorr_method_from_pca_tracks": str(best_drift_method),
                 "gt_stationary_tracks": int((gt_class["motion_class"] == "stationary").sum()),
                 "gt_migrating_tracks": int((gt_class["motion_class"] == "migrating").sum()),
-                "pca_stationary_tracks": int((pca_class["motion_class"] == "stationary").sum()),
-                "pca_migrating_tracks": int((pca_class["motion_class"] == "migrating").sum()),
+                "driftcorr_stationary_tracks": int((driftcorr_class["motion_class"] == "stationary").sum()),
+                "driftcorr_migrating_tracks": int((driftcorr_class["motion_class"] == "migrating").sum()),
             }
         ]
     ).to_csv(summary_csv, index=False)
@@ -2304,6 +2361,7 @@ def main() -> None:
         print(f"  QC overlay: {qc_path}")
 
     for regime_cfg in DRIFT_REGIMES:
+        # regime_cfg = DRIFT_REGIMES[0]
         regime_name = str(regime_cfg["name"])
         dataset_label = str(regime_cfg["dataset_label"])
         regime_dir = OUTPUT_DIR / regime_name
@@ -2328,8 +2386,7 @@ def main() -> None:
         blind_df, unblinding_df = make_blind_pointcloud_table(
             regime_tracks_df,
             regime_name=dataset_label,
-            file_name=regime_stem,
-        )
+            file_name=regime_stem)
         blind_df.to_csv(blind_path, index=False)
         unblinding_df.to_csv(unblinding_path, index=False)
         plot_blind_pointcloud_3d(blind_df, blind_plot_path, title="Blind point clouds")
@@ -2339,29 +2396,29 @@ def main() -> None:
             gt_tracks_df=regime_tracks_df,
             unblinding_df=unblinding_df,
             out_root=association_root,
-            dataset_label=dataset_label,
-        )
-        regime_analysis_dir = regime_dir / "gt_vs_pca_analysis"
-        regime_analysis_paths = run_regime_summary_analysis(
-            gt_tracks_df=gt_tracks_df,
-            association_root=association_root,
-            out_dir=regime_analysis_dir,
-        )
+            dataset_label=dataset_label)
         drift_summary_df, drift_paths = run_drift_correction_suite(
             gt_tracks_df=gt_tracks_df,
             observed_df=regime_tracks_df,
             association_root=association_root,
             out_root=drift_root,
             dataset_label=dataset_label,
-            regime_name=regime_name,
-        )
+            regime_name=regime_name)
         drift_gt_input_summary_df, drift_gt_input_paths = run_drift_correction_suite_gt_input(
             gt_tracks_df=gt_tracks_df,
             observed_df=regime_tracks_df,
             out_root=drift_gt_input_root,
             dataset_label=dataset_label,
+            regime_name=regime_name)
+        
+        regime_analysis_dir = regime_dir / "gt_vs_pca_analysis"
+        regime_analysis_paths = run_regime_summary_analysis(
+            gt_tracks_df=gt_tracks_df,
+            association_root=association_root,
+            drift_root=drift_root,
+            drift_summary_df=drift_summary_df,
             regime_name=regime_name,
-        )
+            out_dir=regime_analysis_dir)
 
         print()
         print(f"Regime: {regime_name}")

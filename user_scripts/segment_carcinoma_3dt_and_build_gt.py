@@ -1628,6 +1628,108 @@ def run_drift_correction_suite(
     return gt_summary_sorted, saved_paths
 
 
+def run_drift_correction_suite_gt_input(
+    gt_tracks_df: pd.DataFrame,
+    observed_df: pd.DataFrame,
+    out_root: Path,
+    dataset_label: str,
+    regime_name: str,
+) -> tuple[pd.DataFrame, list[Path]]:
+    """Run benchmark-style drift correction directly on observed GT-ID tracks."""
+    out_root.mkdir(parents=True, exist_ok=True)
+    df_input = ensure_numeric_tracks(observed_df)
+    gt_eval_df = ensure_numeric_tracks(gt_tracks_df)
+    drift_gt_df = build_rotation_drift_groundtruth(df_groundtruth=gt_tracks_df, df_rotated=observed_df)
+
+    opts = make_baseline_options_from_sweeps()
+    out_prefix = out_root / f"{INPUT_TIF.stem}_{regime_name}_gttrackinput"
+    corr_by_method = run_baseline_methods_for_dataframe(
+        df=df_input,
+        out_prefix=out_prefix,
+        methods=list(BASELINE_METHODS),
+        opts=opts,
+        use_stationary_subset=bool(opts.get("use_stationary_subset", False)),
+    )
+
+    eval_summary_df, eval_details = run_all_methods_and_compare(df_input, corr_by_method)
+    eval_artifacts = save_evaluation_outputs(out_prefix, eval_summary_df, eval_details)
+
+    visual_paths: list[Path] = []
+    for method_name, df_corr in corr_by_method.items():
+        visual_outputs = save_visual_inspection_plots(
+            df_orig=df_input,
+            df_corr=df_corr,
+            out_prefix=out_prefix,
+            method_name=method_name,
+            df_groundtruth=gt_eval_df,
+        )
+        visual_paths.extend(visual_outputs.values())
+
+    gt_outputs = save_groundtruth_evaluation_outputs(
+        base_out_prefix=out_prefix,
+        groundtruth_df=gt_eval_df,
+        corrected_by_method=corr_by_method,
+        drift_field_groundtruth=drift_gt_df,
+    )
+    gt_summary_path = gt_outputs["gt_metrics_summary"]
+    gt_summary_df = pd.read_csv(gt_summary_path) if gt_summary_path.exists() else pd.DataFrame()
+
+    summary_ext = build_drift_summary_extended(gt_summary_df, dataset_label=f"{dataset_label}_gttrackinput")
+    method_order = ["rigid", "local", "rbf", "st_rbf"]
+    summary_ext["method"] = pd.Categorical(summary_ext["method"], categories=method_order, ordered=True)
+    summary_ext = summary_ext.sort_values("method").reset_index(drop=True)
+    summary_ext_path = out_root / "baseline_suite_summary_extended.csv"
+    summary_ext.to_csv(summary_ext_path, index=False)
+
+    saved_paths: list[Path] = [summary_ext_path, *list(eval_artifacts.values()), *visual_paths, *list(gt_outputs.values())]
+    metric_specs = [
+        ("overall_rms_error", "Overall RMS"),
+        ("median_error_norm", "Median error"),
+        ("p95_error_norm", "P95 error"),
+        ("drift_bias_abs", "Drift bias"),
+    ]
+    for metric_name, title in metric_specs:
+        out_path = out_root / f"baseline_suite_{metric_name}_heatmap_plot.pdf"
+        plotted = plot_drift_summary_heatmap(
+            summary_ext,
+            metric_name=metric_name,
+            out_path=out_path,
+            title=title,
+            figure_size=(2.65 * CM, 3.15 * CM),
+        )
+        if plotted is not None:
+            saved_paths.append(plotted)
+    scatter_path = plot_drift_rms_vs_p95_scatter(summary_ext, out_root / "baseline_suite_rms_vs_p95_scatter_plot.pdf")
+    if scatter_path is not None:
+        saved_paths.append(scatter_path)
+
+    sweep_params_df = pd.DataFrame(
+        [
+            {
+                "input_source": "groundtruth_trackids",
+                "rigid_keep_fraction": float(opts["keep_fraction"]),
+                "rigid_inlier_reestimate_iters": int(opts["inlier_reestimate_iters"]),
+                "local_k_neighbors": int(opts["k_neighbors"]),
+                "local_ell_um_field": float(opts["ell_um_field"]),
+                "rbf_sigma": float(opts["sigma"]),
+                "rbf_m_centers": int(opts["m_centers"]),
+                "st_rbf_ell_space": float(opts["st_ell_space"]),
+                "st_rbf_ell_time": float(opts["st_ell_time"]),
+                "st_rbf_use_stationary_subset": bool(opts.get("use_stationary_subset", False)),
+            }
+        ]
+    )
+    sweep_params_path = out_root / "selected_baseline_parameters.csv"
+    sweep_params_df.to_csv(sweep_params_path, index=False)
+    saved_paths.append(sweep_params_path)
+
+    if not gt_summary_df.empty:
+        gt_summary_sorted = gt_summary_df.sort_values("overall_rms_error").reset_index(drop=True)
+    else:
+        gt_summary_sorted = gt_summary_df
+    return gt_summary_sorted, saved_paths
+
+
 def run_blind_point_cloud_association_suite(
     blind_csv_path: Path,
     gt_tracks_df: pd.DataFrame,
@@ -1803,6 +1905,7 @@ def main() -> None:
         regime_dir = OUTPUT_DIR / regime_name
         association_root = regime_dir / "blind_association_hcv"
         drift_root = regime_dir / "drift_correction_baselines"
+        drift_gt_input_root = regime_dir / "drift_correction_baselines_gt_input"
         regime_dir.mkdir(parents=True, exist_ok=True)
 
         regime_tracks_df = build_regime_tracks(gt_tracks_df, regime_name=regime_name)
@@ -1842,6 +1945,13 @@ def main() -> None:
             dataset_label=dataset_label,
             regime_name=regime_name,
         )
+        drift_gt_input_summary_df, drift_gt_input_paths = run_drift_correction_suite_gt_input(
+            gt_tracks_df=gt_tracks_df,
+            observed_df=regime_tracks_df,
+            out_root=drift_gt_input_root,
+            dataset_label=dataset_label,
+            regime_name=regime_name,
+        )
 
         print()
         print(f"Regime: {regime_name}")
@@ -1854,6 +1964,7 @@ def main() -> None:
         print(f"  Blind point-cloud plot: {blind_plot_path}")
         print(f"  Association output root: {association_root}")
         print(f"  Drift-correction output root: {drift_root}")
+        print(f"  Drift-correction GT-input root: {drift_gt_input_root}")
         if not association_summary_df.empty:
             print("  HCV association ranking by link_f1_mean:")
             for row in association_summary_df[["method", "link_f1_mean", "accuracy_mean"]].itertuples(index=False):
@@ -1874,6 +1985,16 @@ def main() -> None:
                 )
         for drift_path in drift_paths[:6]:
             print(f"  Drift artifact: {drift_path}")
+        if not drift_gt_input_summary_df.empty:
+            print("  Drift-correction GT-input ranking by overall_rms_error:")
+            for row in drift_gt_input_summary_df[["method", "overall_rms_error", "drift_bias_abs"]].itertuples(index=False):
+                print(
+                    f"    {str(row.method)} | "
+                    f"overall_rms_error={float(row.overall_rms_error):.4f} | "
+                    f"drift_bias_abs={float(row.drift_bias_abs):.4f}"
+                )
+        for drift_gt_input_path in drift_gt_input_paths[:6]:
+            print(f"  Drift GT-input artifact: {drift_gt_input_path}")
 # %% MAIN
 if __name__ == "__main__":
     main()

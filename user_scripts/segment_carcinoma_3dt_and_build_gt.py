@@ -45,6 +45,7 @@ except ModuleNotFoundError as exc:
 
 try:
     from scipy import ndimage as ndi
+    from scipy import stats as sstats
 except ModuleNotFoundError as exc:
     raise ModuleNotFoundError(
         "This script requires `scipy`. Install it in your environment, then rerun."
@@ -1440,6 +1441,409 @@ def build_regime_tracks(gt_tracks_df: pd.DataFrame, regime_name: str) -> pd.Data
     raise ValueError(f"Unknown drift regime: {regime_name}")
 
 
+def compute_track_average_displacements(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute mean frame-to-frame displacement per track."""
+    rows: list[dict[str, float]] = []
+    for track_id, grp in df.groupby("TrackID", sort=True):
+        track = grp.sort_values("Time")
+        pts = track[["Position X", "Position Y", "Position Z"]].to_numpy(np.float64)
+        if pts.shape[0] < 2:
+            mean_disp = 0.0
+        else:
+            diffs = np.diff(pts, axis=0)
+            step_disp = np.linalg.norm(diffs, axis=1)
+            mean_disp = float(np.mean(step_disp)) if step_disp.size else 0.0
+        rows.append({"TrackID": float(track_id), "mean_step_displacement": float(mean_disp)})
+    return pd.DataFrame(rows).sort_values("TrackID").reset_index(drop=True)
+
+
+def determine_stationary_threshold(avg_disp_df: pd.DataFrame) -> float:
+    """Estimate a GT-based threshold separating semi-stationary and migrating cells."""
+    vals = pd.to_numeric(avg_disp_df["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64)
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return 0.0
+    if vals.size < 5 or np.allclose(vals, vals[0]):
+        return float(np.median(vals))
+    thr_log = otsu_threshold(np.log1p(vals), bins=128, value_range=(float(np.min(np.log1p(vals))), float(np.max(np.log1p(vals)))))
+    thr = float(np.expm1(thr_log))
+    thr = float(np.clip(thr, np.min(vals), np.max(vals)))
+    return thr
+
+
+def classify_tracks_by_displacement(avg_disp_df: pd.DataFrame, threshold: float) -> pd.DataFrame:
+    """Attach stationary/migrating class labels using a shared threshold."""
+    out = avg_disp_df.copy()
+    out["motion_class"] = np.where(
+        pd.to_numeric(out["mean_step_displacement"], errors="coerce").to_numpy(np.float64) <= float(threshold),
+        "stationary",
+        "migrating",
+    )
+    return out
+
+
+def compute_birth_death_counts_by_time(df: pd.DataFrame) -> pd.DataFrame:
+    """Count births and deaths between consecutive frames, excluding the first frame."""
+    times = np.array(sorted(pd.to_numeric(df["Time"], errors="coerce").dropna().unique()), dtype=np.float64)
+    rows: list[dict[str, float]] = []
+    if times.size < 2:
+        return pd.DataFrame(columns=["Time", "births", "deaths"])
+    for idx in range(1, len(times)):
+        t_prev = float(times[idx - 1])
+        t_cur = float(times[idx])
+        prev_ids = set(pd.to_numeric(df.loc[df["Time"] == t_prev, "TrackID"], errors="coerce").dropna().to_numpy(np.float64).tolist())
+        cur_ids = set(pd.to_numeric(df.loc[df["Time"] == t_cur, "TrackID"], errors="coerce").dropna().to_numpy(np.float64).tolist())
+        rows.append(
+            {
+                "Time": t_cur,
+                "births": float(len(cur_ids - prev_ids)),
+                "deaths": float(len(prev_ids - cur_ids)),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("Time").reset_index(drop=True)
+
+
+def sem_or_zero(values: np.ndarray) -> float:
+    """Return SEM or 0 if insufficient samples."""
+    arr = np.asarray(values, dtype=np.float64)
+    arr = arr[np.isfinite(arr)]
+    if arr.size <= 1:
+        return 0.0
+    return float(np.std(arr, ddof=1) / np.sqrt(arr.size))
+
+
+def run_statistical_test(values_gt: np.ndarray, values_pca: np.ndarray, paired: bool) -> dict[str, Any]:
+    """Run a simple normality-aware statistical comparison."""
+    gt = np.asarray(values_gt, dtype=np.float64)
+    pca = np.asarray(values_pca, dtype=np.float64)
+    gt = gt[np.isfinite(gt)]
+    pca = pca[np.isfinite(pca)]
+    result: dict[str, Any] = {
+        "paired": bool(paired),
+        "n_gt": int(gt.size),
+        "n_pca": int(pca.size),
+        "normality_test": "shapiro",
+        "gt_normality_p": np.nan,
+        "pca_normality_p": np.nan,
+        "difference_normality_p": np.nan,
+        "all_normal": False,
+        "test_used": "not_applicable",
+        "p_value": np.nan,
+    }
+    if gt.size == 0 or pca.size == 0:
+        return result
+
+    def _shapiro_safe(arr: np.ndarray) -> float:
+        if arr.size < 3 or arr.size > 5000 or np.allclose(arr, arr[0]):
+            return np.nan
+        try:
+            return float(sstats.shapiro(arr).pvalue)
+        except Exception:
+            return np.nan
+
+    if paired:
+        n = min(gt.size, pca.size)
+        gt = gt[:n]
+        pca = pca[:n]
+        diff = gt - pca
+        result["n_gt"] = int(n)
+        result["n_pca"] = int(n)
+        result["difference_normality_p"] = _shapiro_safe(diff)
+        all_normal = bool(np.isfinite(result["difference_normality_p"]) and result["difference_normality_p"] > 0.05)
+        result["all_normal"] = all_normal
+        if n >= 2:
+            if all_normal:
+                test = sstats.ttest_rel(gt, pca, nan_policy="omit")
+                result["test_used"] = "paired_t_test"
+                result["p_value"] = float(test.pvalue)
+            else:
+                if np.any(np.abs(diff) > 1e-12):
+                    test = sstats.wilcoxon(gt, pca, zero_method="wilcox")
+                    result["test_used"] = "wilcoxon_signed_rank"
+                    result["p_value"] = float(test.pvalue)
+        return result
+
+    result["gt_normality_p"] = _shapiro_safe(gt)
+    result["pca_normality_p"] = _shapiro_safe(pca)
+    all_normal = bool(
+        np.isfinite(result["gt_normality_p"])
+        and np.isfinite(result["pca_normality_p"])
+        and result["gt_normality_p"] > 0.05
+        and result["pca_normality_p"] > 0.05
+    )
+    result["all_normal"] = all_normal
+    if gt.size >= 2 and pca.size >= 2:
+        if all_normal:
+            test = sstats.ttest_ind(gt, pca, equal_var=False, nan_policy="omit")
+            result["test_used"] = "welch_t_test"
+            result["p_value"] = float(test.pvalue)
+        else:
+            test = sstats.mannwhitneyu(gt, pca, alternative="two-sided")
+            result["test_used"] = "mann_whitney_u"
+            result["p_value"] = float(test.pvalue)
+    return result
+
+
+def annotate_pvalue(ax: Any, x0: float, x1: float, y: float, p_value: float) -> None:
+    """Draw a simple significance bracket with a p-value label."""
+    if not np.isfinite(p_value):
+        return
+    h = max(0.02 * max(y, 1.0), 0.1)
+    ax.plot([x0, x0, x1, x1], [y, y + h, y + h, y], color="black", linewidth=1.0)
+    ax.text(0.5 * (x0 + x1), y + h, f"p={p_value:.3f}", ha="center", va="bottom", fontsize=8)
+
+
+def plot_two_group_bar(
+    values_gt: np.ndarray,
+    values_pca: np.ndarray,
+    title: str,
+    ylabel: str,
+    out_path: Path,
+    stats_csv_path: Path | None = None,
+    paired: bool = False,
+) -> None:
+    """Plot GT vs PCA mean bars with SEM, points, and optional test annotation."""
+    gt = np.asarray(values_gt, dtype=np.float64)
+    pca = np.asarray(values_pca, dtype=np.float64)
+    gt = gt[np.isfinite(gt)]
+    pca = pca[np.isfinite(pca)]
+    means = [float(np.mean(gt)) if gt.size else 0.0, float(np.mean(pca)) if pca.size else 0.0]
+    sems = [sem_or_zero(gt), sem_or_zero(pca)]
+
+    fig, ax = plt.subplots(figsize=(5.0 * CM, 4.2 * CM))
+    x = np.array([0.0, 1.0], dtype=np.float64)
+    ax.bar(x, means, yerr=sems, capsize=4, color=["#4C72B0", "#DD8452"], alpha=0.85, width=0.65)
+
+    rng = np.random.default_rng(0)
+    for xi, arr, color in zip(x.tolist(), [gt, pca], ["#1f3552", "#7a3d14"]):
+        if arr.size:
+            jitter = rng.uniform(-0.08, 0.08, size=arr.size)
+            ax.scatter(np.full(arr.size, xi) + jitter, arr, s=16, color=color, alpha=0.8, zorder=3)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(["GT", "PCA"])
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_ylim(bottom=0.0)
+
+    stats_row = run_statistical_test(gt, pca, paired=paired)
+    ymax = max([m + s for m, s in zip(means, sems)] + ([float(np.max(gt))] if gt.size else [0.0]) + ([float(np.max(pca))] if pca.size else [0.0]))
+    annotate_pvalue(ax, x0=0.0, x1=1.0, y=max(ymax * 1.03, 0.5), p_value=float(stats_row["p_value"]) if np.isfinite(stats_row["p_value"]) else np.nan)
+
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+
+    if stats_csv_path is not None:
+        pd.DataFrame([stats_row]).to_csv(stats_csv_path, index=False)
+
+
+def plot_total_count_bars(count_gt: int, count_pca: int, title: str, ylabel: str, out_path: Path) -> None:
+    """Plot simple GT vs PCA total counts."""
+    fig, ax = plt.subplots(figsize=(5.0 * CM, 4.2 * CM))
+    x = np.array([0.0, 1.0], dtype=np.float64)
+    heights = [float(count_gt), float(count_pca)]
+    bars = ax.bar(x, heights, color=["#4C72B0", "#DD8452"], alpha=0.85, width=0.65)
+    for bar, val in zip(bars, heights):
+        ax.text(bar.get_x() + bar.get_width() / 2.0, val, f"{int(round(val))}", ha="center", va="bottom", fontsize=8)
+    ax.set_xticks(x)
+    ax.set_xticklabels(["GT", "PCA"])
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.set_ylim(bottom=0.0)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+
+
+def plot_birth_death_bars(
+    gt_counts: pd.DataFrame,
+    pca_counts: pd.DataFrame,
+    out_path: Path,
+    stats_csv_path: Path,
+) -> None:
+    """Plot births/deaths GT vs PCA as mean-per-frame bars with SEM and paired tests."""
+    merged = gt_counts.merge(pca_counts, on="Time", suffixes=("_gt", "_pca"), how="inner")
+    rows: list[dict[str, Any]] = []
+    fig, axes = plt.subplots(1, 2, figsize=(10.0 * CM, 4.2 * CM), sharey=False)
+    for ax, metric, title in zip(axes, ["births", "deaths"], ["Births after t0", "Deaths after t0"]):
+        gt = pd.to_numeric(merged[f"{metric}_gt"], errors="coerce").dropna().to_numpy(np.float64)
+        pca = pd.to_numeric(merged[f"{metric}_pca"], errors="coerce").dropna().to_numpy(np.float64)
+        means = [float(np.mean(gt)) if gt.size else 0.0, float(np.mean(pca)) if pca.size else 0.0]
+        sems = [sem_or_zero(gt), sem_or_zero(pca)]
+        x = np.array([0.0, 1.0], dtype=np.float64)
+        ax.bar(x, means, yerr=sems, capsize=4, color=["#4C72B0", "#DD8452"], alpha=0.85, width=0.65)
+        rng = np.random.default_rng(0)
+        for xi, arr, color in zip(x.tolist(), [gt, pca], ["#1f3552", "#7a3d14"]):
+            if arr.size:
+                jitter = rng.uniform(-0.08, 0.08, size=arr.size)
+                ax.scatter(np.full(arr.size, xi) + jitter, arr, s=14, color=color, alpha=0.8, zorder=3)
+        stats_row = run_statistical_test(gt, pca, paired=True)
+        stats_row["comparison"] = metric
+        rows.append(stats_row)
+        ymax = max([m + s for m, s in zip(means, sems)] + ([float(np.max(gt))] if gt.size else [0.0]) + ([float(np.max(pca))] if pca.size else [0.0]))
+        annotate_pvalue(ax, 0.0, 1.0, max(ymax * 1.03, 0.5), float(stats_row["p_value"]) if np.isfinite(stats_row["p_value"]) else np.nan)
+        ax.set_xticks(x)
+        ax.set_xticklabels(["GT", "PCA"])
+        ax.set_title(title)
+        ax.set_ylim(bottom=0.0)
+        ax.set_ylabel("count / frame")
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+    pd.DataFrame(rows).to_csv(stats_csv_path, index=False)
+
+
+def plot_stationary_migrating_count_bars(
+    gt_class_df: pd.DataFrame,
+    pca_class_df: pd.DataFrame,
+    out_path: Path,
+) -> None:
+    """Plot total stationary vs migrating track counts for GT and PCA."""
+    categories = ["stationary", "migrating"]
+    gt_counts = gt_class_df["motion_class"].value_counts().to_dict()
+    pca_counts = pca_class_df["motion_class"].value_counts().to_dict()
+    x = np.arange(len(categories), dtype=np.float64)
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(6.0 * CM, 4.5 * CM))
+    vals_gt = [float(gt_counts.get(cat, 0)) for cat in categories]
+    vals_pca = [float(pca_counts.get(cat, 0)) for cat in categories]
+    ax.bar(x - width / 2.0, vals_gt, width=width, color="#4C72B0", alpha=0.85, label="GT")
+    ax.bar(x + width / 2.0, vals_pca, width=width, color="#DD8452", alpha=0.85, label="PCA")
+    ax.set_xticks(x)
+    ax.set_xticklabels(["stationary", "migrating"])
+    ax.set_ylabel("unique tracks")
+    ax.set_title("Stationary vs migrating cells")
+    ax.set_ylim(bottom=0.0)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+
+
+def plot_average_displacement_histogram(
+    gt_avg_disp: pd.DataFrame,
+    pca_avg_disp: pd.DataFrame,
+    threshold: float,
+    out_path: Path,
+) -> None:
+    """Plot GT/PCA average-displacement histograms with threshold marker."""
+    gt = pd.to_numeric(gt_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64)
+    pca = pd.to_numeric(pca_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64)
+    max_val = max(float(np.max(gt)) if gt.size else 0.0, float(np.max(pca)) if pca.size else 0.0, float(threshold))
+    bins = np.linspace(0.0, max(max_val * 1.05, 1.0), 20)
+    fig, ax = plt.subplots(figsize=(6.2 * CM, 4.5 * CM))
+    if gt.size:
+        ax.hist(gt, bins=bins, alpha=0.45, color="#4C72B0", label="GT")
+    if pca.size:
+        ax.hist(pca, bins=bins, alpha=0.45, color="#DD8452", label="PCA")
+    ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"threshold={threshold:.3f}")
+    ax.set_xlabel("average step displacement")
+    ax.set_ylabel("tracks")
+    ax.set_title("Average displacement histogram")
+    ax.set_xlim(left=0.0)
+    ax.set_ylim(bottom=0.0)
+    ax.legend(frameon=False, fontsize=7)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+
+
+def run_regime_summary_analysis(
+    gt_tracks_df: pd.DataFrame,
+    association_root: Path,
+    out_dir: Path,
+) -> dict[str, Path]:
+    """Create GT-vs-PCA summary plots for one regime using the best PCA method."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    method_dir = association_root / BEST_ASSOCIATION_METHOD
+    inferred_tracks_path = method_dir / f"{BEST_ASSOCIATION_METHOD}_inferred_tracks.csv"
+    if not inferred_tracks_path.exists():
+        raise FileNotFoundError(f"Best PCA inferred tracks not found: {inferred_tracks_path}")
+    pca_tracks_df = ensure_numeric_tracks(pd.read_csv(inferred_tracks_path))
+    gt_tracks_df = ensure_numeric_tracks(gt_tracks_df)
+
+    gt_unique = int(pd.to_numeric(gt_tracks_df["TrackID"], errors="coerce").dropna().nunique())
+    pca_unique = int(pd.to_numeric(pca_tracks_df["TrackID"], errors="coerce").dropna().nunique())
+    unique_counts_plot = out_dir / "gt_vs_pca_unique_cell_counts.pdf"
+    plot_total_count_bars(gt_unique, pca_unique, title="Total unique cells over all frames", ylabel="unique tracks", out_path=unique_counts_plot)
+
+    gt_birthdeath = compute_birth_death_counts_by_time(gt_tracks_df)
+    pca_birthdeath = compute_birth_death_counts_by_time(pca_tracks_df)
+    birthdeath_plot = out_dir / "gt_vs_pca_births_deaths_barplot.pdf"
+    birthdeath_stats = out_dir / "gt_vs_pca_births_deaths_stats.csv"
+    plot_birth_death_bars(gt_birthdeath, pca_birthdeath, out_path=birthdeath_plot, stats_csv_path=birthdeath_stats)
+
+    gt_avg_disp = compute_track_average_displacements(gt_tracks_df)
+    pca_avg_disp = compute_track_average_displacements(pca_tracks_df)
+    threshold = determine_stationary_threshold(gt_avg_disp)
+    gt_class = classify_tracks_by_displacement(gt_avg_disp, threshold)
+    pca_class = classify_tracks_by_displacement(pca_avg_disp, threshold)
+
+    class_count_plot = out_dir / "gt_vs_pca_stationary_migrating_counts.pdf"
+    plot_stationary_migrating_count_bars(gt_class, pca_class, out_path=class_count_plot)
+
+    hist_plot = out_dir / "gt_vs_pca_average_displacement_histogram.pdf"
+    plot_average_displacement_histogram(gt_avg_disp, pca_avg_disp, threshold=threshold, out_path=hist_plot)
+
+    stationary_bar = out_dir / "gt_vs_pca_stationary_average_displacement.pdf"
+    stationary_stats = out_dir / "gt_vs_pca_stationary_average_displacement_stats.csv"
+    plot_two_group_bar(
+        gt_class.loc[gt_class["motion_class"] == "stationary", "mean_step_displacement"].to_numpy(np.float64),
+        pca_class.loc[pca_class["motion_class"] == "stationary", "mean_step_displacement"].to_numpy(np.float64),
+        title="Average displacement of stationary cells",
+        ylabel="average step displacement",
+        out_path=stationary_bar,
+        stats_csv_path=stationary_stats,
+        paired=False,
+    )
+
+    migrating_bar = out_dir / "gt_vs_pca_migrating_average_displacement.pdf"
+    migrating_stats = out_dir / "gt_vs_pca_migrating_average_displacement_stats.csv"
+    plot_two_group_bar(
+        gt_class.loc[gt_class["motion_class"] == "migrating", "mean_step_displacement"].to_numpy(np.float64),
+        pca_class.loc[pca_class["motion_class"] == "migrating", "mean_step_displacement"].to_numpy(np.float64),
+        title="Average displacement of migrating cells",
+        ylabel="average step displacement",
+        out_path=migrating_bar,
+        stats_csv_path=migrating_stats,
+        paired=False,
+    )
+
+    summary_csv = out_dir / "gt_vs_pca_regime_summary.csv"
+    pd.DataFrame(
+        [
+            {
+                "gt_unique_tracks": gt_unique,
+                "pca_unique_tracks": pca_unique,
+                "stationary_threshold": float(threshold),
+                "gt_stationary_tracks": int((gt_class["motion_class"] == "stationary").sum()),
+                "gt_migrating_tracks": int((gt_class["motion_class"] == "migrating").sum()),
+                "pca_stationary_tracks": int((pca_class["motion_class"] == "stationary").sum()),
+                "pca_migrating_tracks": int((pca_class["motion_class"] == "migrating").sum()),
+            }
+        ]
+    ).to_csv(summary_csv, index=False)
+
+    return {
+        "unique_counts_plot": unique_counts_plot,
+        "birthdeath_plot": birthdeath_plot,
+        "birthdeath_stats": birthdeath_stats,
+        "class_count_plot": class_count_plot,
+        "histogram_plot": hist_plot,
+        "stationary_bar_plot": stationary_bar,
+        "stationary_stats": stationary_stats,
+        "migrating_bar_plot": migrating_bar,
+        "migrating_stats": migrating_stats,
+        "summary_csv": summary_csv,
+    }
+
+
 def build_drift_summary_extended(summary_df: pd.DataFrame, dataset_label: str) -> pd.DataFrame:
     """Convert GT summary metrics into a benchmark-style long summary table."""
     metric_cols = ["overall_rms_error", "median_error_norm", "p95_error_norm", "drift_bias_abs"]
@@ -1937,6 +2341,12 @@ def main() -> None:
             out_root=association_root,
             dataset_label=dataset_label,
         )
+        regime_analysis_dir = regime_dir / "gt_vs_pca_analysis"
+        regime_analysis_paths = run_regime_summary_analysis(
+            gt_tracks_df=gt_tracks_df,
+            association_root=association_root,
+            out_dir=regime_analysis_dir,
+        )
         drift_summary_df, drift_paths = run_drift_correction_suite(
             gt_tracks_df=gt_tracks_df,
             observed_df=regime_tracks_df,
@@ -1963,6 +2373,7 @@ def main() -> None:
         print(f"  Unblinding CSV: {unblinding_path}")
         print(f"  Blind point-cloud plot: {blind_plot_path}")
         print(f"  Association output root: {association_root}")
+        print(f"  GT-vs-PCA analysis root: {regime_analysis_dir}")
         print(f"  Drift-correction output root: {drift_root}")
         print(f"  Drift-correction GT-input root: {drift_gt_input_root}")
         if not association_summary_df.empty:
@@ -1975,6 +2386,8 @@ def main() -> None:
                 )
         for assoc_path in association_paths[:6]:
             print(f"  Assoc artifact: {assoc_path}")
+        for key in ["summary_csv", "unique_counts_plot", "birthdeath_plot", "histogram_plot"]:
+            print(f"  Regime analysis artifact: {regime_analysis_paths[key]}")
         if not drift_summary_df.empty:
             print("  Drift-correction ranking by overall_rms_error:")
             for row in drift_summary_df[["method", "overall_rms_error", "drift_bias_abs"]].itertuples(index=False):

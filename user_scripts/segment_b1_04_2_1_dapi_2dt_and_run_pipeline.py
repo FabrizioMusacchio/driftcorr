@@ -888,12 +888,23 @@ def plot_2d_frames_comparison(
     inferred_xy = inferred_tracks_df[["Position X", "Position Y"]].to_numpy(np.float64)
     all_xy = np.vstack([arr for arr in [gt_xy, blind_xy, inferred_xy] if arr.size > 0]) if any(arr.size > 0 for arr in [gt_xy, blind_xy, inferred_xy]) else np.zeros((0, 2), dtype=np.float64)
 
-    def _draw_tracks(ax: Any, df: pd.DataFrame, panel_title: str) -> None:
+    def _draw_tracks(ax: Any, df: pd.DataFrame, panel_title: str, singletons_as_black_points: bool = False) -> None:
         track_ids = np.array(sorted(df["TrackID"].astype(float).unique()), dtype=np.float64)
         cmap = plt.get_cmap("turbo")
         denom = max(len(track_ids) - 1, 1)
         for idx, track_id in enumerate(track_ids.tolist()):
             track = df[df["TrackID"] == float(track_id)].sort_values("Time")
+            if singletons_as_black_points and len(track) == 1:
+                ax.scatter(
+                    track["Position X"].to_numpy(float),
+                    track["Position Y"].to_numpy(float),
+                    color="black",
+                    s=5,
+                    alpha=0.95,
+                    linewidths=0.0,
+                    zorder=10,
+                )
+                continue
             ax.plot(
                 track["Position X"].to_numpy(float),
                 track["Position Y"].to_numpy(float),
@@ -906,13 +917,24 @@ def plot_2d_frames_comparison(
     def _draw_overlay_tracks(ax: Any, gt_df: pd.DataFrame, inferred_df: pd.DataFrame, panel_title: str) -> None:
         gt_ids = np.array(sorted(gt_df["TrackID"].astype(float).unique()), dtype=np.float64)
         inf_ids = np.array(sorted(inferred_df["TrackID"].astype(float).unique()), dtype=np.float64)
-        gt_cmap = plt.get_cmap("gist_rainbow")
-        inf_cmap = plt.get_cmap("gist_rainbow")
+        gt_cmap = plt.get_cmap("turbo")
+        inf_cmap = plt.get_cmap("turbo")
         gt_denom = max(len(gt_ids) - 1, 1)
         inf_denom = max(len(inf_ids) - 1, 1)
 
         for idx, track_id in enumerate(inf_ids.tolist()):
             track = inferred_df[inferred_df["TrackID"] == float(track_id)].sort_values("Time")
+            if len(track) == 1:
+                ax.scatter(
+                    track["Position X"].to_numpy(float),
+                    track["Position Y"].to_numpy(float),
+                    color="black",
+                    s=5,
+                    alpha=0.95,
+                    linewidths=0.0,
+                    zorder=10,
+                )
+                continue
             ax.plot(
                 track["Position X"].to_numpy(float),
                 track["Position Y"].to_numpy(float),
@@ -934,7 +956,7 @@ def plot_2d_frames_comparison(
         style_benchmark_2d_axis(ax, all_xy, panel_title, plot_window_xy=plot_window_xy)
 
     fig1, ax1 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
-    _draw_tracks(ax1, gt_tracks_df, "GT tracks")
+    _draw_tracks(ax1, gt_tracks_df, "GT tracks", singletons_as_black_points=True)
     fig1.savefig(panel_paths[0], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig1)
 
@@ -955,7 +977,7 @@ def plot_2d_frames_comparison(
     plt.close(fig2)
 
     fig3, ax3 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
-    _draw_tracks(ax3, inferred_tracks_df, "Inferred pseudo-tracks")
+    _draw_tracks(ax3, inferred_tracks_df, "Inferred pseudo-tracks", singletons_as_black_points=True)
     fig3.savefig(panel_paths[2], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig3)
 
@@ -965,7 +987,7 @@ def plot_2d_frames_comparison(
     plt.close(fig4)
 
     fig, axes = plt.subplots(2, 2, figsize=(10.0 * CM, 10.0 * CM), constrained_layout=True)
-    _draw_tracks(axes[0, 0], gt_tracks_df, "GT tracks")
+    _draw_tracks(axes[0, 0], gt_tracks_df, "GT tracks", singletons_as_black_points=True)
     scatter = axes[0, 1].scatter(
         blind_df["x"].to_numpy(float),
         blind_df["y"].to_numpy(float),
@@ -973,10 +995,9 @@ def plot_2d_frames_comparison(
         cmap="viridis",
         s=5,
         alpha=0.55,
-        linewidths=0.0,
-    )
+        linewidths=0.0)
     style_benchmark_2d_axis(axes[0, 1], all_xy, "Blind point clouds", plot_window_xy=plot_window_xy)
-    _draw_tracks(axes[1, 0], inferred_tracks_df, "Inferred pseudo-tracks")
+    _draw_tracks(axes[1, 0], inferred_tracks_df, "Inferred pseudo-tracks", singletons_as_black_points=True)
     _draw_overlay_tracks(axes[1, 1], gt_tracks_df, inferred_tracks_df, "Overlay: GT vs inferred")
     # cbar = fig.colorbar(scatter, ax=axes.ravel().tolist(), fraction=0.03, pad=0.02)
     # cbar.outline.set_visible(False)
@@ -2520,7 +2541,7 @@ def run_blind_point_cloud_association_suite(
         accuracy_df = compute_accuracy_over_time_table(gt_tracks_with_pointindex, assoc.tracks_df)
         accuracy_path = method_dir / f"{method_name}_accuracy_over_time.pdf"
         rms_path = method_dir / f"{method_name}_rms_over_time.pdf"
-        panel_path = method_dir / f"{method_name}_panel_2d.pdf"
+        panel_path = method_dir / f"{method_name}_panel_2d.png"
 
         if not per_time_gt.empty:
             per_time_gt = per_time_gt.merge(accuracy_df, on="Time", how="left")
@@ -2613,7 +2634,15 @@ def run_drift_correction_suite_no_gt(
     dataset_label: str,
     regime_name: str,
 ) -> tuple[pd.DataFrame, str, list[Path]]:
-    """Run benchmark-style drift correction on best inferred tracks, without any GT evaluation."""
+    """
+    Run benchmark-style drift correction on best inferred tracks, without any GT evaluation.
+    
+    DEBUG:
+    association_root=association_root
+    out_root=drift_root
+    dataset_label=dataset_label
+    regime_name=regime_name
+    """
     out_root.mkdir(parents=True, exist_ok=True)
     method_dir = association_root / BEST_ASSOCIATION_METHOD
     inferred_tracks_path = method_dir / f"{BEST_ASSOCIATION_METHOD}_inferred_tracks.csv"
@@ -2636,13 +2665,13 @@ def run_drift_correction_suite_no_gt(
 
     visual_paths: list[Path] = []
     for method_name, df_corr in corr_by_method.items():
+        # method_name, df_corr = list(corr_by_method.items())[0]
         visual_outputs = save_visual_inspection_plots(
             df_orig=df_inferred,
             df_corr=df_corr,
             out_prefix=out_prefix,
             method_name=method_name,
-            df_groundtruth=None,
-        )
+            df_groundtruth=None)
         visual_paths.extend(visual_outputs.values())
 
     sort_cols = [col for col in ["rms_disp_mean_corr", "rms_disp_median_corr"] if col in eval_summary_df.columns]
@@ -2998,8 +3027,7 @@ def main() -> None:
         drift_root=drift_root,
         drift_summary_df=drift_summary_df,
         best_driftcorr_method=best_driftcorr_method,
-        out_dir=regime_analysis_dir,
-    )
+        out_dir=regime_analysis_dir)
 
     print()
     print(f"Observed run: {regime_name}")

@@ -37,6 +37,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from matplotlib import patches
+
 try:
     import tifffile
 except ModuleNotFoundError as exc:
@@ -69,7 +71,6 @@ from driftcorr.association.runner import tracks_df_to_frames
 from driftcorr.association.scoring import evaluate_against_groundtruth
 from driftcorr.association.synthetic import load_blind_frames
 from driftcorr.association.visualization import (
-    plot_3d_frames_comparison,
     plot_accuracy_over_time,
     plot_rms_over_time,
 )
@@ -119,6 +120,8 @@ BEST_ASSOCIATION_METHOD = "hungarian_two_stage_nis_cv"
 OBSERVED_REGIME_NAME = "observed_raw"
 OBSERVED_DATASET_LABEL = "b1_04_2_1_dapi_observed_raw"
 RUN_DOWNSTREAM_PIPELINES = True
+PLOT_WINDOW_X = (1223.0 - 200.0, 1223.0)
+PLOT_WINDOW_Y = (0.0, 200.0)
 CM = 1.0 / 2.54
 BASELINE_METHODS = ["rigid", "local", "rbf", "st_rbf"]
 BASELINE_DEFAULT_OPTIONS: dict[str, Any] = {
@@ -477,6 +480,8 @@ def assign_tracks(
     stats_rows: list[dict[str, Any]] = []
 
     for t_index in range(n_t):
+        print(f"Assigning tracks for frame {t_index + 1}/{n_t}...")
+        
         time_value = float(t_index + 1)
         local_labels = local_stack_tzyx[t_index]
         components = build_frame_components(local_labels)
@@ -717,46 +722,61 @@ def compute_xyz_limits(xyz: np.ndarray, pad_fraction: float = 0.06) -> tuple[tup
     )
 
 
-def style_benchmark_3d_axis(
+def compute_xy_limits(xy: np.ndarray, pad_fraction: float = 0.06) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Return padded XY limits with equal span in both axes."""
+    pts = np.asarray(xy, dtype=np.float64)
+    if pts.size == 0:
+        return (0.0, 1.0), (0.0, 1.0)
+    mins = np.nanmin(pts[:, :2], axis=0)
+    maxs = np.nanmax(pts[:, :2], axis=0)
+    center = 0.5 * (mins + maxs)
+    span = np.maximum(maxs - mins, 1e-6)
+    half = 0.5 * float(np.max(span)) * (1.0 + float(pad_fraction))
+    return (
+        (float(center[0] - half), float(center[0] + half)),
+        (float(center[1] - half), float(center[1] + half)),
+    )
+
+
+def style_benchmark_2d_axis(
     ax: Any,
-    xyz: np.ndarray,
+    xy: np.ndarray,
     title: str,
-    add_equal_box: bool = True,
+    plot_window_xy: tuple[tuple[float, float], tuple[float, float]] | None = None,
 ) -> None:
-    """Style a single 3D axis to match the compact benchmark panel appearance."""
-    (xlim, ylim, zlim) = compute_xyz_limits(xyz)
-    ax.set_title(title, pad=-55, fontsize=8)
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
+    """Style a single XY axis to match the compact benchmark appearance."""
+    if plot_window_xy is None:
+        xlim, ylim = compute_xy_limits(xy)
+    else:
+        xlim, ylim = plot_window_xy
+    ax.set_title(title, fontsize=8)
+    # ax.set_xlabel("X")
+    # ax.set_ylabel("Y")
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    ax.set_zlim(*zlim)
-    ax.view_init(elev=25, azim=-60)
-    ax.set_position([0.1, 0.1, 0.7, 0.8])
-    ax.tick_params(axis="both", which="major", pad=-3, labelsize=6)
-    ax.xaxis.labelpad = -7
-    ax.yaxis.labelpad = -7
-    ax.zaxis.labelpad = -7
-    if add_equal_box:
-        set_equal_box_aspect(ax, xyz)
+    ax.set_aspect("equal", adjustable="box")
+    ax.tick_params(axis="both", which="major",  pad=1) #labelsize=6,
 
 
-def plot_tracks_3d(df: pd.DataFrame, out_path: Path, title: str) -> None:
-    """Plot one 3D trajectory line per TrackID using benchmark-style single panels.
+def plot_tracks_2d(
+    df: pd.DataFrame,
+    out_path: Path,
+    title: str,
+    plot_window_xy: tuple[tuple[float, float], tuple[float, float]] | None = None,
+    show_zoom_box: bool = False,
+) -> None:
+    """Plot XY trajectories per TrackID using the benchmark-like single-panel style.
     
     DEBUG:
     df = regime_tracks_df
     out_path = regime_tracks_plot
-    title="Observed tracks"
+    title = "Observed tracks"
     """
-    fig = plt.figure(figsize=(6.0 * CM, 6.0 * CM), constrained_layout=True)
-    ax = fig.add_subplot(111, projection="3d")
-
+    fig, ax = plt.subplots(figsize=(9.0 * CM, 7.0 * CM), constrained_layout=True)
     track_ids = np.array(sorted(df["TrackID"].astype(float).unique()), dtype=np.float64)
     cmap = plt.get_cmap("turbo")
     denom = max(len(track_ids) - 1, 1)
-    xyz_all = df[["Position X", "Position Y", "Position Z"]].to_numpy(np.float64)
+    xy_all = df[["Position X", "Position Y"]].to_numpy(np.float64)
 
     for idx, track_id in enumerate(track_ids.tolist()):
         track = df[df["TrackID"] == float(track_id)].sort_values("Time")
@@ -764,41 +784,203 @@ def plot_tracks_3d(df: pd.DataFrame, out_path: Path, title: str) -> None:
         ax.plot(
             track["Position X"].to_numpy(float),
             track["Position Y"].to_numpy(float),
-            track["Position Z"].to_numpy(float),
             color=color,
+            linewidth=0.5,
+            alpha=0.8)
+    if show_zoom_box:
+        path_patch = patches.Rectangle(
+            (PLOT_WINDOW_X[0]-2, PLOT_WINDOW_Y[0]+2), # we do not plot exact 200x200 for visualization reason
+            (PLOT_WINDOW_X[1]) - PLOT_WINDOW_X[0],
+            (PLOT_WINDOW_Y[1]) - PLOT_WINDOW_Y[0],
             linewidth=1.0,
+            edgecolor="k",
+            facecolor="none",
+            linestyle="--",
             alpha=0.8,
+            zorder=10,
         )
-
-    style_benchmark_3d_axis(ax, xyz_all, title=title)
+        ax.add_patch(path_patch)
+    style_benchmark_2d_axis(ax, xy_all, title=title, plot_window_xy=plot_window_xy)
+    ax.set_xlim(0, 1224)
+    ax.set_ylim(0, 904)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
     fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
 
 
-def plot_blind_pointcloud_3d(df_blind: pd.DataFrame, out_path: Path, title: str) -> None:
-    """Plot blind point clouds, color-coded by frame, using benchmark-style layout."""
-    fig = plt.figure(figsize=(6.0 * CM, 6.0 * CM), constrained_layout=True)
-    ax = fig.add_subplot(111, projection="3d")
+def plot_blind_pointcloud_2d(
+    df_blind: pd.DataFrame,
+    out_path: Path,
+    title: str,
+    plot_window_xy: tuple[tuple[float, float], tuple[float, float]] | None = None,
+) -> None:
+    """Plot blind point clouds in XY, color-coded by frame."""
+    fig, ax = plt.subplots(figsize=(5.0 * CM, 4.0 * CM), constrained_layout=True)
     scatter = ax.scatter(
         df_blind["x"].to_numpy(float),
         df_blind["y"].to_numpy(float),
-        df_blind["z"].to_numpy(float),
         c=df_blind["Time"].to_numpy(float),
         cmap="viridis",
-        s=6,
+        s=3,
         alpha=0.55,
-        linewidths=0.0,
-    )
-    xyz = df_blind[["x", "y", "z"]].to_numpy(np.float64)
-    style_benchmark_3d_axis(ax, xyz, title=title)
-    cbar = fig.colorbar(scatter, ax=ax, fraction=0.09, pad=0.02)
-    cbar.ax.tick_params(labelsize=6, pad=1)
+        linewidths=0.0)
+    xy = df_blind[["x", "y"]].to_numpy(np.float64)
+    style_benchmark_2d_axis(ax, xy, title=title, plot_window_xy=plot_window_xy)
+    cbar = fig.colorbar(scatter, ax=ax, fraction=0.05, pad=0.02)
+    cbar.ax.tick_params(pad=1)
     cbar.outline.set_visible(False)
-    cbar.set_label("Frame / Time")
+    cbar.set_label("frame")
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
+
+
+def blind_frames_to_dataframe(blind_frames: list[Any]) -> pd.DataFrame:
+    """Convert blind frame objects into a tidy XY dataframe."""
+    rows: list[dict[str, float]] = []
+    for frame in blind_frames:
+        time_value = float(getattr(frame, "t", getattr(frame, "time", np.nan)))
+        xyz = np.asarray(frame.xyz, dtype=np.float64)
+        for point_index in range(int(xyz.shape[0])):
+            rows.append(
+                {
+                    "Time": time_value,
+                    "PointIndex": int(point_index),
+                    "x": float(xyz[point_index, 0]),
+                    "y": float(xyz[point_index, 1]),
+                    "z": float(xyz[point_index, 2]) if xyz.shape[1] > 2 else 0.0,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def plot_2d_frames_comparison(
+    gt_tracks_df: pd.DataFrame,
+    blind_df: pd.DataFrame,
+    inferred_tracks_df: pd.DataFrame,
+    out_path: Path,
+    title: str,
+    plot_window_xy: tuple[tuple[float, float], tuple[float, float]] | None = None,
+) -> list[Path]:
+    """Create XY comparison panels analogous to the former 3D HCV overview."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    panel_base = out_path.with_suffix("")
+    panel_paths = [
+        panel_base.with_name(panel_base.name + "_panel_1_gt_tracks.png"),
+        panel_base.with_name(panel_base.name + "_panel_2_blind_point_clouds.png"),
+        panel_base.with_name(panel_base.name + "_panel_3_inferred_pseudo_tracks.png"),
+        panel_base.with_name(panel_base.name + "_panel_4_overlay_gt_vs_inferred.png"),
+    ]
+
+    gt_xy = gt_tracks_df[["Position X", "Position Y"]].to_numpy(np.float64)
+    blind_xy = blind_df[["x", "y"]].to_numpy(np.float64)
+    inferred_xy = inferred_tracks_df[["Position X", "Position Y"]].to_numpy(np.float64)
+    all_xy = np.vstack([arr for arr in [gt_xy, blind_xy, inferred_xy] if arr.size > 0]) if any(arr.size > 0 for arr in [gt_xy, blind_xy, inferred_xy]) else np.zeros((0, 2), dtype=np.float64)
+
+    def _draw_tracks(ax: Any, df: pd.DataFrame, panel_title: str) -> None:
+        track_ids = np.array(sorted(df["TrackID"].astype(float).unique()), dtype=np.float64)
+        cmap = plt.get_cmap("turbo")
+        denom = max(len(track_ids) - 1, 1)
+        for idx, track_id in enumerate(track_ids.tolist()):
+            track = df[df["TrackID"] == float(track_id)].sort_values("Time")
+            ax.plot(
+                track["Position X"].to_numpy(float),
+                track["Position Y"].to_numpy(float),
+                color=cmap(idx / denom),
+                linewidth=0.8,
+                alpha=0.8,
+            )
+        style_benchmark_2d_axis(ax, all_xy, panel_title, plot_window_xy=plot_window_xy)
+
+    fig1, ax1 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
+    _draw_tracks(ax1, gt_tracks_df, "GT tracks")
+    fig1.savefig(panel_paths[0], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig1)
+
+    fig2, ax2 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
+    scatter2 = ax2.scatter(
+        blind_df["x"].to_numpy(float),
+        blind_df["y"].to_numpy(float),
+        c=blind_df["Time"].to_numpy(float),
+        cmap="viridis",
+        s=5,
+        alpha=0.55,
+        linewidths=0.0,)
+    style_benchmark_2d_axis(ax2, all_xy, "Blind point clouds", plot_window_xy=plot_window_xy)
+    # cbar2 = fig2.colorbar(scatter2, ax=ax2, fraction=0.09, pad=0.02)
+    # cbar2.outline.set_visible(False)
+    # cbar2.ax.tick_params(labelsize=6, pad=1)
+    fig2.savefig(panel_paths[1], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig2)
+
+    fig3, ax3 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
+    _draw_tracks(ax3, inferred_tracks_df, "Inferred pseudo-tracks")
+    fig3.savefig(panel_paths[2], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig3)
+
+    fig4, ax4 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
+    ax4.scatter(
+        gt_tracks_df["Position X"].to_numpy(float),
+        gt_tracks_df["Position Y"].to_numpy(float),
+        c=gt_tracks_df["Time"].to_numpy(float),
+        cmap="Blues",
+        s=5,
+        alpha=0.45,
+        linewidths=0.0,
+    )
+    ax4.scatter(
+        inferred_tracks_df["Position X"].to_numpy(float),
+        inferred_tracks_df["Position Y"].to_numpy(float),
+        c=inferred_tracks_df["Time"].to_numpy(float),
+        cmap="autumn",
+        s=5,
+        alpha=0.45,
+        linewidths=0.0,
+    )
+    style_benchmark_2d_axis(ax4, all_xy, "Overlay: GT vs inferred", plot_window_xy=plot_window_xy)
+    fig4.savefig(panel_paths[3], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig4)
+
+    fig, axes = plt.subplots(2, 2, figsize=(10.0 * CM, 10.0 * CM), constrained_layout=True)
+    _draw_tracks(axes[0, 0], gt_tracks_df, "GT tracks")
+    scatter = axes[0, 1].scatter(
+        blind_df["x"].to_numpy(float),
+        blind_df["y"].to_numpy(float),
+        c=blind_df["Time"].to_numpy(float),
+        cmap="viridis",
+        s=5,
+        alpha=0.55,
+        linewidths=0.0,
+    )
+    style_benchmark_2d_axis(axes[0, 1], all_xy, "Blind point clouds", plot_window_xy=plot_window_xy)
+    _draw_tracks(axes[1, 0], inferred_tracks_df, "Inferred pseudo-tracks")
+    axes[1, 1].scatter(
+        gt_tracks_df["Position X"].to_numpy(float),
+        gt_tracks_df["Position Y"].to_numpy(float),
+        c=gt_tracks_df["Time"].to_numpy(float),
+        cmap="Blues",
+        s=5,
+        alpha=0.45,
+        linewidths=0.0,
+    )
+    axes[1, 1].scatter(
+        inferred_tracks_df["Position X"].to_numpy(float),
+        inferred_tracks_df["Position Y"].to_numpy(float),
+        c=inferred_tracks_df["Time"].to_numpy(float),
+        cmap="autumn",
+        s=5,
+        alpha=0.45,
+        linewidths=0.0,
+    )
+    style_benchmark_2d_axis(axes[1, 1], all_xy, "Overlay: GT vs inferred", plot_window_xy=plot_window_xy)
+    # cbar = fig.colorbar(scatter, ax=axes.ravel().tolist(), fraction=0.03, pad=0.02)
+    # cbar.outline.set_visible(False)
+    # cbar.ax.tick_params(labelsize=6, pad=1)
+    fig.suptitle(title, fontsize=9)
+    fig.savefig(out_path, dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig)
+    return panel_paths
 
 
 def save_tracked_label_tiff(labels_tzyx: np.ndarray, out_path: Path) -> Path:
@@ -858,6 +1040,51 @@ def save_qc_overlay_frames(raw_stack_tzyx: np.ndarray, labels_tzyx: np.ndarray, 
         saved.append(out_path)
 
     return saved
+
+
+def save_matched_raw_overview_pdf(
+    matched_stack_tyx: np.ndarray,
+    frame_indices: list[int],
+    out_path: Path,
+) -> Path:
+    """Save a figure showing matched raw frames only."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    for frame_idx in frame_indices:
+        frame_out_path = out_path.with_stem(out_path.stem + f"_frame_{frame_idx}")
+        fig, ax = plt.subplots(1, 1, figsize=(9.0 * CM, 7.0 * CM), constrained_layout=True)
+        ax.imshow(matched_stack_tyx[frame_idx], cmap="gray", aspect="equal")
+        ax.set_title(f"frame={frame_idx}", fontsize=8)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fig.savefig(frame_out_path, dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+        plt.close(fig)
+    return out_path
+
+
+def save_matched_label_overlay_pdf(
+    matched_stack_tyx: np.ndarray,
+    labels_tyx: np.ndarray,
+    frame_indices: list[int],
+    out_path: Path,
+) -> Path:
+    """Save matched raw frames with label overlays, one panel per PDF."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    for frame_idx in frame_indices:
+        frame_out_path = out_path.with_stem(out_path.stem + f"_frame_{frame_idx}")
+        fig, ax = plt.subplots(1, 1, figsize=(9.0 * CM, 7.0 * CM), constrained_layout=True)
+        ax.imshow(matched_stack_tyx[frame_idx], cmap="gray", aspect="equal")
+        ax.imshow(
+            np.ma.masked_where(labels_tyx[frame_idx] == 0, labels_tyx[frame_idx]),
+            cmap="nipy_spectral",
+            alpha=0.45,
+            interpolation="nearest",
+        )
+        ax.set_title(f"frame={frame_idx}", fontsize=8)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fig.savefig(frame_out_path, dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+        plt.close(fig)
+    return out_path
 
 
 def estimate_dx_scale_from_blind_frames(blind_frames: list[Any]) -> float:
@@ -2239,6 +2466,7 @@ def run_blind_point_cloud_association_suite(
     unblinding_df: pd.DataFrame,
     out_root: Path,
     dataset_label: str,
+    plot_window_xy: tuple[tuple[float, float], tuple[float, float]] | None = None,
 ) -> tuple[pd.DataFrame, list[Path]]:
     """Run the 6 HCV methods on the blind CSV and save benchmark-like outputs."""
     out_root.mkdir(parents=True, exist_ok=True)
@@ -2275,12 +2503,11 @@ def run_blind_point_cloud_association_suite(
             inferred_tracks_df=assoc.tracks_df,
             point_to_gt_df=unblinding_df,
             links_df=assoc.links_df,
-            gt_tracks_df=gt_tracks_with_pointindex,
-        )
+            gt_tracks_df=gt_tracks_with_pointindex)
         accuracy_df = compute_accuracy_over_time_table(gt_tracks_with_pointindex, assoc.tracks_df)
         accuracy_path = method_dir / f"{method_name}_accuracy_over_time.pdf"
         rms_path = method_dir / f"{method_name}_rms_over_time.pdf"
-        panel_path = method_dir / f"{method_name}_panel_3d.pdf"
+        panel_path = method_dir / f"{method_name}_panel_2d.pdf"
 
         if not per_time_gt.empty:
             per_time_gt = per_time_gt.merge(accuracy_df, on="Time", how="left")
@@ -2292,14 +2519,13 @@ def run_blind_point_cloud_association_suite(
         mapping_df.to_csv(mapping_path, index=False)
         saved_paths.extend([per_time_path, mapping_path])
 
-        plot_3d_frames_comparison(
-            frames_gt=gt_frames,
-            frames_blind=blind_frames,
-            frames_inferred=tracks_df_to_frames(assoc.tracks_df),
-            out_path=panel_path,
+        plot_2d_frames_comparison(
             gt_tracks_df=gt_tracks_with_pointindex,
+            blind_df=blind_frames_to_dataframe(blind_frames),
             inferred_tracks_df=assoc.tracks_df,
+            out_path=panel_path,
             title=f"{dataset_label} | {method_name}",
+            plot_window_xy=plot_window_xy,
         )
         plot_rms_over_time(gt_tracks_with_pointindex, assoc.tracks_df, rms_path)
         plot_accuracy_over_time(gt_tracks_with_pointindex, assoc.tracks_df, accuracy_path)
@@ -2657,9 +2883,11 @@ def main() -> None:
 
     segmentation_reference = np.asarray(stack_tzyx[0], dtype=np.float32)
     local_labels: list[np.ndarray] = []
+    matched_frames: list[np.ndarray] = []
     segmentation_rows: list[dict[str, Any]] = []
     for t_index in range(stack_tzyx.shape[0]):
         frame_for_seg = match_histograms_to_reference(stack_tzyx[t_index], segmentation_reference)
+        matched_frames.append(np.asarray(frame_for_seg, dtype=np.float32))
         labels_t, seg_stats = segment_volume(frame_for_seg)
         local_labels.append(labels_t)
         segmentation_rows.append({"Time": float(t_index + 1), **seg_stats})
@@ -2671,30 +2899,33 @@ def main() -> None:
         )
 
     local_stack_tzyx = np.stack(local_labels, axis=0).astype(np.uint32, copy=False)
+    matched_stack_tyx = np.stack(matched_frames, axis=0).astype(np.float32, copy=False)
     tracked_labels_tzyx, gt_tracks_df, tracking_stats_df = assign_tracks(local_stack_tzyx)
     segmentation_df = pd.DataFrame(segmentation_rows)
     summary_df = segmentation_df.merge(tracking_stats_df, on="Time", how="left")
 
-    label_tif_path = save_tracked_label_tiff(
-        tracked_labels_tzyx,
-        OUTPUT_DIR / f"{INPUT_TIF.stem}_tracked_labels.tif",
-    )
+    label_tif_path = save_tracked_label_tiff(tracked_labels_tzyx, OUTPUT_DIR / f"{INPUT_TIF.stem}_tracked_labels.tif")
     gt_imaris_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_groundtruth_imaris.csv"
     summary_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_segmentation_tracking_summary.csv"
+    matched_overview_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_matched_raw_frames_0_99_199.pdf"
+    matched_overlay_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_matched_segmented_overlay_frames_0_99_199.pdf"
 
     gt_tracks_df.to_csv(gt_imaris_path, index=False)
     summary_df.to_csv(summary_path, index=False)
+    save_matched_raw_overview_pdf(matched_stack_tyx, [0, 99, 199], matched_overview_path)
+    save_matched_label_overlay_pdf(matched_stack_tyx, tracked_labels_tzyx, [0, 99, 199], matched_overlay_path)
     qc_paths = save_qc_overlay_frames(
         raw_stack_tzyx=stack_tzyx,
         labels_tzyx=tracked_labels_tzyx,
-        out_dir=OUTPUT_DIR / "qc_overlays",
-    )
+        out_dir=OUTPUT_DIR / "qc_overlays",)
 
     print()
     print("Common outputs:")
     print(f"  Labels TIFF: {label_tif_path}")
     print(f"  GT IMARIS CSV: {gt_imaris_path}")
     print(f"  Summary CSV: {summary_path}")
+    print(f"  Matched raw overview PDF: {matched_overview_path}")
+    print(f"  Matched overlay PDF: {matched_overlay_path}")
     for qc_path in qc_paths:
         print(f"  QC overlay: {qc_path}")
 
@@ -2713,31 +2944,35 @@ def main() -> None:
     regime_stem = f"{INPUT_TIF.stem}_{regime_name}"
     regime_imaris_path = regime_dir / f"{regime_stem}_imaris.csv"
     regime_no_trackid_path = regime_dir / f"{regime_stem}_imaris_no_trackid.csv"
-    regime_tracks_plot = regime_dir / f"{regime_stem}_tracks_3d.png"
+    regime_tracks_plot = regime_dir / f"{regime_stem}_tracks_2d.png"
     blind_path = regime_dir / f"{regime_stem}_blind.csv"
     unblinding_path = regime_dir / f"{regime_stem}_unblinding.csv"
-    blind_plot_path = regime_dir / f"{regime_stem}_blind_pointcloud_3d.png"
+    blind_plot_path = regime_dir / f"{regime_stem}_blind_pointcloud_2d.png"
 
     regime_tracks_df.to_csv(regime_imaris_path, index=False)
     regime_tracks_df.drop(columns=["TrackID"]).to_csv(regime_no_trackid_path, index=False)
-    plot_tracks_3d(regime_tracks_df, regime_tracks_plot, title="Observed tracks")
+    plot_tracks_2d(regime_tracks_df, regime_tracks_plot, title="Observed tracks", show_zoom_box=True)
 
     blind_df, unblinding_df = make_blind_pointcloud_table(
         regime_tracks_df,
         regime_name=dataset_label,
-        file_name=regime_stem,
-    )
+        file_name=regime_stem,)
     blind_df.to_csv(blind_path, index=False)
     unblinding_df.to_csv(unblinding_path, index=False)
-    plot_blind_pointcloud_3d(blind_df, blind_plot_path, title="Blind point clouds")
+    plot_blind_pointcloud_2d(blind_df, blind_plot_path,
+        title="Blind point clouds (zoom)",
+        plot_window_xy=(PLOT_WINDOW_X, PLOT_WINDOW_Y))
 
+    # point-cloud association:
     association_summary_df, association_paths = run_blind_point_cloud_association_suite(
         blind_csv_path=blind_path,
         gt_tracks_df=regime_tracks_df,
         unblinding_df=unblinding_df,
         out_root=association_root,
         dataset_label=dataset_label,
-    )
+        plot_window_xy=(PLOT_WINDOW_X, PLOT_WINDOW_Y))
+    
+    # drift-correction:
     drift_summary_df, best_driftcorr_method, drift_paths = run_drift_correction_suite_no_gt(
         association_root=association_root,
         out_root=drift_root,

@@ -863,7 +863,17 @@ def plot_2d_frames_comparison(
     title: str,
     plot_window_xy: tuple[tuple[float, float], tuple[float, float]] | None = None,
 ) -> list[Path]:
-    """Create XY comparison panels analogous to the former 3D HCV overview."""
+    """Create XY comparison panels analogous to the former 3D HCV overview.
+    
+    DEBUG:
+    
+    gt_tracks_df=gt_tracks_with_pointindex
+    blind_df=blind_frames_to_dataframe(blind_frames)
+    inferred_tracks_df=assoc.tracks_df
+    out_path=panel_path
+    title=f"{dataset_label} | {method_name}"
+    plot_window_xy=plot_window_xy
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
     panel_base = out_path.with_suffix("")
     panel_paths = [
@@ -893,6 +903,36 @@ def plot_2d_frames_comparison(
             )
         style_benchmark_2d_axis(ax, all_xy, panel_title, plot_window_xy=plot_window_xy)
 
+    def _draw_overlay_tracks(ax: Any, gt_df: pd.DataFrame, inferred_df: pd.DataFrame, panel_title: str) -> None:
+        gt_ids = np.array(sorted(gt_df["TrackID"].astype(float).unique()), dtype=np.float64)
+        inf_ids = np.array(sorted(inferred_df["TrackID"].astype(float).unique()), dtype=np.float64)
+        gt_cmap = plt.get_cmap("gist_rainbow")
+        inf_cmap = plt.get_cmap("gist_rainbow")
+        gt_denom = max(len(gt_ids) - 1, 1)
+        inf_denom = max(len(inf_ids) - 1, 1)
+
+        for idx, track_id in enumerate(inf_ids.tolist()):
+            track = inferred_df[inferred_df["TrackID"] == float(track_id)].sort_values("Time")
+            ax.plot(
+                track["Position X"].to_numpy(float),
+                track["Position Y"].to_numpy(float),
+                color=inf_cmap(idx / inf_denom),
+                linewidth=0.5,
+                alpha=1.0,
+                zorder=2)
+
+        for idx, track_id in enumerate(gt_ids.tolist()):
+            track = gt_df[gt_df["TrackID"] == float(track_id)].sort_values("Time")
+            ax.plot(
+                track["Position X"].to_numpy(float),
+                track["Position Y"].to_numpy(float),
+                color=gt_cmap(idx / gt_denom),
+                linewidth=1.5,
+                alpha=0.45,
+                zorder=3)
+
+        style_benchmark_2d_axis(ax, all_xy, panel_title, plot_window_xy=plot_window_xy)
+
     fig1, ax1 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
     _draw_tracks(ax1, gt_tracks_df, "GT tracks")
     fig1.savefig(panel_paths[0], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
@@ -920,25 +960,7 @@ def plot_2d_frames_comparison(
     plt.close(fig3)
 
     fig4, ax4 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
-    ax4.scatter(
-        gt_tracks_df["Position X"].to_numpy(float),
-        gt_tracks_df["Position Y"].to_numpy(float),
-        c=gt_tracks_df["Time"].to_numpy(float),
-        cmap="Blues",
-        s=5,
-        alpha=0.45,
-        linewidths=0.0,
-    )
-    ax4.scatter(
-        inferred_tracks_df["Position X"].to_numpy(float),
-        inferred_tracks_df["Position Y"].to_numpy(float),
-        c=inferred_tracks_df["Time"].to_numpy(float),
-        cmap="autumn",
-        s=5,
-        alpha=0.45,
-        linewidths=0.0,
-    )
-    style_benchmark_2d_axis(ax4, all_xy, "Overlay: GT vs inferred", plot_window_xy=plot_window_xy)
+    _draw_overlay_tracks(ax4, gt_tracks_df, inferred_tracks_df, "Overlay: GT vs inferred")
     fig4.savefig(panel_paths[3], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig4)
 
@@ -955,25 +977,7 @@ def plot_2d_frames_comparison(
     )
     style_benchmark_2d_axis(axes[0, 1], all_xy, "Blind point clouds", plot_window_xy=plot_window_xy)
     _draw_tracks(axes[1, 0], inferred_tracks_df, "Inferred pseudo-tracks")
-    axes[1, 1].scatter(
-        gt_tracks_df["Position X"].to_numpy(float),
-        gt_tracks_df["Position Y"].to_numpy(float),
-        c=gt_tracks_df["Time"].to_numpy(float),
-        cmap="Blues",
-        s=5,
-        alpha=0.45,
-        linewidths=0.0,
-    )
-    axes[1, 1].scatter(
-        inferred_tracks_df["Position X"].to_numpy(float),
-        inferred_tracks_df["Position Y"].to_numpy(float),
-        c=inferred_tracks_df["Time"].to_numpy(float),
-        cmap="autumn",
-        s=5,
-        alpha=0.45,
-        linewidths=0.0,
-    )
-    style_benchmark_2d_axis(axes[1, 1], all_xy, "Overlay: GT vs inferred", plot_window_xy=plot_window_xy)
+    _draw_overlay_tracks(axes[1, 1], gt_tracks_df, inferred_tracks_df, "Overlay: GT vs inferred")
     # cbar = fig.colorbar(scatter, ax=axes.ravel().tolist(), fraction=0.03, pad=0.02)
     # cbar.outline.set_visible(False)
     # cbar.ax.tick_params(labelsize=6, pad=1)
@@ -2468,7 +2472,16 @@ def run_blind_point_cloud_association_suite(
     dataset_label: str,
     plot_window_xy: tuple[tuple[float, float], tuple[float, float]] | None = None,
 ) -> tuple[pd.DataFrame, list[Path]]:
-    """Run the 6 HCV methods on the blind CSV and save benchmark-like outputs."""
+    """Run the 6 HCV methods on the blind CSV and save benchmark-like outputs.
+    
+    DEBUG:
+    blind_csv_path=blind_path
+    gt_tracks_df=regime_tracks_df
+    unblinding_df=unblinding_df
+    out_root=association_root
+    dataset_label=dataset_label
+    plot_window_xy=(PLOT_WINDOW_X, PLOT_WINDOW_Y)
+    """
     out_root.mkdir(parents=True, exist_ok=True)
     blind_frames = load_blind_frames(blind_csv_path)
     gt_tracks_with_pointindex = attach_pointindex_to_gt_tracks(gt_tracks_df, unblinding_df)
@@ -2480,6 +2493,7 @@ def run_blind_point_cloud_association_suite(
     saved_paths: list[Path] = []
 
     for method_cfg in HCV_METHOD_DEFS:
+        # method_cfg = HCV_METHOD_DEFS[0]
         method_name = str(method_cfg["name"])
         method_dir = out_root / method_name
         method_dir.mkdir(parents=True, exist_ok=True)
@@ -2487,8 +2501,7 @@ def run_blind_point_cloud_association_suite(
         gating, params = make_hcv_gating_and_params(
             method_cfg=method_cfg,
             best_cfg=best_configs.get(method_name, {}),
-            dx_scale_est=dx_scale_est,
-        )
+            dx_scale_est=dx_scale_est,)
         assoc = run_hcv_method(blind_frames=blind_frames, method_cfg=method_cfg, gating=gating, params=params)
 
         tracks_path = method_dir / f"{method_name}_inferred_tracks.csv"
@@ -2525,8 +2538,7 @@ def run_blind_point_cloud_association_suite(
             inferred_tracks_df=assoc.tracks_df,
             out_path=panel_path,
             title=f"{dataset_label} | {method_name}",
-            plot_window_xy=plot_window_xy,
-        )
+            plot_window_xy=plot_window_xy)
         plot_rms_over_time(gt_tracks_with_pointindex, assoc.tracks_df, rms_path)
         plot_accuracy_over_time(gt_tracks_with_pointindex, assoc.tracks_df, accuracy_path)
         saved_paths.extend([panel_path, rms_path, accuracy_path])

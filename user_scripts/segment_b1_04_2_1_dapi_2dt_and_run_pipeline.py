@@ -1008,6 +1008,115 @@ def plot_2d_frames_comparison(
     return panel_paths
 
 
+def save_driftcorr_zoom_plots(
+    df_orig: pd.DataFrame,
+    df_corr: pd.DataFrame,
+    out_prefix: Path,
+    method_name: str,
+    plot_window_xy: tuple[tuple[float, float], tuple[float, float]],
+) -> dict[str, Path]:
+    """
+    Save lightweight XY zoom plots for original, corrected, and overlay views.
+    
+    DEBUG:
+    df_orig=df_inferred
+    df_corr=df_corr
+    out_prefix=out_prefix
+    method_name=method_name
+    plot_window_xy=(PLOT_WINDOW_X, PLOT_WINDOW_Y)
+    """
+    out_prefix = Path(out_prefix)
+    out_prefix.parent.mkdir(parents=True, exist_ok=True)
+    method_dir = out_prefix.parent / str(method_name)
+    method_dir.mkdir(parents=True, exist_ok=True)
+
+    original_path = method_dir / f"{out_prefix.name}_{method_name}_original_input_tracks.pdf"
+    corrected_path = method_dir / f"{out_prefix.name}_{method_name}_corrected_tracks.pdf"
+    overlay_path = method_dir / f"{out_prefix.name}_{method_name}_overlay_gt_and_corrected.pdf"
+    corrected_fullview_path = method_dir / f"{out_prefix.name}_{method_name}_corrected_tracks_full_view.png"
+    xlim_window, ylim_window = plot_window_xy
+
+    def _draw_tracks(ax: Any, df: pd.DataFrame, x_col: str, y_col: str, 
+                     linewidth: float, alpha: float, 
+                     cmap_name: str = "turbo") -> None:
+        x_all = pd.to_numeric(df[x_col], errors="coerce").to_numpy(np.float64)
+        y_all = pd.to_numeric(df[y_col], errors="coerce").to_numpy(np.float64)
+        in_window = (
+            np.isfinite(x_all)
+            & np.isfinite(y_all)
+            & (x_all >= float(xlim_window[0]))
+            & (x_all <= float(xlim_window[1]))
+            & (y_all >= float(ylim_window[0]))
+            & (y_all <= float(ylim_window[1]))
+        )
+        df_window = df.loc[in_window].copy()
+        track_ids = np.array(sorted(pd.to_numeric(df_window["TrackID"], errors="coerce").dropna().unique()), dtype=np.float64)
+        if track_ids.size == 0:
+            return
+        cmap = plt.get_cmap(cmap_name)
+        denom = max(len(track_ids) - 1, 1)
+        for idx, track_id in enumerate(track_ids.tolist()):
+            track = df_window[df_window["TrackID"] == float(track_id)].sort_values("Time")
+            if len(track) == 1:
+                ax.scatter(
+                    track[x_col].to_numpy(float),
+                    track[y_col].to_numpy(float),
+                    color="black", # if x_col.endswith("_corr") else cmap(idx / denom),
+                    s=5,
+                    alpha=0.95 if x_col.endswith("_corr") else alpha,
+                    linewidths=0.0,
+                    zorder=4,
+                )
+                continue
+            ax.plot(
+                track[x_col].to_numpy(float),
+                track[y_col].to_numpy(float),
+                color=cmap(idx / denom),
+                linewidth=linewidth,
+                alpha=alpha,
+            )
+
+    orig_xy = df_orig[["Position X", "Position Y"]].to_numpy(np.float64)
+    corr_xy = df_corr[["Position X_corr", "Position Y_corr"]].to_numpy(np.float64)
+    all_xy = np.vstack([arr for arr in [orig_xy, corr_xy] if arr.size > 0]) if any(arr.size > 0 for arr in [orig_xy, corr_xy]) else np.zeros((0, 2), dtype=np.float64)
+
+    fig1, ax1 = plt.subplots(figsize=(3.5 * CM, 3.5 * CM), constrained_layout=True)
+    _draw_tracks(ax1, df_orig, "Position X", "Position Y", linewidth=1.0, alpha=0.9)
+    style_benchmark_2d_axis(ax1, all_xy, "Original input tracks", plot_window_xy=plot_window_xy)
+    fig1.savefig(original_path, dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig1)
+
+    fig2, ax2 = plt.subplots(figsize=(3.5 * CM, 3.5 * CM), constrained_layout=True)
+    _draw_tracks(ax2, df_corr, "Position X_corr", "Position Y_corr", linewidth=1.0, alpha=0.9)
+    style_benchmark_2d_axis(ax2, all_xy, "Corrected tracks", plot_window_xy=plot_window_xy)
+    fig2.savefig(corrected_path, dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig2)
+
+    fig3, ax3 = plt.subplots(figsize=(3.5 * CM, 3.5 * CM), constrained_layout=True)
+    _draw_tracks(ax3, df_corr, "Position X_corr", "Position Y_corr", linewidth=0.5, alpha=1.0)
+    _draw_tracks(ax3, df_orig, "Position X", "Position Y", linewidth=1.5, alpha=0.35)
+    style_benchmark_2d_axis(ax3, all_xy, "Input vs corrected", plot_window_xy=plot_window_xy)
+    fig3.savefig(overlay_path, dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+    plt.close(fig3)
+
+    df_corr_fullview = df_corr.copy()
+    df_corr_fullview["Position X"] = pd.to_numeric(df_corr_fullview["Position X_corr"], errors="coerce")
+    df_corr_fullview["Position Y"] = pd.to_numeric(df_corr_fullview["Position Y_corr"], errors="coerce")
+    plot_tracks_2d(
+        df_corr_fullview,
+        corrected_fullview_path,
+        title="Corrected tracks",
+        show_zoom_box=True,
+    )
+
+    return {
+        "corrected_tracks_full_view": corrected_fullview_path,
+        "original_input_tracks": original_path,
+        "corrected_tracks": corrected_path,
+        "overlay_gt_and_corrected": overlay_path,
+    }
+
+
 def save_tracked_label_tiff(labels_tzyx: np.ndarray, out_path: Path) -> Path:
     """Write tracked labels as a TYX or TZYX TIFF for napari inspection."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2004,6 +2113,26 @@ def plot_birth_death_bars(
             if arr.size:
                 jitter = rng.uniform(-0.08, 0.08, size=arr.size)
                 ax.scatter(np.full(arr.size, xi) + jitter, arr, s=14, color=color, alpha=0.8, zorder=3, lw=0)
+        # re-plot mean + sem:
+        for xi, mean, sem_val, color in zip(x, means, sems, ["#000000", "#000000"]):
+            ax.errorbar(
+                xi,
+                mean,
+                yerr=sem_val,
+                fmt="none",        # kein zusätzlicher Marker
+                ecolor=color,
+                elinewidth=1.25,
+                capsize=4,
+                capthick=1.25,
+                zorder=10,
+            )
+            ax.scatter(
+                xi,
+                mean,
+                s=14,
+                color=color,
+                zorder=10,
+            ) 
         stats_row = run_statistical_test(gt, other, paired=True)
         stats_row["comparison"] = metric
         rows.append(stats_row)
@@ -2665,13 +2794,14 @@ def run_drift_correction_suite_no_gt(
 
     visual_paths: list[Path] = []
     for method_name, df_corr in corr_by_method.items():
-        # method_name, df_corr = list(corr_by_method.items())[0]
-        visual_outputs = save_visual_inspection_plots(
+        # method_name = list(corr_by_method.keys())[0]
+        # df_corr = corr_by_method[method_name]
+        visual_outputs = save_driftcorr_zoom_plots(
             df_orig=df_inferred,
             df_corr=df_corr,
             out_prefix=out_prefix,
             method_name=method_name,
-            df_groundtruth=None)
+            plot_window_xy=(PLOT_WINDOW_X, PLOT_WINDOW_Y))
         visual_paths.extend(visual_outputs.values())
 
     sort_cols = [col for col in ["rms_disp_mean_corr", "rms_disp_median_corr"] if col in eval_summary_df.columns]
@@ -2772,8 +2902,7 @@ def plot_motion_class_average_displacement_threeway(
     gt_class_df: pd.DataFrame,
     pca_class_df: pd.DataFrame,
     driftcorr_class_df: pd.DataFrame,
-    out_path: Path,
-) -> Path:
+    out_path: Path) -> Path:
     """Plot average displacement for stationary vs migrating tracks across GT/PCA/driftcorr."""
     fig, axes = plt.subplots(1, 2, figsize=(10.0 * CM, 4.6 * CM), sharey=False)
     for ax, motion_class, title in zip(axes, ["stationary", "migrating"], ["Stationary", "Migrating"]):
@@ -2783,14 +2912,46 @@ def plot_motion_class_average_displacement_threeway(
             pd.to_numeric(driftcorr_class_df.loc[driftcorr_class_df["motion_class"] == motion_class, "mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
         ]
         means = [float(np.mean(arr)) if arr.size else 0.0 for arr in groups]
+        medians = [float(np.median(arr)) if arr.size else 0.0 for arr in groups]
         sems = [sem_or_zero(arr) for arr in groups]
         x = np.arange(3, dtype=np.float64)
-        ax.bar(x, means, yerr=sems, capsize=4, color=["#4C72B0", "#DD8452", "#55A868"], alpha=0.85, width=0.65)
+        #ax.bar(x, means, yerr=sems, capsize=4, color=["#4C72B0", "#DD8452", "#55A868"], alpha=0.85, width=0.65)
+        # --- Violin plot ---
+        vp = ax.violinplot(
+            groups,
+            positions=x,
+            widths=0.65,
+            showmeans=False,
+            showmedians=True,
+            showextrema=False)
+        # correct the violin plot's colors:
+        violin_colors = ["#4C72B0", "#DD8452", "#55A868"]
+        for body, color in zip(vp["bodies"], violin_colors):
+            body.set_facecolor(color)
+            body.set_edgecolor("none")
+            body.set_linewidth(0)
+            body.set_alpha(0.6)
+            body.set_zorder(1)
+        # scatter plot of individual data points:
         rng = np.random.default_rng(0)
-        for idx, arr, color in zip(x.tolist(), groups, ["#1f3552", "#7a3d14", "#1d5f34"]):
+        """ for idx, arr, color in zip(x.tolist(), groups, ["#1f3552", "#7a3d14", "#1d5f34"]):
             if arr.size:
                 jitter = rng.uniform(-0.08, 0.08, size=arr.size)
-                ax.scatter(np.full(arr.size, idx) + jitter, arr, s=12, color=color, alpha=0.7, zorder=3)
+                ax.scatter(np.full(arr.size, idx) + jitter, arr, s=10, color=color, alpha=0.7, zorder=3, lw=0)
+                # annotate the number of points for each group
+                ax.text( idx,
+                    means[int(idx)] + sems[int(idx)] + 0.03 * max(means + sems) if max(means + sems) > 0 else 0.05,
+                    f"n={arr.size}",
+                    ha="center",
+                    va="bottom",
+                    fontsize=8,
+                    zorder=6) """
+        # re-plot mean ± sem on top of scatter
+        for xi, median, sem_val, color in zip(x, medians, sems, ["#0b1f33", "#4a2208", "#10351d"]):
+            # ax.errorbar(xi, mean, yerr=sem_val, fmt="none",
+            #     ecolor=color, elinewidth=1.25, capsize=4, capthick=1.25, zorder=5)
+            #ax.scatter(xi, mean, s=14, color=color, zorder=6)
+            ax.scatter(xi, median, s=14, color=color, zorder=6)
         ax.set_xticks(x)
         ax.set_xticklabels(["GT", "PCA", "DriftCorr"])
         ax.set_title(title)
@@ -2811,7 +2972,9 @@ def run_observed_summary_analysis(
     best_driftcorr_method: str,
     out_dir: Path,
 ) -> dict[str, Path]:
-    """Create GT/PCA and GT/PCA/driftcorr summary plots for the observed 2D+T dataset."""
+    """
+    Create GT/PCA and GT/PCA/driftcorr summary plots for the observed 2D+T dataset.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     method_dir = association_root / BEST_ASSOCIATION_METHOD
     inferred_tracks_path = method_dir / f"{BEST_ASSOCIATION_METHOD}_inferred_tracks.csv"

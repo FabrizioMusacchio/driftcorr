@@ -65,19 +65,19 @@ EXPECTED_AXES = "TYX"
 CELLPOSE_MODEL_TYPE = "nuclei"
 CELLPOSE_PRETRAINED_MODEL = "cpsam"
 CELLPOSE_DIAMETER = 14.0
-USE_GPU = False
+USE_GPU = True # we can run in M1 metal
 MATCH_HISTOGRAMS = True
 CELLPROB_THRESHOLD = 0.0
 FLOW_THRESHOLD = 0.4
 MIN_OBJECT_AREA = 40
 MAX_OBJECT_AREA = 4000
 
-HUNGARIAN_MAX_DISTANCE = 32.0
-HUNGARIAN_MAX_FRAME_GAP = 1
-HUNGARIAN_COST_THRESHOLD = 0.98
-DISTANCE_WEIGHT = 0.55
-IOU_WEIGHT = 0.30
-AREA_WEIGHT = 0.15
+HUNGARIAN_MAX_DISTANCE = 22.0
+HUNGARIAN_MAX_FRAME_GAP = 5
+HUNGARIAN_COST_THRESHOLD = 0.78
+DISTANCE_WEIGHT = 0.30
+IOU_WEIGHT = 0.50
+AREA_WEIGHT = 0.20
 # %% FUNCTIONS
 @dataclass
 class Object2D:
@@ -211,7 +211,19 @@ def run_cellpose_segmentation(
     min_area: int,
     max_area: int | None,
 ) -> np.ndarray:
-    """Segment each frame with Cellpose and return a TYX instance-label stack."""
+    """
+    Segment each frame with Cellpose and return a TYX instance-label stack.
+    
+    DEBUG:
+    stack_tyx=processed_tyx
+    diameter=CELLPOSE_DIAMETER
+    use_gpu=USE_GPU
+    model_type=CELLPOSE_MODEL_TYPE
+    flow_threshold=FLOW_THRESHOLD
+    cellprob_threshold=CELLPROB_THRESHOLD
+    min_area=MIN_OBJECT_AREA
+    max_area=MAX_OBJECT_AREA
+    """
     model_cls = getattr(models, "CellposeModel", None)
     if model_cls is not None:
         # Cellpose v4 uses `CellposeModel` and ignores `model_type`.
@@ -226,22 +238,22 @@ def run_cellpose_segmentation(
         model = legacy_cls(gpu=bool(use_gpu), model_type=str(model_type))
     label_stack = np.zeros_like(stack_tyx, dtype=np.uint32)
     for t in range(stack_tyx.shape[0]):
+        # t = 0
+        print(f"Segmenting frame {t+1}...")
         frame = np.asarray(stack_tyx[t], dtype=np.float32)
-        masks, _, _, _ = model.eval(
+        masks, _, _ = model.eval(
             frame,
             channels=[0, 0],
             diameter=float(diameter),
             do_3D=False,
             flow_threshold=float(flow_threshold),
             cellprob_threshold=float(cellprob_threshold),
-            min_size=int(min_area),
-        )
+            min_size=int(min_area))
         label_stack[t] = keep_labels_in_size_range(masks, min_area=min_area, max_area=max_area)
         print(
             f"[Cellpose] frame {t + 1:03d}/{stack_tyx.shape[0]:03d}: "
             f"{int(label_stack[t].max())} kept objects",
-            flush=True,
-        )
+            flush=True)
     return label_stack
 
 
@@ -321,6 +333,7 @@ def link_with_hungarian(
     active_tracks: dict[int, dict[str, Any]] = {}
 
     for t, objects in enumerate(objects_by_time):
+        print(f"Linking objects (cells) in frame {t}...")
         if not active_tracks:
             assignments: dict[int, int] = {}
         else:
@@ -357,14 +370,30 @@ def link_with_hungarian(
                             + IOU_WEIGHT * (1.0 - iou)
                             + AREA_WEIGHT * min(area_rel, 1.0)
                         )
-                row_ind, col_ind = linear_sum_assignment(cost)
-                for row, col in zip(row_ind.tolist(), col_ind.tolist()):
-                    if not np.isfinite(cost[row, col]):
-                        continue
-                    if float(cost[row, col]) > float(cost_threshold):
-                        continue
-                    track_id = int(active_items[row][0])
-                    assignments[col] = track_id
+                valid_rows = np.flatnonzero(np.isfinite(cost).any(axis=1))
+                valid_cols = np.flatnonzero(np.isfinite(cost).any(axis=0))
+                if valid_rows.size and valid_cols.size:
+                    reduced_cost = cost[np.ix_(valid_rows, valid_cols)]
+                    finite_mask = np.isfinite(reduced_cost)
+                    if not finite_mask.any():
+                        row_ind = np.asarray([], dtype=np.int64)
+                        col_ind = np.asarray([], dtype=np.int64)
+                    else:
+                        fill_value = max(
+                            float(cost_threshold) + 1.0,
+                            float(np.max(reduced_cost[finite_mask])) + 1.0,
+                        )
+                        reduced_cost_safe = np.where(finite_mask, reduced_cost, fill_value)
+                        row_ind, col_ind = linear_sum_assignment(reduced_cost_safe)
+                    for red_row, red_col in zip(row_ind.tolist(), col_ind.tolist()):
+                        row = int(valid_rows[red_row])
+                        col = int(valid_cols[red_col])
+                        if not np.isfinite(cost[row, col]):
+                            continue
+                        if float(cost[row, col]) > float(cost_threshold):
+                            continue
+                        track_id = int(active_items[row][0])
+                        assignments[col] = track_id
 
         used_track_ids = set(assignments.values())
         for obj_index, obj in enumerate(objects):
@@ -447,6 +476,7 @@ def link_with_overlap_connected_components(label_stack_tyx: np.ndarray) -> tuple
         for obj in objects:
             uf.add((int(t), int(obj.local_label)))
     for t in range(len(objects_by_time) - 1):
+        print(f"Linking objects by CC on the frame-to-frame overlap graph. Frame {t}...")
         current = objects_by_time[t]
         nxt = objects_by_time[t + 1]
         if not current or not nxt:
@@ -526,8 +556,7 @@ def main() -> None:
         masks_tyx,
         max_distance=HUNGARIAN_MAX_DISTANCE,
         max_frame_gap=HUNGARIAN_MAX_FRAME_GAP,
-        cost_threshold=HUNGARIAN_COST_THRESHOLD,
-    )
+        cost_threshold=HUNGARIAN_COST_THRESHOLD)
     hungarian_tif = OUTPUT_DIR / "B1_04_2_1_DAPI_cellpose_linked_hungarian.tif"
     hungarian_csv = OUTPUT_DIR / "B1_04_2_1_DAPI_cellpose_linked_hungarian_tracks.csv"
     save_label_tiff(hungarian_tif, hungarian_labels)

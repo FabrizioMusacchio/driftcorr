@@ -91,6 +91,10 @@ INPUT_TIF = (
     / "B1_04_2_1_DAPI.ome.tif"
 )
 OUTPUT_DIR = INPUT_TIF.parent / "B1_04_2_1_DAPI_tracking_exports"
+CELLPOSE_EXPORT_DIR = INPUT_TIF.parent / "B1_04_2_1_DAPI_cellpose_exports"
+USE_CELLPOSE_LINKED_TRACKS = True
+CELLPOSE_LINKED_LABEL_TIF = CELLPOSE_EXPORT_DIR / "B1_04_2_1_DAPI_cellpose_linked_hungarian.tif"
+CELLPOSE_LINKED_TRACKS_CSV = CELLPOSE_EXPORT_DIR / "B1_04_2_1_DAPI_cellpose_linked_hungarian_tracks.csv"
 HCV_BENCHMARK_STATS_PATH = (
     PROJECT_ROOT
     / "Synthetic files track inference parameter sweep"
@@ -320,6 +324,33 @@ def load_stack_tyx(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
     info["normalized_shape"] = tuple(int(v) for v in arr.shape)
     info["normalized_axes"] = EXPECTED_AXES
     return arr, info
+
+
+def load_label_stack_tyx(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
+    """Load a tracked label TIFF and normalize it to TYX."""
+    with tifffile.TiffFile(path) as tif:
+        array = tif.asarray()
+        axes = getattr(tif.series[0], "axes", "")
+    arr = np.asarray(array)
+    info: dict[str, Any] = {"raw_shape": tuple(int(v) for v in arr.shape), "raw_axes": str(axes)}
+    if arr.ndim != 3:
+        raise ValueError(f"Tracked label TIFF must be TYX-like 3D, got shape {arr.shape}.")
+    if axes in {"TYX", "QYX", "IYX", ""}:
+        pass
+    elif axes == "ZYX":
+        info["axis_inference"] = "interpreted leading Z axis as T"
+    else:
+        axis_to_index = {ax: i for i, ax in enumerate(axes)}
+        if all(ax in axis_to_index for ax in ["T", "Y", "X"]):
+            arr = np.transpose(arr, [axis_to_index[ax] for ax in ["T", "Y", "X"]])
+        elif all(ax in axis_to_index for ax in ["Z", "Y", "X"]):
+            arr = np.transpose(arr, [axis_to_index[ax] for ax in ["Z", "Y", "X"]])
+            info["axis_inference"] = "interpreted leading Z axis as T"
+        else:
+            raise ValueError(f"Cannot infer TYX from tracked labels with axes {axes!r}.")
+    info["normalized_shape"] = tuple(int(v) for v in arr.shape)
+    info["normalized_axes"] = EXPECTED_AXES
+    return np.asarray(arr, dtype=np.uint32), info
 
 def remove_small_components(mask: np.ndarray, min_size: int) -> np.ndarray:
     """Drop connected components smaller than `min_size` voxels."""
@@ -575,6 +606,62 @@ def assign_tracks(
     tracks_df = pd.DataFrame(track_rows).sort_values(["Time", "TrackID"]).reset_index(drop=True)
     frame_stats_df = pd.DataFrame(stats_rows).sort_values("Time").reset_index(drop=True)
     return global_stack, tracks_df, frame_stats_df
+
+
+def build_tracks_from_tracked_labels(tracked_labels_tyx: np.ndarray) -> pd.DataFrame:
+    """Extract centroid tracks from a TYX tracked-label stack with stable global TrackIDs."""
+    rows: list[dict[str, Any]] = []
+    row_id = 1
+    for t_index in range(int(tracked_labels_tyx.shape[0])):
+        labels_t = np.asarray(tracked_labels_tyx[t_index], dtype=np.uint32)
+        ids = np.unique(labels_t)
+        ids = ids[ids > 0]
+        for track_id in ids.tolist():
+            mask = labels_t == int(track_id)
+            centroid_xyz = centroid_xyz_from_mask(mask)
+            rows.append(
+                {
+                    "Position X": float(centroid_xyz[0]),
+                    "Position Y": float(centroid_xyz[1]),
+                    "Position Z": float(centroid_xyz[2]),
+                    "Unit": IMARIS_UNIT,
+                    "Category": "Spot",
+                    "Collection": "Position",
+                    "Time": float(t_index),
+                    "TrackID": float(track_id),
+                    "ID": int(row_id),
+                    "Voxel Count": int(mask.sum()),
+                    "Link Mode": "imported_label_stack",
+                    "Link Metric": np.nan,
+                }
+            )
+            row_id += 1
+    return pd.DataFrame(rows).sort_values(["Time", "TrackID"]).reset_index(drop=True)
+
+
+def normalize_imported_tracks_dataframe(tracks_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize imported tracked-cell CSVs to the column schema expected downstream."""
+    out = tracks_df.copy()
+    required_cols = ["TrackID", "Time", "Position X", "Position Y"]
+    missing = [col for col in required_cols if col not in out.columns]
+    if missing:
+        raise ValueError(f"Imported track table is missing required columns: {missing}")
+    if "Position Z" not in out.columns:
+        out["Position Z"] = 0.0
+    if "Unit" not in out.columns:
+        out["Unit"] = IMARIS_UNIT
+    if "Category" not in out.columns:
+        out["Category"] = "Spot"
+    if "Collection" not in out.columns:
+        out["Collection"] = "Position"
+    out["TrackID"] = pd.to_numeric(out["TrackID"], errors="coerce")
+    out["Time"] = pd.to_numeric(out["Time"], errors="coerce")
+    out["Position X"] = pd.to_numeric(out["Position X"], errors="coerce")
+    out["Position Y"] = pd.to_numeric(out["Position Y"], errors="coerce")
+    out["Position Z"] = pd.to_numeric(out["Position Z"], errors="coerce").fillna(0.0)
+    out = out.dropna(subset=["TrackID", "Time", "Position X", "Position Y"]).copy()
+    out["ID"] = np.arange(1, len(out) + 1, dtype=int)
+    return out.sort_values(["Time", "TrackID"]).reset_index(drop=True)
 
 
 def rotation_matrix_xyz(angle_x: float, angle_y: float, angle_z: float) -> np.ndarray:
@@ -3258,7 +3345,7 @@ def run_observed_summary_analysis(
         "summary_csv": summary_csv,
     }
 
-
+# %% MAIN FUNCTION
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     MPL_DIR.mkdir(parents=True, exist_ok=True)
@@ -3271,31 +3358,67 @@ def main() -> None:
         print(f"Axis inference: {stack_info['axis_inference']}")
 
     segmentation_reference = np.asarray(stack_tzyx[0], dtype=np.float32)
-    local_labels: list[np.ndarray] = []
     matched_frames: list[np.ndarray] = []
-    segmentation_rows: list[dict[str, Any]] = []
     for t_index in range(stack_tzyx.shape[0]):
         frame_for_seg = match_histograms_to_reference(stack_tzyx[t_index], segmentation_reference)
         matched_frames.append(np.asarray(frame_for_seg, dtype=np.float32))
-        labels_t, seg_stats = segment_volume(frame_for_seg)
-        local_labels.append(labels_t)
-        segmentation_rows.append({"Time": float(t_index + 1), **seg_stats})
-        print(
-            f"Frame {t_index + 1:02d}: "
-            f"{int(seg_stats['n_components'])} components, "
-            f"high_thr={seg_stats['high_threshold']:.3f}, "
-            f"low_thr={seg_stats['low_threshold']:.3f}"
-        )
-
-    local_stack_tzyx = np.stack(local_labels, axis=0).astype(np.uint32, copy=False)
     matched_stack_tyx = np.stack(matched_frames, axis=0).astype(np.float32, copy=False)
-    tracked_labels_tzyx, gt_tracks_df, tracking_stats_df = assign_tracks(local_stack_tzyx)
-    segmentation_df = pd.DataFrame(segmentation_rows)
-    summary_df = segmentation_df.merge(tracking_stats_df, on="Time", how="left")
 
-    label_tif_path = save_tracked_label_tiff(tracked_labels_tzyx, OUTPUT_DIR / f"{INPUT_TIF.stem}_tracked_labels.tif")
-    gt_imaris_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_groundtruth_imaris.csv"
-    summary_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_segmentation_tracking_summary.csv"
+    if USE_CELLPOSE_LINKED_TRACKS:
+        print(f"Using external Cellpose-linked tracks: {CELLPOSE_LINKED_LABEL_TIF}")
+        tracked_labels_tzyx, imported_label_info = load_label_stack_tyx(CELLPOSE_LINKED_LABEL_TIF)
+        print(
+            f"Loaded external tracked labels with shape {imported_label_info['normalized_shape']} "
+            f"({imported_label_info['normalized_axes']})"
+        )
+        if tuple(int(v) for v in tracked_labels_tzyx.shape) != tuple(int(v) for v in matched_stack_tyx.shape):
+            raise ValueError(
+                "External tracked labels shape does not match the image stack: "
+                f"{tracked_labels_tzyx.shape} vs {matched_stack_tyx.shape}"
+            )
+        gt_imaris_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_groundtruth_imaris.csv"
+        if CELLPOSE_LINKED_TRACKS_CSV.exists():
+            gt_tracks_df = normalize_imported_tracks_dataframe(pd.read_csv(CELLPOSE_LINKED_TRACKS_CSV))
+        else:
+            gt_tracks_df = build_tracks_from_tracked_labels(tracked_labels_tzyx)
+            CELLPOSE_LINKED_TRACKS_CSV.parent.mkdir(parents=True, exist_ok=True)
+            gt_tracks_df.to_csv(CELLPOSE_LINKED_TRACKS_CSV, index=False)
+        summary_df = pd.DataFrame(
+            [
+                {
+                    "input_source": "cellpose_linked_hungarian",
+                    "label_tif": str(CELLPOSE_LINKED_LABEL_TIF),
+                    "tracks_csv": str(CELLPOSE_LINKED_TRACKS_CSV),
+                    "n_frames": int(tracked_labels_tzyx.shape[0]),
+                    "unique_tracks": int(pd.to_numeric(gt_tracks_df["TrackID"], errors="coerce").dropna().nunique()),
+                    "n_rows": int(len(gt_tracks_df)),
+                }
+            ]
+        )
+        label_tif_path = CELLPOSE_LINKED_LABEL_TIF
+        summary_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_cellpose_import_summary.csv"
+    else:
+        local_labels: list[np.ndarray] = []
+        segmentation_rows: list[dict[str, Any]] = []
+        for t_index in range(stack_tzyx.shape[0]):
+            frame_for_seg = matched_stack_tyx[t_index]
+            labels_t, seg_stats = segment_volume(frame_for_seg)
+            local_labels.append(labels_t)
+            segmentation_rows.append({"Time": float(t_index + 1), **seg_stats})
+            print(
+                f"Frame {t_index + 1:02d}: "
+                f"{int(seg_stats['n_components'])} components, "
+                f"high_thr={seg_stats['high_threshold']:.3f}, "
+                f"low_thr={seg_stats['low_threshold']:.3f}"
+            )
+        local_stack_tzyx = np.stack(local_labels, axis=0).astype(np.uint32, copy=False)
+        tracked_labels_tzyx, gt_tracks_df, tracking_stats_df = assign_tracks(local_stack_tzyx)
+        segmentation_df = pd.DataFrame(segmentation_rows)
+        summary_df = segmentation_df.merge(tracking_stats_df, on="Time", how="left")
+        label_tif_path = save_tracked_label_tiff(tracked_labels_tzyx, OUTPUT_DIR / f"{INPUT_TIF.stem}_tracked_labels.tif")
+        gt_imaris_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_groundtruth_imaris.csv"
+        summary_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_segmentation_tracking_summary.csv"
+
     matched_overview_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_matched_raw_frames_0_99_199.pdf"
     matched_overlay_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_matched_segmented_overlay_frames_0_99_199.pdf"
 
@@ -3366,8 +3489,7 @@ def main() -> None:
         association_root=association_root,
         out_root=drift_root,
         dataset_label=dataset_label,
-        regime_name=regime_name,
-    )
+        regime_name=regime_name)
     regime_analysis_dir = regime_dir / "gt_pca_driftcorr_analysis"
     regime_analysis_paths = run_observed_summary_analysis(
         gt_tracks_df=gt_tracks_df,

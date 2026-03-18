@@ -2001,13 +2001,135 @@ def run_statistical_test(values_gt: np.ndarray, values_pca: np.ndarray, paired: 
     return result
 
 
-def annotate_pvalue(ax: Any, x0: float, x1: float, y: float, p_value: float) -> None:
+def annotate_pvalue(ax: Any, x0: float, x1: float, y: float, p_value: float, fontsize=8) -> None:
     """Draw a simple significance bracket with a p-value label."""
     if not np.isfinite(p_value):
         return
     h = max(0.02 * max(y, 1.0), 0.1)
     ax.plot([x0, x0, x1, x1], [y, y + h, y + h, y], color="black", linewidth=1.0)
-    ax.text(0.5 * (x0 + x1), y + h, f"p={p_value:.3f}", ha="center", va="bottom", fontsize=8)
+    ax.text(0.5 * (x0 + x1), y + h, f"p={p_value:.3f}", ha="center", va="bottom", fontsize=fontsize)
+
+
+def holm_bonferroni(p_values: list[float]) -> list[float]:
+    """Apply Holm-Bonferroni correction to a list of p-values."""
+    if not p_values:
+        return []
+    arr = np.asarray(p_values, dtype=np.float64)
+    order = np.argsort(arr)
+    adjusted = np.empty_like(arr)
+    m = len(arr)
+    running_max = 0.0
+    for rank, idx in enumerate(order):
+        adj = float(arr[idx]) * float(m - rank)
+        running_max = max(running_max, adj)
+        adjusted[idx] = min(running_max, 1.0)
+    return adjusted.tolist()
+
+
+def run_three_group_statistical_analysis(
+    groups: dict[str, np.ndarray],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Run normality-aware omnibus and post-hoc statistics for three groups."""
+    clean_groups: dict[str, np.ndarray] = {}
+    normality_rows: list[dict[str, Any]] = []
+
+    def _shapiro_safe(arr: np.ndarray) -> float:
+        if arr.size < 3 or arr.size > 5000 or np.allclose(arr, arr[0]):
+            return np.nan
+        try:
+            return float(sstats.shapiro(arr).pvalue)
+        except Exception:
+            return np.nan
+
+    for name, values in groups.items():
+        arr = np.asarray(values, dtype=np.float64)
+        arr = arr[np.isfinite(arr)]
+        clean_groups[name] = arr
+        normality_rows.append(
+            {
+                "row_type": "normality",
+                "group": str(name),
+                "n": int(arr.size),
+                "normality_test": "shapiro",
+                "normality_p_value": _shapiro_safe(arr),
+            }
+        )
+
+    analyzable = {name: arr for name, arr in clean_groups.items() if arr.size > 0}
+    omnibus_row: dict[str, Any] = {
+        "row_type": "omnibus",
+        "groups": ",".join(analyzable.keys()),
+        "global_test": "not_applicable",
+        "global_p_value": np.nan,
+        "all_groups_normal": False,
+    }
+    pairwise_rows: list[dict[str, Any]] = []
+    if len(analyzable) < 2:
+        return omnibus_row, [*normality_rows]
+
+    all_normal = all(
+        np.isfinite(row["normality_p_value"]) and float(row["normality_p_value"]) > 0.05
+        for row in normality_rows
+        if row["group"] in analyzable
+    )
+    omnibus_row["all_groups_normal"] = bool(all_normal)
+    arrays = [arr for arr in analyzable.values()]
+    if all_normal and all(arr.size >= 2 for arr in arrays):
+        try:
+            omnibus = sstats.f_oneway(*arrays)
+            omnibus_row["global_test"] = "one_way_anova"
+            omnibus_row["global_p_value"] = float(omnibus.pvalue)
+        except Exception:
+            pass
+    elif all(arr.size >= 2 for arr in arrays):
+        try:
+            omnibus = sstats.kruskal(*arrays)
+            omnibus_row["global_test"] = "kruskal_wallis"
+            omnibus_row["global_p_value"] = float(omnibus.pvalue)
+        except Exception:
+            pass
+
+    raw_pairwise_p: list[float] = []
+    pair_indices: list[tuple[str, str]] = []
+    names = list(analyzable.keys())
+    for idx_a in range(len(names)):
+        for idx_b in range(idx_a + 1, len(names)):
+            name_a = names[idx_a]
+            name_b = names[idx_b]
+            arr_a = analyzable[name_a]
+            arr_b = analyzable[name_b]
+            if arr_a.size < 2 or arr_b.size < 2:
+                p_val = np.nan
+                test_used = "not_applicable"
+            elif all_normal:
+                test = sstats.ttest_ind(arr_a, arr_b, equal_var=False, nan_policy="omit")
+                p_val = float(test.pvalue)
+                test_used = "welch_t_test"
+            else:
+                test = sstats.mannwhitneyu(arr_a, arr_b, alternative="two-sided")
+                p_val = float(test.pvalue)
+                test_used = "mann_whitney_u"
+            raw_pairwise_p.append(p_val)
+            pair_indices.append((name_a, name_b, test_used))
+
+    finite_ps = [float(p) for p in raw_pairwise_p if np.isfinite(p)]
+    adjusted_finite = holm_bonferroni(finite_ps)
+    finite_iter = iter(adjusted_finite)
+    for (name_a, name_b, test_used), raw_p in zip(pair_indices, raw_pairwise_p):
+        adj_p = float(next(finite_iter)) if np.isfinite(raw_p) else np.nan
+        pairwise_rows.append(
+            {
+                "row_type": "pairwise",
+                "group_a": str(name_a),
+                "group_b": str(name_b),
+                "pairwise_test": str(test_used),
+                "raw_p_value": float(raw_p) if np.isfinite(raw_p) else np.nan,
+                "adjustment": "holm_bonferroni",
+                "adjusted_p_value": adj_p,
+            }
+        )
+
+    return omnibus_row, [*normality_rows, *pairwise_rows]
 
 
 def plot_two_group_bar(
@@ -2094,7 +2216,7 @@ def plot_birth_death_bars(
     other_counts: pd.DataFrame,
     out_path: Path,
     stats_csv_path: Path,
-    group_labels: tuple[str, str] = ("GT", "PCA"),
+    group_labels: tuple[str, str] = ("Segm.", "PCA"),
     show_title: bool = True,
     figsize: tuple[float, float] = (10.0 * CM, 4.2 * CM)) -> None:
     """Plot births/deaths GT vs PCA as mean-per-frame bars with SEM and paired tests."""
@@ -2137,7 +2259,9 @@ def plot_birth_death_bars(
         stats_row["comparison"] = metric
         rows.append(stats_row)
         ymax = max([m + s for m, s in zip(means, sems)] + ([float(np.max(gt))] if gt.size else [0.0]) + ([float(np.max(other))] if other.size else [0.0]))
-        annotate_pvalue(ax, 0.0, 1.0, max(ymax * 1.03, 0.5), float(stats_row["p_value"]) if np.isfinite(stats_row["p_value"]) else np.nan)
+        annotate_pvalue(ax, 0.0, 1.0, max(ymax * 1.03, 0.5), 
+                        float(stats_row["p_value"]) if np.isfinite(stats_row["p_value"]) else np.nan,
+                        fontsize=8)
         ax.set_xticks(x)
         ax.set_xticklabels([str(group_labels[0]), str(group_labels[1])])
         if show_title:
@@ -2839,7 +2963,7 @@ def plot_three_group_count_bars(
     pca_migrating: int,
     driftcorr_migrating: int,
     out_path: Path,
-) -> Path:
+    show_title: bool = True) -> Path:
     """Plot grouped bars for unique, stationary and migrating track counts."""
     categories = ["unique tracks", "stationary cells", "migrating cells"]
     gt_vals = [float(gt_unique), float(gt_stationary), float(gt_migrating)]
@@ -2847,15 +2971,23 @@ def plot_three_group_count_bars(
     drift_vals = [float(driftcorr_unique), float(driftcorr_stationary), float(driftcorr_migrating)]
     x = np.arange(len(categories), dtype=np.float64)
     width = 0.24
-    fig, ax = plt.subplots(figsize=(8.5 * CM, 4.8 * CM))
-    ax.bar(x - width, gt_vals, width=width, color="#4C72B0", alpha=0.85, label="GT")
+    fig, ax = plt.subplots(figsize=(6.5 * CM, 3.0 * CM))
+    ax.bar(x - width, gt_vals, width=width, color="#4C72B0", alpha=0.85, label="Segmented")
     ax.bar(x, pca_vals, width=width, color="#DD8452", alpha=0.85, label="PCA")
     ax.bar(x + width, drift_vals, width=width, color="#55A868", alpha=0.85, label="DriftCorr")
+    
+    # on top of each bar, add the count value as text:
+    """ for i in range(len(categories)):
+        ax.text(x[i] - width, gt_vals[i], f"{int(gt_vals[i])}", ha="center", va="bottom", fontsize=5)
+        ax.text(x[i], pca_vals[i], f"{int(pca_vals[i])}", ha="center", va="bottom", fontsize=5)
+        ax.text(x[i] + width, drift_vals[i], f"{int(drift_vals[i])}", ha="center", va="bottom", fontsize=5) """
+    
     ax.set_xticks(x)
-    ax.set_xticklabels(categories)
+    ax.set_xticklabels(["unique", "stationary", "migrating"])
     ax.set_ylabel("tracks")
     ax.set_ylim(bottom=0.0)
-    ax.set_title("Track-count summary")
+    if show_title:
+        ax.set_title("Track-count summary", fontsize=8)
     ax.legend(frameon=False, fontsize=7)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2870,6 +3002,7 @@ def plot_average_displacement_histogram_threeway(
     driftcorr_avg_disp: pd.DataFrame,
     threshold: float,
     out_path: Path,
+    show_title: bool = True,
 ) -> Path:
     """Overlay histograms of mean step displacement for GT, PCA and drift-corrected tracks."""
     arrays = [
@@ -2879,17 +3012,18 @@ def plot_average_displacement_histogram_threeway(
     ]
     max_val = max([float(np.max(arr)) if arr.size else 0.0 for arr in arrays] + [float(threshold), 1.0])
     bins = np.linspace(0.0, max_val * 1.05, 24)
-    fig, ax = plt.subplots(figsize=(8.2 * CM, 4.8 * CM))
-    labels_colors = [("GT", "#4C72B0"), ("PCA", "#DD8452"), ("DriftCorr", "#55A868")]
+    fig, ax = plt.subplots(figsize=(6.2 * CM, 3.5 * CM))
+    labels_colors = [("Segmented", "#4C72B0"), ("PCA", "#DD8452"), ("DriftCorr", "#55A868")]
     for arr, (label, color) in zip(arrays, labels_colors):
         if arr.size:
             ax.hist(arr, bins=bins, alpha=0.35, color=color, label=label)
-    ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"threshold={threshold:.3f}")
+    ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"migration\nthreshold={threshold:.3f}")
     ax.set_xlabel("average step displacement")
     ax.set_ylabel("tracks")
     ax.set_xlim(left=0.0)
     ax.set_ylim(bottom=0.0)
-    ax.set_title("Average displacement histogram")
+    if show_title:
+        ax.set_title("Average displacement histogram", fontsize=8)
     ax.legend(frameon=False, fontsize=7)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2902,9 +3036,13 @@ def plot_motion_class_average_displacement_threeway(
     gt_class_df: pd.DataFrame,
     pca_class_df: pd.DataFrame,
     driftcorr_class_df: pd.DataFrame,
-    out_path: Path) -> Path:
+    out_path: Path,
+    stats_csv_path: Path | None = None,
+    group_labels: tuple[str, str, str] = ("GT", "PCA", "DriftCorr"),
+) -> Path:
     """Plot average displacement for stationary vs migrating tracks across GT/PCA/driftcorr."""
-    fig, axes = plt.subplots(1, 2, figsize=(10.0 * CM, 4.6 * CM), sharey=False)
+    stats_rows: list[dict[str, Any]] = []
+    fig, axes = plt.subplots(1, 2, figsize=(9.0 * CM, 3.6 * CM), sharey=False)
     for ax, motion_class, title in zip(axes, ["stationary", "migrating"], ["Stationary", "Migrating"]):
         groups = [
             pd.to_numeric(gt_class_df.loc[gt_class_df["motion_class"] == motion_class, "mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
@@ -2915,6 +3053,35 @@ def plot_motion_class_average_displacement_threeway(
         medians = [float(np.median(arr)) if arr.size else 0.0 for arr in groups]
         sems = [sem_or_zero(arr) for arr in groups]
         x = np.arange(3, dtype=np.float64)
+        group_map = {
+            str(group_labels[0]): groups[0],
+            str(group_labels[1]): groups[1],
+            str(group_labels[2]): groups[2],
+        }
+        omnibus_row, test_rows = run_three_group_statistical_analysis(group_map)
+        stats_rows.append(
+            {
+                "motion_class": str(motion_class),
+                "row_type": "summary",
+                "groups": ",".join(group_map.keys()),
+                "global_test": omnibus_row.get("global_test", "not_applicable"),
+                "global_p_value": omnibus_row.get("global_p_value", np.nan),
+                "all_groups_normal": omnibus_row.get("all_groups_normal", False),
+            }
+        )
+        for label, arr, mean_val, median_val, sem_val in zip(group_labels, groups, means, medians, sems):
+            stats_rows.append(
+                {
+                    "motion_class": str(motion_class),
+                    "row_type": "group_summary",
+                    "group": str(label),
+                    "n": int(arr.size),
+                    "mean": float(mean_val),
+                    "median": float(median_val),
+                    "sem": float(sem_val),
+                }
+            )
+        stats_rows.extend([{**row, "motion_class": str(motion_class)} for row in [omnibus_row, *test_rows]])
         #ax.bar(x, means, yerr=sems, capsize=4, color=["#4C72B0", "#DD8452", "#55A868"], alpha=0.85, width=0.65)
         # --- Violin plot ---
         vp = ax.violinplot(
@@ -2953,14 +3120,33 @@ def plot_motion_class_average_displacement_threeway(
             #ax.scatter(xi, mean, s=14, color=color, zorder=6)
             ax.scatter(xi, median, s=14, color=color, zorder=6)
         ax.set_xticks(x)
-        ax.set_xticklabels(["GT", "PCA", "DriftCorr"])
-        ax.set_title(title)
-        ax.set_ylabel("average step displacement")
+        ax.set_xticklabels(list(("Segm.", "PCA", "DriftCorr")))
+        ax.set_title(title, fontsize=8)
+        ax.set_ylabel("average step\ndisplacement")
         ax.set_ylim(bottom=0.0)
+        data_max = max([float(np.max(arr)) if arr.size else 0.0 for arr in groups] + [0.0])
+        data_span = data_max if data_max > 0.0 else 1.0
+        pairwise_rows = [row for row in test_rows if row.get("row_type") == "pairwise"]
+        pair_lookup = {
+            (str(row.get("group_a")), str(row.get("group_b"))): float(row.get("adjusted_p_value", np.nan))
+            for row in pairwise_rows}
+        annotation_specs = [
+            (0.0, 1.0, pair_lookup.get((str(group_labels[0]), str(group_labels[1])), np.nan)),
+            (1.0, 2.0, pair_lookup.get((str(group_labels[1]), str(group_labels[2])), np.nan)),
+            (0.0, 2.0, pair_lookup.get((str(group_labels[0]), str(group_labels[2])), np.nan))]
+        base_y = data_max + 0.08 * data_span
+        step_y = 0.26 * data_span
+        for idx, (x0, x1, p_value) in enumerate(annotation_specs):
+            if np.isfinite(p_value):
+                annotate_pvalue(ax, x0, x1, base_y + idx * step_y, float(p_value), fontsize=7.5)
+        ax.set_ylim(top=base_y + max(len(annotation_specs) - 1, 0) * step_y + 0.18 * data_span)
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
+    if stats_csv_path is not None:
+        stats_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(stats_rows).to_csv(stats_csv_path, index=False)
     return out_path
 
 
@@ -2996,7 +3182,7 @@ def run_observed_summary_analysis(
     pca_unique = int(pd.to_numeric(pca_tracks_df["TrackID"], errors="coerce").dropna().nunique())
     driftcorr_unique = int(pd.to_numeric(driftcorr_tracks_df["TrackID"], errors="coerce").dropna().nunique())
     unique_counts_plot = out_dir / "gt_vs_pca_unique_cell_counts.pdf"
-    plot_total_count_bars(gt_unique, pca_unique, title="Total unique cells over all frames", ylabel="unique tracks", out_path=unique_counts_plot)
+    #plot_total_count_bars(gt_unique, pca_unique, title="Total unique cells over all frames", ylabel="unique tracks", out_path=unique_counts_plot)
 
     gt_birthdeath = compute_birth_death_counts_by_time(gt_tracks_df)
     pca_birthdeath = compute_birth_death_counts_by_time(pca_tracks_df)
@@ -3023,8 +3209,7 @@ def run_observed_summary_analysis(
         gt_migrating=int((gt_class["motion_class"] == "migrating").sum()),
         pca_migrating=int((pca_class["motion_class"] == "migrating").sum()),
         driftcorr_migrating=int((driftcorr_class["motion_class"] == "migrating").sum()),
-        out_path=three_bar_plot,
-    )
+        out_path=three_bar_plot, show_title=False)
 
     histogram_plot = out_dir / "gt_pca_driftcorr_average_displacement_histogram.pdf"
     plot_average_displacement_histogram_threeway(
@@ -3032,16 +3217,16 @@ def run_observed_summary_analysis(
         pca_avg_disp=pca_avg_disp,
         driftcorr_avg_disp=driftcorr_avg_disp,
         threshold=threshold,
-        out_path=histogram_plot,
-    )
+        out_path=histogram_plot, show_title=False)
 
     motion_bar_plot = out_dir / "gt_pca_driftcorr_average_displacement_stationary_vs_migrating.pdf"
+    motion_bar_stats = out_dir / "gt_pca_driftcorr_average_displacement_stationary_vs_migrating_stats.csv"
     plot_motion_class_average_displacement_threeway(
         gt_class_df=gt_class,
         pca_class_df=pca_class,
         driftcorr_class_df=driftcorr_class,
         out_path=motion_bar_plot,
-    )
+        stats_csv_path=motion_bar_stats)
 
     summary_csv = out_dir / "gt_pca_driftcorr_summary.csv"
     pd.DataFrame(

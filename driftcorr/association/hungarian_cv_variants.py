@@ -88,7 +88,13 @@ def _build_result(
     assignments_by_t: list[dict[str, Any]],
     params: dict[str, Any],
 ) -> AssociationResult:
-    tracks_df, links_df, frame_stats_df = link_assignments_to_tracks(frames, assignments_by_t, allow_birth_death=True, max_gap=0)
+    max_gap = int(params.get("max_gap", params.get("max_frame_gap", 0)))
+    tracks_df, links_df, frame_stats_df = link_assignments_to_tracks(
+        frames,
+        assignments_by_t,
+        allow_birth_death=True,
+        max_gap=max_gap,
+    )
     links_df = score_links_df(links_df)
     quality = global_association_metrics(tracks_df, links_df, frame_stats_df)
     quality["n_tracks"] = float(tracks_df["TrackID"].nunique()) if "TrackID" in tracks_df.columns and not tracks_df.empty else 0.0

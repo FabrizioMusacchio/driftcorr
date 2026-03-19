@@ -696,6 +696,7 @@ def style_benchmark_3d_axis(
     xyz: np.ndarray,
     title: str,
     add_equal_box: bool = True,
+    set_xylim: bool = True,
 ) -> None:
     """Style a single 3D axis to match the compact benchmark panel appearance."""
     (xlim, ylim, zlim) = compute_xyz_limits(xyz)
@@ -703,9 +704,10 @@ def style_benchmark_3d_axis(
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
-    ax.set_xlim(*xlim)
-    ax.set_ylim(*ylim)
-    ax.set_zlim(*zlim)
+    if set_xylim:
+        ax.set_xlim(*xlim)
+        ax.set_ylim(*ylim)
+        ax.set_zlim(*zlim)
     ax.view_init(elev=25, azim=-60)
     ax.set_position([0.1, 0.1, 0.7, 0.8])
     ax.tick_params(axis="both", which="major", pad=-3, labelsize=6)
@@ -717,7 +719,13 @@ def style_benchmark_3d_axis(
 
 
 def plot_tracks_3d(df: pd.DataFrame, out_path: Path, title: str) -> None:
-    """Plot one 3D trajectory line per TrackID using benchmark-style single panels."""
+    """Plot one 3D trajectory line per TrackID using benchmark-style single panels.
+    
+    DEBUG:
+    df = regime_tracks_df
+    out_path = regime_tracks_plot 
+    title=str(regime_cfg["plot_title"])
+    """
     fig = plt.figure(figsize=(6.0 * CM, 6.0 * CM), constrained_layout=True)
     ax = fig.add_subplot(111, projection="3d")
 
@@ -735,10 +743,9 @@ def plot_tracks_3d(df: pd.DataFrame, out_path: Path, title: str) -> None:
             track["Position Z"].to_numpy(float),
             color=color,
             linewidth=1.0,
-            alpha=0.8,
-        )
+            alpha=0.8)
 
-    style_benchmark_3d_axis(ax, xyz_all, title=title)
+    style_benchmark_3d_axis(ax, xyz_all, title=title, set_xylim=False)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
@@ -1607,6 +1614,128 @@ def annotate_pvalue(ax: Any, x0: float, x1: float, y: float, p_value: float) -> 
     ax.text(0.5 * (x0 + x1), y + h, f"p={p_value:.3f}", ha="center", va="bottom", fontsize=8)
 
 
+def holm_bonferroni(p_values: list[float]) -> list[float]:
+    """Apply Holm-Bonferroni correction to a list of p-values."""
+    if not p_values:
+        return []
+    arr = np.asarray(p_values, dtype=np.float64)
+    order = np.argsort(arr)
+    adjusted = np.empty_like(arr)
+    m = len(arr)
+    running_max = 0.0
+    for rank, idx in enumerate(order):
+        adj = float(arr[idx]) * float(m - rank)
+        running_max = max(running_max, adj)
+        adjusted[idx] = min(running_max, 1.0)
+    return adjusted.tolist()
+
+
+def run_three_group_statistical_analysis(
+    groups: dict[str, np.ndarray],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Run normality-aware omnibus and post-hoc statistics for three groups."""
+    clean_groups: dict[str, np.ndarray] = {}
+    normality_rows: list[dict[str, Any]] = []
+
+    def _shapiro_safe(arr: np.ndarray) -> float:
+        if arr.size < 3 or arr.size > 5000 or np.allclose(arr, arr[0]):
+            return np.nan
+        try:
+            return float(sstats.shapiro(arr).pvalue)
+        except Exception:
+            return np.nan
+
+    for name, values in groups.items():
+        arr = np.asarray(values, dtype=np.float64)
+        arr = arr[np.isfinite(arr)]
+        clean_groups[name] = arr
+        normality_rows.append(
+            {
+                "row_type": "normality",
+                "group": str(name),
+                "n": int(arr.size),
+                "normality_test": "shapiro",
+                "normality_p_value": _shapiro_safe(arr),
+            }
+        )
+
+    analyzable = {name: arr for name, arr in clean_groups.items() if arr.size > 0}
+    omnibus_row: dict[str, Any] = {
+        "row_type": "omnibus",
+        "groups": ",".join(analyzable.keys()),
+        "global_test": "not_applicable",
+        "global_p_value": np.nan,
+        "all_groups_normal": False,
+    }
+    pairwise_rows: list[dict[str, Any]] = []
+    if len(analyzable) < 2:
+        return omnibus_row, [*normality_rows]
+
+    all_normal = all(
+        np.isfinite(row["normality_p_value"]) and float(row["normality_p_value"]) > 0.05
+        for row in normality_rows
+        if row["group"] in analyzable
+    )
+    omnibus_row["all_groups_normal"] = bool(all_normal)
+    arrays = [arr for arr in analyzable.values()]
+    if all_normal and all(arr.size >= 2 for arr in arrays):
+        try:
+            omnibus = sstats.f_oneway(*arrays)
+            omnibus_row["global_test"] = "one_way_anova"
+            omnibus_row["global_p_value"] = float(omnibus.pvalue)
+        except Exception:
+            pass
+    elif all(arr.size >= 2 for arr in arrays):
+        try:
+            omnibus = sstats.kruskal(*arrays)
+            omnibus_row["global_test"] = "kruskal_wallis"
+            omnibus_row["global_p_value"] = float(omnibus.pvalue)
+        except Exception:
+            pass
+
+    raw_pairwise_p: list[float] = []
+    pair_indices: list[tuple[str, str, str]] = []
+    names = list(analyzable.keys())
+    for idx_a in range(len(names)):
+        for idx_b in range(idx_a + 1, len(names)):
+            name_a = names[idx_a]
+            name_b = names[idx_b]
+            arr_a = analyzable[name_a]
+            arr_b = analyzable[name_b]
+            if arr_a.size < 2 or arr_b.size < 2:
+                p_val = np.nan
+                test_used = "not_applicable"
+            elif all_normal:
+                test = sstats.ttest_ind(arr_a, arr_b, equal_var=False, nan_policy="omit")
+                p_val = float(test.pvalue)
+                test_used = "welch_t_test"
+            else:
+                test = sstats.mannwhitneyu(arr_a, arr_b, alternative="two-sided")
+                p_val = float(test.pvalue)
+                test_used = "mann_whitney_u"
+            raw_pairwise_p.append(p_val)
+            pair_indices.append((name_a, name_b, test_used))
+
+    finite_ps = [float(p) for p in raw_pairwise_p if np.isfinite(p)]
+    adjusted_finite = holm_bonferroni(finite_ps)
+    finite_iter = iter(adjusted_finite)
+    for (name_a, name_b, test_used), raw_p in zip(pair_indices, raw_pairwise_p):
+        adj_p = float(next(finite_iter)) if np.isfinite(raw_p) else np.nan
+        pairwise_rows.append(
+            {
+                "row_type": "pairwise",
+                "group_a": str(name_a),
+                "group_b": str(name_b),
+                "pairwise_test": str(test_used),
+                "raw_p_value": float(raw_p) if np.isfinite(raw_p) else np.nan,
+                "adjustment": "holm_bonferroni",
+                "adjusted_p_value": adj_p,
+            }
+        )
+
+    return omnibus_row, [*normality_rows, *pairwise_rows]
+
+
 def plot_two_group_bar(
     values_gt: np.ndarray,
     values_other: np.ndarray,
@@ -1829,6 +1958,165 @@ def plot_average_displacement_histogram(
     plt.close(fig)
 
 
+def plot_average_displacement_histogram_threeway(
+    gt_avg_disp: pd.DataFrame,
+    pca_avg_disp: pd.DataFrame,
+    driftcorr_avg_disp: pd.DataFrame,
+    threshold: float,
+    out_path: Path,
+    show_title: bool = True,
+) -> Path:
+    """Overlay histograms of mean step displacement for CCA, PCA and drift-corrected tracks."""
+    arrays = [
+        pd.to_numeric(gt_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
+        pd.to_numeric(pca_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
+        pd.to_numeric(driftcorr_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
+    ]
+    max_val = max([float(np.max(arr)) if arr.size else 0.0 for arr in arrays] + [float(threshold), 1.0])
+    bins = np.linspace(0.0, max_val * 1.05, 24)
+    fig, ax = plt.subplots(figsize=(6.2 * CM, 3.5 * CM))
+    labels_colors = [("CCA", "#4C72B0"), ("PCA", "#DD8452"), ("DriftCorr", "#55A868")]
+    for arr, (label, color) in zip(arrays, labels_colors):
+        if arr.size:
+            ax.hist(arr, bins=bins, alpha=0.35, color=color, label=label)
+    ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"migration\nthreshold={threshold:.3f}")
+    ax.set_xlabel("average step displacement")
+    ax.set_ylabel("tracks")
+    ax.set_xlim(left=0.0)
+    ax.set_ylim(bottom=0.0)
+    if show_title:
+        ax.set_title("Average displacement histogram", fontsize=8)
+    ax.legend(frameon=False, fontsize=7)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+    return out_path
+
+
+def plot_motion_class_average_displacement_threeway(
+    gt_class_df: pd.DataFrame,
+    pca_class_df: pd.DataFrame,
+    driftcorr_class_df: pd.DataFrame,
+    out_path: Path,
+    stats_csv_path: Path | None = None,
+    group_labels: tuple[str, str, str] = ("CCA", "PCA", "DriftCorr"),
+) -> Path:
+    """Plot average displacement for stationary vs migrating tracks across CCA/PCA/driftcorr."""
+    stats_rows: list[dict[str, Any]] = []
+    fig, axes = plt.subplots(1, 2, figsize=(9.0 * CM, 3.6 * CM), sharey=False)
+    for ax, motion_class, title in zip(axes, ["stationary", "migrating"], ["Stationary", "Migrating"]):
+        groups = [
+            pd.to_numeric(gt_class_df.loc[gt_class_df["motion_class"] == motion_class, "mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
+            pd.to_numeric(pca_class_df.loc[pca_class_df["motion_class"] == motion_class, "mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
+            pd.to_numeric(driftcorr_class_df.loc[driftcorr_class_df["motion_class"] == motion_class, "mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
+        ]
+        means = [float(np.mean(arr)) if arr.size else 0.0 for arr in groups]
+        medians = [float(np.median(arr)) if arr.size else 0.0 for arr in groups]
+        sems = [sem_or_zero(arr) for arr in groups]
+        x = np.arange(3, dtype=np.float64)
+        group_map = {
+            str(group_labels[0]): groups[0],
+            str(group_labels[1]): groups[1],
+            str(group_labels[2]): groups[2],
+        }
+        omnibus_row, test_rows = run_three_group_statistical_analysis(group_map)
+        stats_rows.append(
+            {
+                "motion_class": str(motion_class),
+                "row_type": "summary",
+                "groups": ",".join(group_map.keys()),
+                "global_test": omnibus_row.get("global_test", "not_applicable"),
+                "global_p_value": omnibus_row.get("global_p_value", np.nan),
+                "all_groups_normal": omnibus_row.get("all_groups_normal", False),
+            }
+        )
+        for label, arr, mean_val, median_val, sem_val in zip(group_labels, groups, means, medians, sems):
+            stats_rows.append(
+                {
+                    "motion_class": str(motion_class),
+                    "row_type": "group_summary",
+                    "group": str(label),
+                    "n": int(arr.size),
+                    "mean": float(mean_val),
+                    "median": float(median_val),
+                    "sem": float(sem_val),
+                }
+            )
+        stats_rows.extend([{**row, "motion_class": str(motion_class)} for row in [omnibus_row, *test_rows]])
+
+        # ax.bar(
+        #     x,
+        #     means,
+        #     yerr=sems,
+        #     capsize=4,
+        #     color=["#4C72B0", "#DD8452", "#55A868"],
+        #     alpha=0.85,
+        #     width=0.65,
+        #     zorder=2,
+        # )
+        # rng = np.random.default_rng(0)
+        # for idx, arr, color in zip(x.tolist(), groups, ["#1f3552", "#7a3d14", "#1d5f34"]):
+        #     if arr.size:
+        #         jitter = rng.uniform(-0.08, 0.08, size=arr.size)
+        #         ax.scatter(np.full(arr.size, idx) + jitter, arr, s=10, color=color, alpha=0.7, zorder=3, lw=0)
+        # for xi, mean_val, sem_val, color in zip(x, means, sems, ["#0b1f33", "#4a2208", "#10351d"]):
+        #     ax.errorbar(xi, mean_val, yerr=sem_val, fmt="none", ecolor=color, elinewidth=1.25, capsize=4, capthick=1.25, zorder=5)
+        #     ax.scatter(xi, mean_val, s=14, color=color, zorder=6)
+
+        vp = ax.violinplot(
+            groups,
+            positions=x,
+            widths=0.65,
+            showmeans=False,
+            showmedians=True,
+            showextrema=False,
+        )
+        violin_colors = ["#4C72B0", "#DD8452", "#55A868"]
+        for body, color in zip(vp["bodies"], violin_colors):
+            body.set_facecolor(color)
+            body.set_edgecolor("none")
+            body.set_linewidth(0)
+            body.set_alpha(0.6)
+            body.set_zorder(1)
+        for xi, median_val, color in zip(x, medians, ["#0b1f33", "#4a2208", "#10351d"]):
+            ax.scatter(xi, median_val, s=14, color=color, zorder=6)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(list(group_labels))
+        ax.set_title(title, fontsize=8)
+        ax.set_ylabel("average step\ndisplacement")
+
+        data_max = max([float(np.max(arr)) if arr.size else 0.0 for arr in groups] + [0.0])
+        data_span = data_max if data_max > 0.0 else 1.0
+        pairwise_rows = [row for row in test_rows if row.get("row_type") == "pairwise"]
+        pair_lookup = {
+            (str(row.get("group_a")), str(row.get("group_b"))): float(row.get("adjusted_p_value", np.nan))
+            for row in pairwise_rows
+        }
+        annotation_specs = [
+            (0.0, 1.0, pair_lookup.get((str(group_labels[0]), str(group_labels[1])), np.nan)),
+            (1.0, 2.0, pair_lookup.get((str(group_labels[1]), str(group_labels[2])), np.nan)),
+            (0.0, 2.0, pair_lookup.get((str(group_labels[0]), str(group_labels[2])), np.nan)),
+        ]
+        base_y = data_max + 0.08 * data_span
+        step_y = 0.26 * data_span
+        for idx, (x0, x1, p_value) in enumerate(annotation_specs):
+            if np.isfinite(p_value):
+                annotate_pvalue(ax, x0, x1, base_y + idx * step_y, float(p_value))
+        top_margin = 0.08 if motion_class == "migrating" else 0.18
+        ax.set_ylim(bottom=0, top=base_y + max(len(annotation_specs) - 1, 0) * step_y + top_margin * data_span)
+
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+    if stats_csv_path is not None:
+        stats_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(stats_rows).to_csv(stats_csv_path, index=False)
+    return out_path
+
+
 def run_regime_summary_analysis(
     gt_tracks_df: pd.DataFrame,
     association_root: Path,
@@ -1886,37 +2174,25 @@ def run_regime_summary_analysis(
         show_title=False,
     )
 
-    hist_plot = out_dir / "gt_vs_driftcorr_average_displacement_histogram.pdf"
-    plot_average_displacement_histogram(
-        gt_avg_disp, driftcorr_avg_disp, threshold=threshold,
-        out_path=hist_plot, group_labels=("CCA", "DriftCorr"),
-        show_title=False, figsize=(6.2 * CM, 3.5 * CM))
+    hist_plot = out_dir / "gt_pca_driftcorr_average_displacement_histogram.pdf"
+    plot_average_displacement_histogram_threeway(
+        gt_avg_disp=gt_avg_disp,
+        pca_avg_disp=pca_avg_disp,
+        driftcorr_avg_disp=driftcorr_avg_disp,
+        threshold=threshold,
+        out_path=hist_plot,
+        show_title=False,
+    )
 
-    stationary_bar = out_dir / "gt_vs_driftcorr_stationary_average_displacement.pdf"
-    stationary_stats = out_dir / "gt_vs_driftcorr_stationary_average_displacement_stats.csv"
-    plot_two_group_bar(
-        gt_class.loc[gt_class["motion_class"] == "stationary", "mean_step_displacement"].to_numpy(np.float64),
-        driftcorr_class.loc[driftcorr_class["motion_class"] == "stationary", "mean_step_displacement"].to_numpy(np.float64),
-        title="Average displacement of stationary cells",
-        ylabel="average step\ndisplacement",
-        out_path=stationary_bar,
-        stats_csv_path=stationary_stats,
-        paired=False,
-        group_labels=("CCA", "DriftCorr"),
-        show_title=False, figsize=(3.0 * CM, 3.0 * CM))
-
-    migrating_bar = out_dir / "gt_vs_driftcorr_migrating_average_displacement.pdf"
-    migrating_stats = out_dir / "gt_vs_driftcorr_migrating_average_displacement_stats.csv"
-    plot_two_group_bar(
-        gt_class.loc[gt_class["motion_class"] == "migrating", "mean_step_displacement"].to_numpy(np.float64),
-        driftcorr_class.loc[driftcorr_class["motion_class"] == "migrating", "mean_step_displacement"].to_numpy(np.float64),
-        title="Average displacement of migrating cells",
-        ylabel="average step\ndisplacement",
-        out_path=migrating_bar,
-        stats_csv_path=migrating_stats,
-        paired=False,
-        group_labels=("CCA", "DriftCorr"),
-        show_title=False, figsize=(3.0 * CM, 3.0 * CM))
+    motion_bar_plot = out_dir / "gt_pca_driftcorr_average_displacement_stationary_vs_migrating.pdf"
+    motion_bar_stats = out_dir / "gt_pca_driftcorr_average_displacement_stationary_vs_migrating_stats.csv"
+    plot_motion_class_average_displacement_threeway(
+        gt_class_df=gt_class,
+        pca_class_df=pca_class,
+        driftcorr_class_df=driftcorr_class,
+        out_path=motion_bar_plot,
+        stats_csv_path=motion_bar_stats,
+    )
 
     summary_csv = out_dir / "gt_vs_pca_regime_summary.csv"
     pd.DataFrame(
@@ -1942,10 +2218,8 @@ def run_regime_summary_analysis(
         "birthdeath_stats": birthdeath_stats,
         "three_bar_plot": three_bar_plot,
         "histogram_plot": hist_plot,
-        "stationary_bar_plot": stationary_bar,
-        "stationary_stats": stationary_stats,
-        "migrating_bar_plot": migrating_bar,
-        "migrating_stats": migrating_stats,
+        "motion_bar_plot": motion_bar_plot,
+        "motion_bar_stats": motion_bar_stats,
         "summary_csv": summary_csv,
     }
 
@@ -2282,8 +2556,7 @@ def run_blind_point_cloud_association_suite(
             inferred_tracks_df=assoc.tracks_df,
             point_to_gt_df=unblinding_df,
             links_df=assoc.links_df,
-            gt_tracks_df=gt_tracks_with_pointindex,
-        )
+            gt_tracks_df=gt_tracks_with_pointindex)
         accuracy_df = compute_accuracy_over_time_table(gt_tracks_with_pointindex, assoc.tracks_df)
         accuracy_path = method_dir / f"{method_name}_accuracy_over_time.pdf"
         rms_path = method_dir / f"{method_name}_rms_over_time.pdf"
@@ -2377,18 +2650,14 @@ def main() -> None:
             f"Frame {t_index + 1:02d}: "
             f"{int(seg_stats['n_components'])} components, "
             f"high_thr={seg_stats['high_threshold']:.3f}, "
-            f"low_thr={seg_stats['low_threshold']:.3f}"
-        )
+            f"low_thr={seg_stats['low_threshold']:.3f}")
 
     local_stack_tzyx = np.stack(local_labels, axis=0).astype(np.uint32, copy=False)
     tracked_labels_tzyx, gt_tracks_df, tracking_stats_df = assign_tracks(local_stack_tzyx)
     segmentation_df = pd.DataFrame(segmentation_rows)
     summary_df = segmentation_df.merge(tracking_stats_df, on="Time", how="left")
 
-    label_tif_path = save_tracked_label_tiff(
-        tracked_labels_tzyx,
-        OUTPUT_DIR / f"{INPUT_TIF.stem}_tracked_labels.tif",
-    )
+    label_tif_path = save_tracked_label_tiff(tracked_labels_tzyx, OUTPUT_DIR / f"{INPUT_TIF.stem}_tracked_labels.tif")
     gt_imaris_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_groundtruth_imaris.csv"
     summary_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_segmentation_tracking_summary.csv"
 
@@ -2397,8 +2666,7 @@ def main() -> None:
     qc_paths = save_qc_overlay_frames(
         raw_stack_tzyx=stack_tzyx,
         labels_tzyx=tracked_labels_tzyx,
-        out_dir=OUTPUT_DIR / "qc_overlays",
-    )
+        out_dir=OUTPUT_DIR / "qc_overlays")
 
     print()
     print("Common outputs:")
@@ -2409,7 +2677,7 @@ def main() -> None:
         print(f"  QC overlay: {qc_path}")
 
     for regime_cfg in DRIFT_REGIMES:
-        # regime_cfg = DRIFT_REGIMES[0]
+        # regime_cfg = DRIFT_REGIMES[1]
         regime_name = str(regime_cfg["name"])
         dataset_label = str(regime_cfg["dataset_label"])
         regime_dir = OUTPUT_DIR / regime_name
@@ -2422,10 +2690,10 @@ def main() -> None:
         regime_stem = f"{INPUT_TIF.stem}_{regime_name}"
         regime_imaris_path = regime_dir / f"{regime_stem}_imaris.csv"
         regime_no_trackid_path = regime_dir / f"{regime_stem}_imaris_no_trackid.csv"
-        regime_tracks_plot = regime_dir / f"{regime_stem}_tracks_3d.png"
+        regime_tracks_plot = regime_dir / f"{regime_stem}_tracks_3d.pdf"
         blind_path = regime_dir / f"{regime_stem}_blind.csv"
         unblinding_path = regime_dir / f"{regime_stem}_unblinding.csv"
-        blind_plot_path = regime_dir / f"{regime_stem}_blind_pointcloud_3d.png"
+        blind_plot_path = regime_dir / f"{regime_stem}_blind_pointcloud_3d.pdf"
 
         regime_tracks_df.to_csv(regime_imaris_path, index=False)
         regime_tracks_df.drop(columns=["TrackID"]).to_csv(regime_no_trackid_path, index=False)
@@ -2445,6 +2713,7 @@ def main() -> None:
             unblinding_df=unblinding_df,
             out_root=association_root,
             dataset_label=dataset_label)
+        
         drift_summary_df, drift_paths = run_drift_correction_suite(
             gt_tracks_df=gt_tracks_df,
             observed_df=regime_tracks_df,
@@ -2452,6 +2721,7 @@ def main() -> None:
             out_root=drift_root,
             dataset_label=dataset_label,
             regime_name=regime_name)
+        
         drift_gt_input_summary_df, drift_gt_input_paths = run_drift_correction_suite_gt_input(
             gt_tracks_df=gt_tracks_df,
             observed_df=regime_tracks_df,

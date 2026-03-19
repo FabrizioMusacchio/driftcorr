@@ -53,7 +53,7 @@ except ModuleNotFoundError as exc:
     raise ModuleNotFoundError(
         "This script requires `scipy`. Install it in your environment, then rerun."
     ) from exc
-# %% CONSTANTS AND PARAMETERS
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -83,7 +83,7 @@ from driftcorr.method_spacetime_rbf import apply_correction as apply_spacetime_c
 from driftcorr.method_spacetime_rbf import fit_spacetime_rbf_model
 from driftcorr.synthetic_experiments import save_groundtruth_evaluation_outputs
 from driftcorr.visualization import save_visual_inspection_plots
-
+# %% CONSTANTS AND PARAMETERS
 INPUT_TIF = (
     PROJECT_ROOT
     / "example_image_data"
@@ -120,6 +120,7 @@ IMARIS_UNIT = "px"
 VOXEL_SIZE_XYZ = (1.0, 1.0, 1.0)
 HCV_DEFAULT_KEEP_PERCENTILE = 99.0
 HCV_DEFAULT_MAX_DIST_FACTOR = 6.0
+PCA_MAX_FRAME_GAP = 5
 BEST_ASSOCIATION_METHOD = "hungarian_two_stage_nis_cv"
 OBSERVED_REGIME_NAME = "observed_raw"
 OBSERVED_DATASET_LABEL = "b1_04_2_1_dapi_observed_raw"
@@ -864,10 +865,15 @@ def plot_tracks_2d(
     cmap = plt.get_cmap("turbo")
     denom = max(len(track_ids) - 1, 1)
     xy_all = df[["Position X", "Position Y"]].to_numpy(np.float64)
+    
+    # define more distinct colors:
+    #rng = np.random.default_rng(42)
+    #colors = rng.random((len(track_ids), 3))  # RGB in [0,1]
 
     for idx, track_id in enumerate(track_ids.tolist()):
         track = df[df["TrackID"] == float(track_id)].sort_values("Time")
         color = cmap(idx / denom)
+        #color=colors[idx]
         ax.plot(
             track["Position X"].to_numpy(float),
             track["Position Y"].to_numpy(float),
@@ -1217,6 +1223,101 @@ def save_tracked_label_tiff(labels_tzyx: np.ndarray, out_path: Path) -> Path:
     return out_path
 
 
+def tracks_to_label_stack_tyx(
+    tracks_df: pd.DataFrame,
+    image_shape_tyx: tuple[int, int, int],
+    radius_px: int = 6,
+    use_corrected_columns: bool = False,
+) -> np.ndarray:
+    """Rasterize a track table into a TYX label stack using small filled centroid disks."""
+    n_t, height, width = [int(v) for v in image_shape_tyx]
+    labels = np.zeros((n_t, height, width), dtype=np.uint32)
+    df = tracks_df.copy()
+
+    x_col = "Position X_corr" if use_corrected_columns and "Position X_corr" in df.columns else "Position X"
+    y_col = "Position Y_corr" if use_corrected_columns and "Position Y_corr" in df.columns else "Position Y"
+    time_vals = pd.to_numeric(df.get("Time", np.nan), errors="coerce").to_numpy(np.float64)
+    x_vals = pd.to_numeric(df.get(x_col, np.nan), errors="coerce").to_numpy(np.float64)
+    y_vals = pd.to_numeric(df.get(y_col, np.nan), errors="coerce").to_numpy(np.float64)
+    track_ids = pd.to_numeric(df.get("TrackID", np.nan), errors="coerce").to_numpy(np.float64)
+    rr, cc = np.ogrid[-int(radius_px): int(radius_px) + 1, -int(radius_px): int(radius_px) + 1]
+    disk_mask = (rr * rr + cc * cc) <= int(radius_px) * int(radius_px)
+
+    for time_val, x_val, y_val, track_id in zip(time_vals.tolist(), x_vals.tolist(), y_vals.tolist(), track_ids.tolist()):
+        if not (np.isfinite(time_val) and np.isfinite(x_val) and np.isfinite(y_val) and np.isfinite(track_id)):
+            continue
+        t_idx = int(round(float(time_val)))
+        if t_idx < 0 or t_idx >= n_t:
+            continue
+        cx = int(round(float(x_val)))
+        cy = int(round(float(y_val)))
+        if cx < 0 or cx >= width or cy < 0 or cy >= height:
+            continue
+        y0 = max(0, cy - int(radius_px))
+        y1 = min(height, cy + int(radius_px) + 1)
+        x0 = max(0, cx - int(radius_px))
+        x1 = min(width, cx + int(radius_px) + 1)
+        dy0 = y0 - (cy - int(radius_px))
+        dx0 = x0 - (cx - int(radius_px))
+        dy1 = dy0 + (y1 - y0)
+        dx1 = dx0 + (x1 - x0)
+        local_mask = disk_mask[dy0:dy1, dx0:dx1]
+        patch = labels[t_idx, y0:y1, x0:x1]
+        patch[local_mask] = np.uint32(int(track_id))
+        labels[t_idx, y0:y1, x0:x1] = patch
+    return labels
+
+
+def export_analysis_track_label_tifs(
+    association_root: Path,
+    drift_root: Path,
+    out_dir: Path,
+    image_shape_tyx: tuple[int, int, int],
+    radius_px: int = 6,
+) -> list[Path]:
+    """Export point-label TIFFs for all PCA inferred and drift-corrected track tables."""
+    saved_paths: list[Path] = []
+    pca_dir = out_dir / "pca_track_label_tifs"
+    drift_dir = out_dir / "driftcorr_track_label_tifs"
+    pca_dir.mkdir(parents=True, exist_ok=True)
+    drift_dir.mkdir(parents=True, exist_ok=True)
+
+    for method_cfg in HCV_METHOD_DEFS:
+        method_name = str(method_cfg["name"])
+        tracks_path = association_root / method_name / f"{method_name}_inferred_tracks.csv"
+        if not tracks_path.exists():
+            continue
+        tracks_df = ensure_numeric_tracks(pd.read_csv(tracks_path))
+        label_stack = tracks_to_label_stack_tyx(
+            tracks_df,
+            image_shape_tyx=image_shape_tyx,
+            radius_px=radius_px,
+            use_corrected_columns=False,
+        )
+        out_path = pca_dir / f"{method_name}_inferred_tracks_labels.tif"
+        saved_paths.append(save_tracked_label_tiff(label_stack, out_path))
+
+    for method_name in BASELINE_METHODS:
+        tracks_path = corrected_tracks_csv_path(
+            drift_root=drift_root,
+            regime_name=OBSERVED_REGIME_NAME,
+            method_name=method_name,
+        )
+        if not tracks_path.exists():
+            continue
+        tracks_df = ensure_numeric_tracks(pd.read_csv(tracks_path))
+        label_stack = tracks_to_label_stack_tyx(
+            tracks_df,
+            image_shape_tyx=image_shape_tyx,
+            radius_px=radius_px,
+            use_corrected_columns=True,
+        )
+        out_path = drift_dir / f"{method_name}_corrected_tracks_labels.tif"
+        saved_paths.append(save_tracked_label_tiff(label_stack, out_path))
+
+    return saved_paths
+
+
 def save_qc_overlay_frames(raw_stack_tzyx: np.ndarray, labels_tzyx: np.ndarray, out_dir: Path) -> list[Path]:
     """Save max-projection QC overlays for a few representative frames."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1494,6 +1595,7 @@ def make_hcv_gating_and_params(
             "dx_scale": float(dx_scale_est),
             "sigma_init_mode": str(best_cfg.get("sigma_init_mode", "dx")),
             "nn_scale_factor": float(best_cfg.get("nn_scale_factor", 0.3)),
+            "max_gap": int(PCA_MAX_FRAME_GAP),
         }
     )
     gating = {
@@ -2303,9 +2405,9 @@ def plot_birth_death_bars(
     other_counts: pd.DataFrame,
     out_path: Path,
     stats_csv_path: Path,
-    group_labels: tuple[str, str] = ("Segm.", "PCA"),
-    show_title: bool = True,
-    figsize: tuple[float, float] = (10.0 * CM, 4.2 * CM)) -> None:
+    group_labels: tuple[str, str] = ("HL", "PCA"),
+    show_title: bool = False,
+    figsize: tuple[float, float] = (5.15 * CM, 3.0 * CM)) -> None:
     """Plot births/deaths GT vs PCA as mean-per-frame bars with SEM and paired tests."""
     merged = gt_counts.merge(other_counts, on="Time", suffixes=("_gt", "_other"), how="inner")
     rows: list[dict[str, Any]] = []
@@ -2354,7 +2456,7 @@ def plot_birth_death_bars(
         if show_title:
             ax.set_title(title)
         ax.set_ylim(bottom=0.0)
-        ax.set_ylabel("count / frame")
+        ax.set_ylabel(f"{metric}/frame")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, transparent=True)
@@ -2909,6 +3011,7 @@ def run_blind_point_cloud_association_suite(
             "dx_scale_est": float(dx_scale_est),
             "gate_max_dist": float(gating["max_dist"]),
             "gate_keep_percentile": float(gating["keep_percentile"]),
+            "max_gap": int(params.get("max_gap", 0)),
             **{f"assoc_{k}": v for k, v in assoc.quality.items()},
             **summary_gt,
             "accuracy_mean": float(pd.to_numeric(accuracy_df.get("accuracy", np.nan), errors="coerce").mean()) if not accuracy_df.empty else float("nan"),
@@ -3059,7 +3162,7 @@ def plot_three_group_count_bars(
     x = np.arange(len(categories), dtype=np.float64)
     width = 0.24
     fig, ax = plt.subplots(figsize=(6.5 * CM, 3.0 * CM))
-    ax.bar(x - width, gt_vals, width=width, color="#4C72B0", alpha=0.85, label="Segmented")
+    ax.bar(x - width, gt_vals, width=width, color="#4C72B0", alpha=0.85, label="HL")
     ax.bar(x, pca_vals, width=width, color="#DD8452", alpha=0.85, label="PCA")
     ax.bar(x + width, drift_vals, width=width, color="#55A868", alpha=0.85, label="DriftCorr")
     
@@ -3100,7 +3203,7 @@ def plot_average_displacement_histogram_threeway(
     max_val = max([float(np.max(arr)) if arr.size else 0.0 for arr in arrays] + [float(threshold), 1.0])
     bins = np.linspace(0.0, max_val * 1.05, 24)
     fig, ax = plt.subplots(figsize=(6.2 * CM, 3.5 * CM))
-    labels_colors = [("Segmented", "#4C72B0"), ("PCA", "#DD8452"), ("DriftCorr", "#55A868")]
+    labels_colors = [("HL", "#4C72B0"), ("PCA", "#DD8452"), ("DriftCorr", "#55A868")]
     for arr, (label, color) in zip(arrays, labels_colors):
         if arr.size:
             ax.hist(arr, bins=bins, alpha=0.35, color=color, label=label)
@@ -3109,6 +3212,8 @@ def plot_average_displacement_histogram_threeway(
     ax.set_ylabel("tracks")
     ax.set_xlim(left=0.0)
     ax.set_ylim(bottom=0.0)
+    #ax.set_yscale("log")
+    
     if show_title:
         ax.set_title("Average displacement histogram", fontsize=8)
     ax.legend(frameon=False, fontsize=7)
@@ -3207,10 +3312,10 @@ def plot_motion_class_average_displacement_threeway(
             #ax.scatter(xi, mean, s=14, color=color, zorder=6)
             ax.scatter(xi, median, s=14, color=color, zorder=6)
         ax.set_xticks(x)
-        ax.set_xticklabels(list(("Segm.", "PCA", "DriftCorr")))
+        ax.set_xticklabels(list(("HL", "PCA", "DriftCorr")))
         ax.set_title(title, fontsize=8)
         ax.set_ylabel("average step\ndisplacement")
-        ax.set_ylim(bottom=0.0)
+        #ax.set_ylim(bottom=0.0)
         data_max = max([float(np.max(arr)) if arr.size else 0.0 for arr in groups] + [0.0])
         data_span = data_max if data_max > 0.0 else 1.0
         pairwise_rows = [row for row in test_rows if row.get("row_type") == "pairwise"]
@@ -3226,7 +3331,11 @@ def plot_motion_class_average_displacement_threeway(
         for idx, (x0, x1, p_value) in enumerate(annotation_specs):
             if np.isfinite(p_value):
                 annotate_pvalue(ax, x0, x1, base_y + idx * step_y, float(p_value), fontsize=7.5)
-        ax.set_ylim(top=base_y + max(len(annotation_specs) - 1, 0) * step_y + 0.18 * data_span)
+        if motion_class == "migrating":
+            ax.set_ylim(top=base_y + max(len(annotation_specs) - 1, 0) * step_y + 0.08 * data_span)
+        else:
+            ax.set_ylim(top=base_y + max(len(annotation_specs) - 1, 0) * step_y + 0.18 * data_span)
+        
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, transparent=True)
@@ -3244,6 +3353,7 @@ def run_observed_summary_analysis(
     drift_summary_df: pd.DataFrame,
     best_driftcorr_method: str,
     out_dir: Path,
+    image_shape_tyx: tuple[int, int, int] | None = None,
 ) -> dict[str, Path]:
     """
     Create GT/PCA and GT/PCA/driftcorr summary plots for the observed 2D+T dataset.
@@ -3315,6 +3425,17 @@ def run_observed_summary_analysis(
         out_path=motion_bar_plot,
         stats_csv_path=motion_bar_stats)
 
+    if image_shape_tyx is None:
+        raw_stack_tyx, _ = load_stack_tyx(INPUT_TIF)
+        image_shape_tyx = tuple(int(v) for v in raw_stack_tyx.shape)
+    exported_label_tifs = export_analysis_track_label_tifs(
+        association_root=association_root,
+        drift_root=drift_root,
+        out_dir=out_dir,
+        image_shape_tyx=tuple(int(v) for v in image_shape_tyx),
+        radius_px=6,
+    )
+
     summary_csv = out_dir / "gt_pca_driftcorr_summary.csv"
     pd.DataFrame(
         [
@@ -3331,11 +3452,12 @@ def run_observed_summary_analysis(
                 "gt_migrating_tracks": int((gt_class["motion_class"] == "migrating").sum()),
                 "pca_migrating_tracks": int((pca_class["motion_class"] == "migrating").sum()),
                 "driftcorr_migrating_tracks": int((driftcorr_class["motion_class"] == "migrating").sum()),
+                "exported_track_label_tifs": int(len(exported_label_tifs)),
             }
         ]
     ).to_csv(summary_csv, index=False)
 
-    return {
+    result: dict[str, Path] = {
         "unique_counts_plot": unique_counts_plot,
         "birthdeath_plot": birthdeath_plot,
         "birthdeath_stats": birthdeath_stats,
@@ -3344,6 +3466,9 @@ def run_observed_summary_analysis(
         "motion_bar_plot": motion_bar_plot,
         "summary_csv": summary_csv,
     }
+    for idx, tif_path in enumerate(exported_label_tifs, start=1):
+        result[f"track_label_tif_{idx:02d}"] = tif_path
+    return result
 
 # %% MAIN FUNCTION
 def main() -> None:
@@ -3456,7 +3581,8 @@ def main() -> None:
     regime_stem = f"{INPUT_TIF.stem}_{regime_name}"
     regime_imaris_path = regime_dir / f"{regime_stem}_imaris.csv"
     regime_no_trackid_path = regime_dir / f"{regime_stem}_imaris_no_trackid.csv"
-    regime_tracks_plot = regime_dir / f"{regime_stem}_tracks_2d.png"
+    regime_tracks_plot = regime_dir / f"{regime_stem}_tracks_2d.pdf"
+    regime_tracks_plot_png = regime_dir / f"{regime_stem}_tracks_2d.png"
     blind_path = regime_dir / f"{regime_stem}_blind.csv"
     unblinding_path = regime_dir / f"{regime_stem}_unblinding.csv"
     blind_plot_path = regime_dir / f"{regime_stem}_blind_pointcloud_2d.png"
@@ -3464,6 +3590,7 @@ def main() -> None:
     regime_tracks_df.to_csv(regime_imaris_path, index=False)
     regime_tracks_df.drop(columns=["TrackID"]).to_csv(regime_no_trackid_path, index=False)
     plot_tracks_2d(regime_tracks_df, regime_tracks_plot, title="Observed tracks", show_zoom_box=True)
+    plot_tracks_2d(regime_tracks_df, regime_tracks_plot_png, title="Observed tracks", show_zoom_box=True)
 
     blind_df, unblinding_df = make_blind_pointcloud_table(
         regime_tracks_df,
@@ -3490,6 +3617,8 @@ def main() -> None:
         out_root=drift_root,
         dataset_label=dataset_label,
         regime_name=regime_name)
+    
+    # post-hoc analysis:
     regime_analysis_dir = regime_dir / "gt_pca_driftcorr_analysis"
     regime_analysis_paths = run_observed_summary_analysis(
         gt_tracks_df=gt_tracks_df,
@@ -3497,7 +3626,8 @@ def main() -> None:
         drift_root=drift_root,
         drift_summary_df=drift_summary_df,
         best_driftcorr_method=best_driftcorr_method,
-        out_dir=regime_analysis_dir)
+        out_dir=regime_analysis_dir,
+        image_shape_tyx=tuple(int(v) for v in matched_stack_tyx.shape))
 
     print()
     print(f"Observed run: {regime_name}")

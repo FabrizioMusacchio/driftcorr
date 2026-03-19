@@ -88,6 +88,68 @@ def _canonical_track_df(df: pd.DataFrame | None, prefer_track_col: str = "TrackI
     return d[["TrackID", "Time", "x", "y", "z", "PointIndex"]]
 
 
+def _xyz_from_df(df: pd.DataFrame | None) -> np.ndarray:
+    """Return Nx3 xyz array from canonical or points dataframes."""
+    if df is None or df.empty or not {"x", "y", "z"}.issubset(df.columns):
+        return np.empty((0, 3), dtype=float)
+    xyz = df[["x", "y", "z"]].to_numpy(float)
+    if xyz.ndim != 2 or xyz.shape[1] != 3:
+        return np.empty((0, 3), dtype=float)
+    return xyz
+
+
+def _set_data_box_aspect(ax, xyz: np.ndarray) -> None:
+    """Set 3D box aspect from data spans if supported by the backend."""
+    if xyz.size == 0:
+        return
+    mins = np.nanmin(xyz, axis=0)
+    maxs = np.nanmax(xyz, axis=0)
+    span = np.maximum(maxs - mins, 1e-6)
+    try:
+        ax.set_box_aspect((float(span[0]), float(span[1]), float(span[2])))
+    except Exception:
+        pass
+
+
+def _set_xyz_limits(ax, xyz: np.ndarray, pad_fraction: float = 0.06) -> None:
+    """Set padded cubic XYZ limits from data extents."""
+    if xyz.size == 0:
+        return
+    mins = np.nanmin(xyz, axis=0)
+    maxs = np.nanmax(xyz, axis=0)
+    center = 0.5 * (mins + maxs)
+    span = np.maximum(maxs - mins, 1e-6)
+    half = 0.5 * float(np.max(span)) * (1.0 + float(pad_fraction))
+    ax.set_xlim(float(center[0] - half), float(center[0] + half))
+    ax.set_ylim(float(center[1] - half), float(center[1] + half))
+    ax.set_zlim(float(center[2] - half), float(center[2] + half))
+
+
+def _apply_axis_geometry(
+    ax,
+    xyz: np.ndarray,
+    use_data_box_aspect: bool,
+    set_data_limits: bool,
+    view_elev: float | None,
+    view_azim: float | None,
+) -> None:
+    """Apply optional 3D geometry controls to a panel axis."""
+    if set_data_limits:
+        _set_xyz_limits(ax, xyz)
+    if use_data_box_aspect:
+        _set_data_box_aspect(ax, xyz)
+    if view_elev is not None or view_azim is not None:
+        elev = float(view_elev) if view_elev is not None else None
+        azim = float(view_azim) if view_azim is not None else None
+        kwargs = {}
+        if elev is not None:
+            kwargs["elev"] = elev
+        if azim is not None:
+            kwargs["azim"] = azim
+        if kwargs:
+            ax.view_init(**kwargs)
+
+
 def _extract_regime_and_file_stem(title: str, out_path: Path) -> tuple[str, str]:
     """Infer regime and file stem from panel title or output filename."""
     regime = ""
@@ -195,6 +257,10 @@ def plot_3d_frames_comparison(
     gt_tracks_df: pd.DataFrame | None = None,
     inferred_tracks_df: pd.DataFrame | None = None,
     title: str = "",
+    use_data_box_aspect: bool = False,
+    set_data_limits: bool = False,
+    view_elev: float | None = None,
+    view_azim: float | None = None,
 ) -> Path:
     """Create 2x2 qualitative association figure.
 
@@ -220,6 +286,7 @@ def plot_3d_frames_comparison(
 
     gt_tracks = _canonical_track_df(gt_tracks_df, prefer_track_col="TrackID")
     inf_tracks = _canonical_track_df(inferred_tracks_df, prefer_track_col="TrackID")
+    blind_xyz = _xyz_from_df(blind_pts)
     regime_name, file_stem = _extract_regime_and_file_stem(title=title, out_path=out)
     if "with_drift" in regime_name.lower():
         drift_path = _find_drift_schedule_path(out_path=out, file_stem=file_stem)
@@ -230,6 +297,9 @@ def plot_3d_frames_comparison(
             except Exception:
                 # Keep backward-compatible behavior if drift schedule cannot be parsed.
                 pass
+    gt_xyz = _xyz_from_df(gt_tracks)
+    inf_xyz = _xyz_from_df(inf_tracks)
+    overlay_xyz = np.vstack([arr for arr in [gt_xyz, inf_xyz] if arr.size]) if (gt_xyz.size or inf_xyz.size) else np.empty((0, 3), dtype=float)
 
     try:
         fig = plt.figure(figsize=(14, 12))
@@ -248,6 +318,7 @@ def plot_3d_frames_comparison(
     ax1.set_xlabel("X")
     ax1.set_ylabel("Y")
     ax1.set_zlabel("Z")
+    _apply_axis_geometry(ax1, gt_xyz, use_data_box_aspect, set_data_limits, view_elev, view_azim)
 
     # Panel 2: blind by time
     if not blind_pts.empty:
@@ -257,6 +328,7 @@ def plot_3d_frames_comparison(
     ax2.set_xlabel("X")
     ax2.set_ylabel("Y")
     ax2.set_zlabel("Z")
+    _apply_axis_geometry(ax2, blind_xyz, use_data_box_aspect, set_data_limits, view_elev, view_azim)
 
     # Panel 3: inferred
     if not inf_tracks.empty:
@@ -265,6 +337,7 @@ def plot_3d_frames_comparison(
     ax3.set_xlabel("X")
     ax3.set_ylabel("Y")
     ax3.set_zlabel("Z")
+    _apply_axis_geometry(ax3, inf_xyz, use_data_box_aspect, set_data_limits, view_elev, view_azim)
 
     # Panel 4: overlay GT vs inferred
     if not gt_tracks.empty:
@@ -275,6 +348,7 @@ def plot_3d_frames_comparison(
     ax4.set_xlabel("X")
     ax4.set_ylabel("Y")
     ax4.set_zlabel("Z")
+    _apply_axis_geometry(ax4, overlay_xyz, use_data_box_aspect, set_data_limits, view_elev, view_azim)
 
     if title:
         fig.suptitle(title)
@@ -338,6 +412,15 @@ def plot_3d_frames_comparison(
         ax.xaxis.labelpad = -7
         ax.yaxis.labelpad = -7
         ax.zaxis.labelpad = -7
+        if i == 1:
+            panel_xyz = gt_xyz
+        elif i == 2:
+            panel_xyz = blind_xyz
+        elif i == 3:
+            panel_xyz = inf_xyz
+        else:
+            panel_xyz = overlay_xyz
+        _apply_axis_geometry(ax, panel_xyz, use_data_box_aspect, set_data_limits, view_elev, view_azim)
         
 
         

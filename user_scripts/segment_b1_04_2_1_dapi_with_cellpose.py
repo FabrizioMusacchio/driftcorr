@@ -72,8 +72,9 @@ FLOW_THRESHOLD = 0.4
 MIN_OBJECT_AREA = 40
 MAX_OBJECT_AREA = 4000
 
-HUNGARIAN_MAX_DISTANCE = 22.0
+HUNGARIAN_MAX_DISTANCE = 18.0
 HUNGARIAN_MAX_FRAME_GAP = 5
+HUNGARIAN_ABSOLUTE_MAX_JUMP = 15.0
 HUNGARIAN_COST_THRESHOLD = 0.78
 DISTANCE_WEIGHT = 0.30
 IOU_WEIGHT = 0.50
@@ -88,7 +89,6 @@ class Object2D:
     area: int
     bbox: tuple[int, int, int, int]
     mask_crop: np.ndarray
-
 
 def load_stack_tyx(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
     """Load the TIFF stack and normalize it to TYX."""
@@ -142,7 +142,6 @@ def load_stack_tyx(path: Path) -> tuple[np.ndarray, dict[str, Any]]:
     info["normalized_axes"] = EXPECTED_AXES
     return arr, info
 
-
 def match_histograms_to_reference(source: np.ndarray, reference: np.ndarray) -> np.ndarray:
     """Match source intensities to a reference frame using a binned CDF mapping."""
     src = np.asarray(source, dtype=np.float32)
@@ -166,7 +165,6 @@ def match_histograms_to_reference(source: np.ndarray, reference: np.ndarray) -> 
     matched = matched_centers[src_bins].reshape(src.shape)
     return matched.astype(np.float32, copy=False)
 
-
 def preprocess_stack_for_cellpose(stack_tyx: np.ndarray, match_histograms: bool = True) -> np.ndarray:
     """Apply mild per-frame preprocessing for more stable Cellpose segmentation."""
     stack = np.asarray(stack_tyx, dtype=np.float32)
@@ -180,7 +178,6 @@ def preprocess_stack_for_cellpose(stack_tyx: np.ndarray, match_histograms: bool 
             frame = match_histograms_to_reference(frame, reference)
         processed[t] = frame
     return processed
-
 
 def keep_labels_in_size_range(label_frame: np.ndarray, min_area: int, max_area: int | None = None) -> np.ndarray:
     """Filter instance labels by area and relabel consecutively."""
@@ -199,7 +196,6 @@ def keep_labels_in_size_range(label_frame: np.ndarray, min_area: int, max_area: 
         out[labels == local_label] = np.uint32(next_label)
         next_label += 1
     return out
-
 
 def run_cellpose_segmentation(
     stack_tyx: np.ndarray,
@@ -256,7 +252,6 @@ def run_cellpose_segmentation(
             flush=True)
     return label_stack
 
-
 def extract_objects_from_frame(label_frame: np.ndarray, time_index: int) -> list[Object2D]:
     """Extract object properties from one 2D label frame."""
     labels = np.asarray(label_frame, dtype=np.int32)
@@ -294,7 +289,6 @@ def extract_objects_from_frame(label_frame: np.ndarray, time_index: int) -> list
         )
     return objects
 
-
 def compute_iou(obj_a: Object2D, obj_b: Object2D) -> float:
     """Compute IoU between two 2D objects from possibly different frames."""
     ay0, ay1, ax0, ax1 = obj_a.bbox
@@ -313,11 +307,9 @@ def compute_iou(obj_a: Object2D, obj_b: Object2D) -> float:
     union = int(obj_a.area + obj_b.area - intersection)
     return float(intersection / max(union, 1))
 
-
 def build_object_lists(label_stack_tyx: np.ndarray) -> list[list[Object2D]]:
     """Extract object metadata for all frames."""
     return [extract_objects_from_frame(label_stack_tyx[t], time_index=t) for t in range(label_stack_tyx.shape[0])]
-
 
 def link_with_hungarian(
     label_stack_tyx: np.ndarray,
@@ -361,12 +353,16 @@ def link_with_hungarian(
                         dy = float(obj.centroid_y - pred_y)
                         dx = float(obj.centroid_x - pred_x)
                         dist = math.hypot(dy, dx)
-                        if dist > float(max_distance) * float(time_gap):
+                        allowed_dist = min(
+                            float(max_distance) * float(time_gap),
+                            float(HUNGARIAN_ABSOLUTE_MAX_JUMP),
+                        )
+                        if dist > allowed_dist:
                             continue
                         iou = compute_iou(prev_obj, obj) if time_gap == 1 else 0.0
                         area_rel = abs(float(obj.area) - prev_area) / prev_area
                         cost[i, j] = (
-                            DISTANCE_WEIGHT * min(dist / (float(max_distance) * float(time_gap)), 1.0)
+                            DISTANCE_WEIGHT * min(dist / max(allowed_dist, 1e-9), 1.0)
                             + IOU_WEIGHT * (1.0 - iou)
                             + AREA_WEIGHT * min(area_rel, 1.0)
                         )
@@ -444,7 +440,6 @@ def link_with_hungarian(
     tracks_df = pd.DataFrame(track_records).sort_values(["TrackID", "Time"]).reset_index(drop=True)
     return linked, tracks_df
 
-
 class UnionFind:
     """Minimal disjoint-set data structure."""
 
@@ -466,7 +461,6 @@ class UnionFind:
         rb = self.find(b)
         if ra != rb:
             self.parent[rb] = ra
-
 
 def link_with_overlap_connected_components(label_stack_tyx: np.ndarray) -> tuple[np.ndarray, pd.DataFrame]:
     """Link objects by connected components on the frame-to-frame overlap graph."""
@@ -514,7 +508,6 @@ def link_with_overlap_connected_components(label_stack_tyx: np.ndarray) -> tuple
     tracks_df = pd.DataFrame(records).sort_values(["TrackID", "Time"]).reset_index(drop=True)
     return linked, tracks_df
 
-
 def save_label_tiff(path: Path, label_stack_tyx: np.ndarray) -> Path:
     """Write a TYX label stack as TIFF."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -525,7 +518,6 @@ def save_label_tiff(path: Path, label_stack_tyx: np.ndarray) -> Path:
         imagej=False,
     )
     return path
-
 
 def save_track_csv(path: Path, tracks_df: pd.DataFrame) -> Path:
     """Write track table to CSV."""
@@ -538,6 +530,7 @@ def main() -> None:
     stack_tyx, info = load_stack_tyx(INPUT_TIF)
     print(f"[I/O] loaded {INPUT_TIF.name}: {info}")
 
+    # segmentation: 
     processed_tyx = preprocess_stack_for_cellpose(stack_tyx, match_histograms=MATCH_HISTOGRAMS)
     masks_tyx = run_cellpose_segmentation(
         stack_tyx=processed_tyx,
@@ -549,9 +542,11 @@ def main() -> None:
         min_area=MIN_OBJECT_AREA,
         max_area=MAX_OBJECT_AREA)
 
+    # save the segmentation-mask:
     raw_masks_path = OUTPUT_DIR / "B1_04_2_1_DAPI_cellpose_masks.tif"
     save_label_tiff(raw_masks_path, masks_tyx)
 
+    # do the hungarian linking:
     hungarian_labels, hungarian_tracks = link_with_hungarian(
         masks_tyx,
         max_distance=HUNGARIAN_MAX_DISTANCE,
@@ -562,6 +557,11 @@ def main() -> None:
     save_label_tiff(hungarian_tif, hungarian_labels)
     save_track_csv(hungarian_csv, hungarian_tracks)
 
+    # as a proxy, count the unique labels in masks_tyx[-1]:
+    # len(np.unique(masks_tyx[-1].flatten()))
+    # len(np.unique(hungarian_labels[-1].flatten()))
+
+    # for comparison, also apply our "default" CCA:
     cc_labels, cc_tracks = link_with_overlap_connected_components(masks_tyx)
     cc_tif = OUTPUT_DIR / "B1_04_2_1_DAPI_cellpose_linked_cc_overlap.tif"
     cc_csv = OUTPUT_DIR / "B1_04_2_1_DAPI_cellpose_linked_cc_overlap_tracks.csv"

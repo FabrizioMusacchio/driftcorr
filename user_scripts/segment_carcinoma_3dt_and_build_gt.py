@@ -1664,7 +1664,7 @@ def plot_total_count_bars(
     title: str,
     ylabel: str,
     out_path: Path,
-    group_labels: tuple[str, str] = ("GT", "PCA"),
+    group_labels: tuple[str, str] = ("CCA", "PCA"),
     show_title: bool = True,
     figsize: tuple[float, float] = (5.0 * CM, 4.2 * CM)) -> None:
     """Plot simple GT vs PCA total counts."""
@@ -1691,7 +1691,7 @@ def plot_birth_death_bars(
     other_counts: pd.DataFrame,
     out_path: Path,
     stats_csv_path: Path,
-    group_labels: tuple[str, str] = ("GT", "PCA"),
+    group_labels: tuple[str, str] = ("CCA", "PCA"),
     show_title: bool = True,
     figsize: tuple[float, float] = (10.0 * CM, 4.2 * CM)) -> None:
     """Plot births/deaths GT vs PCA as mean-per-frame bars with SEM and paired tests."""
@@ -1720,7 +1720,7 @@ def plot_birth_death_bars(
         if show_title:
             ax.set_title(title)
         ax.set_ylim(bottom=0.0)
-        ax.set_ylabel("count / frame")
+        ax.set_ylabel(f"{metric}/frame")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, transparent=True)
@@ -1732,7 +1732,7 @@ def plot_stationary_migrating_count_bars(
     gt_class_df: pd.DataFrame,
     other_class_df: pd.DataFrame,
     out_path: Path,
-    group_labels: tuple[str, str] = ("GT", "PCA"),
+    group_labels: tuple[str, str] = ("CCA", "PCA"),
     show_title: bool = True,
     figsize: tuple[float, float] = (6.0 * CM, 4.5 * CM)) -> None:
     """Plot total stationary vs migrating track counts for GT and PCA."""
@@ -1757,6 +1757,44 @@ def plot_stationary_migrating_count_bars(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, transparent=True)
     plt.close(fig)
+
+
+def plot_three_group_count_bars(
+    gt_unique: int,
+    pca_unique: int,
+    driftcorr_unique: int,
+    gt_stationary: int,
+    pca_stationary: int,
+    driftcorr_stationary: int,
+    gt_migrating: int,
+    pca_migrating: int,
+    driftcorr_migrating: int,
+    out_path: Path,
+    show_title: bool = True,
+) -> Path:
+    """Plot grouped bars for unique, stationary and migrating track counts."""
+    categories = ["unique tracks", "stationary cells", "migrating cells"]
+    gt_vals = [float(gt_unique), float(gt_stationary), float(gt_migrating)]
+    pca_vals = [float(pca_unique), float(pca_stationary), float(pca_migrating)]
+    drift_vals = [float(driftcorr_unique), float(driftcorr_stationary), float(driftcorr_migrating)]
+    x = np.arange(len(categories), dtype=np.float64)
+    width = 0.24
+    fig, ax = plt.subplots(figsize=(6.5 * CM, 3.0 * CM))
+    ax.bar(x - width, gt_vals, width=width, color="#4C72B0", alpha=0.85, label="CCA")
+    ax.bar(x, pca_vals, width=width, color="#DD8452", alpha=0.85, label="PCA")
+    ax.bar(x + width, drift_vals, width=width, color="#55A868", alpha=0.85, label="DriftCorr")
+    ax.set_xticks(x)
+    ax.set_xticklabels(["unique", "stationary", "migrating"])
+    ax.set_ylabel("tracks")
+    ax.set_ylim(bottom=0.0)
+    if show_title:
+        ax.set_title("Track-count summary", fontsize=8)
+    ax.legend(frameon=False, fontsize=7)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+    return out_path
 
 
 def plot_average_displacement_histogram(
@@ -1816,10 +1854,7 @@ def run_regime_summary_analysis(
 
     gt_unique = int(pd.to_numeric(gt_tracks_df["TrackID"], errors="coerce").dropna().nunique())
     pca_unique = int(pd.to_numeric(pca_tracks_df["TrackID"], errors="coerce").dropna().nunique())
-    unique_counts_plot = out_dir / "gt_vs_pca_unique_cell_counts.pdf"
-    plot_total_count_bars(gt_unique, pca_unique, title="Total unique cells\nover all frames", 
-                          ylabel="unique tracks", out_path=unique_counts_plot,
-                          show_title=False, figsize=(2.9 * CM, 3.0 * CM))
+    driftcorr_unique = int(pd.to_numeric(driftcorr_tracks_df["TrackID"], errors="coerce").dropna().nunique())
 
     gt_birthdeath = compute_birth_death_counts_by_time(gt_tracks_df)
     pca_birthdeath = compute_birth_death_counts_by_time(pca_tracks_df)
@@ -1829,20 +1864,32 @@ def run_regime_summary_analysis(
                           show_title=False, figsize=(5.15 * CM, 3.0 * CM))
 
     gt_avg_disp = compute_track_average_displacements(gt_tracks_df)
+    pca_avg_disp = compute_track_average_displacements(pca_tracks_df)
     driftcorr_avg_disp = compute_track_average_displacements(driftcorr_tracks_df)
     threshold = determine_stationary_threshold(gt_avg_disp)
     gt_class = classify_tracks_by_displacement(gt_avg_disp, threshold)
     driftcorr_class = classify_tracks_by_displacement(driftcorr_avg_disp, threshold)
+    pca_class = classify_tracks_by_displacement(pca_avg_disp, threshold)
 
-    class_count_plot = out_dir / "gt_vs_driftcorr_stationary_migrating_counts.pdf"
-    plot_stationary_migrating_count_bars(
-        gt_class, driftcorr_class, out_path=class_count_plot, group_labels=("GT", "DriftCorr"),
-        show_title=False, figsize=(4.05 * CM, 3.0 * CM))
+    three_bar_plot = out_dir / "gt_pca_driftcorr_track_count_summary.pdf"
+    plot_three_group_count_bars(
+        gt_unique=gt_unique,
+        pca_unique=pca_unique,
+        driftcorr_unique=driftcorr_unique,
+        gt_stationary=int((gt_class["motion_class"] == "stationary").sum()),
+        pca_stationary=int((pca_class["motion_class"] == "stationary").sum()),
+        driftcorr_stationary=int((driftcorr_class["motion_class"] == "stationary").sum()),
+        gt_migrating=int((gt_class["motion_class"] == "migrating").sum()),
+        pca_migrating=int((pca_class["motion_class"] == "migrating").sum()),
+        driftcorr_migrating=int((driftcorr_class["motion_class"] == "migrating").sum()),
+        out_path=three_bar_plot,
+        show_title=False,
+    )
 
     hist_plot = out_dir / "gt_vs_driftcorr_average_displacement_histogram.pdf"
     plot_average_displacement_histogram(
         gt_avg_disp, driftcorr_avg_disp, threshold=threshold,
-        out_path=hist_plot, group_labels=("GT", "DriftCorr"),
+        out_path=hist_plot, group_labels=("CCA", "DriftCorr"),
         show_title=False, figsize=(6.2 * CM, 3.5 * CM))
 
     stationary_bar = out_dir / "gt_vs_driftcorr_stationary_average_displacement.pdf"
@@ -1855,7 +1902,7 @@ def run_regime_summary_analysis(
         out_path=stationary_bar,
         stats_csv_path=stationary_stats,
         paired=False,
-        group_labels=("GT", "DriftCorr"),
+        group_labels=("CCA", "DriftCorr"),
         show_title=False, figsize=(3.0 * CM, 3.0 * CM))
 
     migrating_bar = out_dir / "gt_vs_driftcorr_migrating_average_displacement.pdf"
@@ -1868,7 +1915,7 @@ def run_regime_summary_analysis(
         out_path=migrating_bar,
         stats_csv_path=migrating_stats,
         paired=False,
-        group_labels=("GT", "DriftCorr"),
+        group_labels=("CCA", "DriftCorr"),
         show_title=False, figsize=(3.0 * CM, 3.0 * CM))
 
     summary_csv = out_dir / "gt_vs_pca_regime_summary.csv"
@@ -1877,10 +1924,13 @@ def run_regime_summary_analysis(
             {
                 "gt_unique_tracks": gt_unique,
                 "pca_unique_tracks": pca_unique,
+                "driftcorr_unique_tracks": driftcorr_unique,
                 "stationary_threshold": float(threshold),
                 "best_driftcorr_method_from_pca_tracks": str(best_drift_method),
                 "gt_stationary_tracks": int((gt_class["motion_class"] == "stationary").sum()),
+                "pca_stationary_tracks": int((pca_class["motion_class"] == "stationary").sum()),
                 "gt_migrating_tracks": int((gt_class["motion_class"] == "migrating").sum()),
+                "pca_migrating_tracks": int((pca_class["motion_class"] == "migrating").sum()),
                 "driftcorr_stationary_tracks": int((driftcorr_class["motion_class"] == "stationary").sum()),
                 "driftcorr_migrating_tracks": int((driftcorr_class["motion_class"] == "migrating").sum()),
             }
@@ -1888,10 +1938,9 @@ def run_regime_summary_analysis(
     ).to_csv(summary_csv, index=False)
 
     return {
-        "unique_counts_plot": unique_counts_plot,
         "birthdeath_plot": birthdeath_plot,
         "birthdeath_stats": birthdeath_stats,
-        "class_count_plot": class_count_plot,
+        "three_bar_plot": three_bar_plot,
         "histogram_plot": hist_plot,
         "stationary_bar_plot": stationary_bar,
         "stationary_stats": stationary_stats,
@@ -2308,8 +2357,7 @@ def run_blind_point_cloud_association_suite(
     ]
     saved_paths.extend(aggregate_plots)
     return summary_df, saved_paths
-
-
+# %% MAIN FUNCTION
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     MPL_DIR.mkdir(parents=True, exist_ok=True)
@@ -2443,7 +2491,7 @@ def main() -> None:
                 )
         for assoc_path in association_paths[:6]:
             print(f"  Assoc artifact: {assoc_path}")
-        for key in ["summary_csv", "unique_counts_plot", "birthdeath_plot", "histogram_plot"]:
+        for key in ["summary_csv", "three_bar_plot", "birthdeath_plot", "histogram_plot"]:
             print(f"  Regime analysis artifact: {regime_analysis_paths[key]}")
         if not drift_summary_df.empty:
             print("  Drift-correction ranking by overall_rms_error:")

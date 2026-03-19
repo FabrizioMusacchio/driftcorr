@@ -50,7 +50,6 @@ except ModuleNotFoundError as exc:
     raise ModuleNotFoundError(
         "This script requires `scipy`. Install it in your environment, then rerun."
     ) from exc
-# %% CONSTANTS AND PARAMETERS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -81,7 +80,7 @@ from driftcorr.method_spacetime_rbf import apply_correction as apply_spacetime_c
 from driftcorr.method_spacetime_rbf import fit_spacetime_rbf_model
 from driftcorr.synthetic_experiments import save_groundtruth_evaluation_outputs
 from driftcorr.visualization import save_visual_inspection_plots
-
+# %% CONSTANTS AND PARAMETERS
 INPUT_TIF = (
     PROJECT_ROOT
     / "example_image_data"
@@ -767,7 +766,7 @@ def plot_blind_pointcloud_3d(df_blind: pd.DataFrame, out_path: Path, title: str)
     )
     xyz = df_blind[["x", "y", "z"]].to_numpy(np.float64)
     style_benchmark_3d_axis(ax, xyz, title=title)
-    cbar = fig.colorbar(scatter, ax=ax, fraction=0.09, pad=0.02)
+    cbar = fig.colorbar(scatter, ax=ax, fraction=0.05, pad=0.02)
     cbar.ax.tick_params(labelsize=6, pad=1)
     cbar.outline.set_visible(False)
     cbar.set_label("Frame / Time")
@@ -2327,8 +2326,7 @@ def run_drift_correction_suite(
         out_prefix=out_prefix,
         methods=list(BASELINE_METHODS),
         opts=opts,
-        use_stationary_subset=bool(opts.get("use_stationary_subset", False)),
-    )
+        use_stationary_subset=bool(opts.get("use_stationary_subset", False)))
 
     eval_summary_df, eval_details = run_all_methods_and_compare(df_inferred, corr_by_method)
     eval_artifacts = save_evaluation_outputs(out_prefix, eval_summary_df, eval_details)
@@ -2345,16 +2343,14 @@ def run_drift_correction_suite(
             df_corr=df_corr_eval,
             out_prefix=out_prefix,
             method_name=method_name,
-            df_groundtruth=gt_eval_df,
-        )
+            df_groundtruth=gt_eval_df)
         visual_paths.extend(visual_outputs.values())
 
     gt_outputs = save_groundtruth_evaluation_outputs(
         base_out_prefix=out_prefix,
         groundtruth_df=gt_eval_df,
         corrected_by_method=corr_eval_by_method,
-        drift_field_groundtruth=drift_gt_df,
-    )
+        drift_field_groundtruth=drift_gt_df)
     gt_summary_path = gt_outputs["gt_metrics_summary"]
     gt_summary_df = pd.read_csv(gt_summary_path) if gt_summary_path.exists() else pd.DataFrame()
 
@@ -2373,8 +2369,7 @@ def run_drift_correction_suite(
         ("overall_rms_error", "Overall RMS"),
         ("median_error_norm", "Median error"),
         ("p95_error_norm", "P95 error"),
-        ("drift_bias_abs", "Drift bias"),
-    ]
+        ("drift_bias_abs", "Drift bias")]
     for metric_name, title in metric_specs:
         out_path = out_root / f"baseline_suite_{metric_name}_heatmap_plot.pdf"
         plotted = plot_drift_summary_heatmap(summary_ext, metric_name=metric_name, out_path=out_path, title=title,
@@ -2520,12 +2515,26 @@ def run_blind_point_cloud_association_suite(
     unblinding_df: pd.DataFrame,
     out_root: Path,
     dataset_label: str,
+    plot_reference_tracks_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[Path]]:
-    """Run the 6 HCV methods on the blind CSV and save benchmark-like outputs."""
+    """Run the 6 HCV methods on the blind CSV and save benchmark-like outputs.
+    
+    DEBUG:
+    blind_csv_path=blind_path
+    gt_tracks_df=regime_tracks_df
+    unblinding_df=unblinding_df
+    out_root=association_root
+    dataset_label=dataset_label
+    plot_reference_tracks_df=regime_tracks_df
+    
+    """
     out_root.mkdir(parents=True, exist_ok=True)
     blind_frames = load_blind_frames(blind_csv_path)
     gt_tracks_with_pointindex = attach_pointindex_to_gt_tracks(gt_tracks_df, unblinding_df)
+    plot_reference_df = gt_tracks_df if plot_reference_tracks_df is None else plot_reference_tracks_df
+    plot_reference_with_pointindex = attach_pointindex_to_gt_tracks(plot_reference_df, unblinding_df)
     gt_frames = tracks_df_to_frames(gt_tracks_with_pointindex)
+    plot_reference_frames = tracks_df_to_frames(plot_reference_with_pointindex)
     dx_scale_est = estimate_dx_scale_from_blind_frames(blind_frames)
     best_configs = load_best_hcv_configs(HCV_BENCHMARK_STATS_PATH)
 
@@ -2533,6 +2542,7 @@ def run_blind_point_cloud_association_suite(
     saved_paths: list[Path] = []
 
     for method_cfg in HCV_METHOD_DEFS:
+        # method_cfg = HCV_METHOD_DEFS[0]
         method_name = str(method_cfg["name"])
         method_dir = out_root / method_name
         method_dir.mkdir(parents=True, exist_ok=True)
@@ -2573,13 +2583,16 @@ def run_blind_point_cloud_association_suite(
         saved_paths.extend([per_time_path, mapping_path])
 
         plot_3d_frames_comparison(
-            frames_gt=gt_frames,
+            frames_gt=plot_reference_frames,
             frames_blind=blind_frames,
             frames_inferred=tracks_df_to_frames(assoc.tracks_df),
             out_path=panel_path,
-            gt_tracks_df=gt_tracks_with_pointindex,
+            gt_tracks_df=plot_reference_with_pointindex,
             inferred_tracks_df=assoc.tracks_df,
             title=f"{dataset_label} | {method_name}",
+            use_data_box_aspect=True,
+            view_elev=25.0,
+            view_azim=-60.0,
         )
         plot_rms_over_time(gt_tracks_with_pointindex, assoc.tracks_df, rms_path)
         plot_accuracy_over_time(gt_tracks_with_pointindex, assoc.tracks_df, accuracy_path)
@@ -2605,11 +2618,11 @@ def run_blind_point_cloud_association_suite(
     saved_paths.append(summary_csv)
 
     aggregate_plots = [
-        plot_metric_heatmap(summary_df, "link_f1_mean", dataset_label=dataset_label, clim=(0.0, 1.0), figure_size=(6.0 * CM, 4.0 * CM),
+        plot_metric_heatmap(summary_df, "link_f1_mean", dataset_label=dataset_label, clim=None, figure_size=(6.0 * CM, 3.9 * CM),
                             out_path=out_root / "best_value__link_f1_mean.pdf", 
                             title = "HCV methods: link_f1_mean", show_title=False),
         plot_metric_heatmap(summary_df, "id_switches_mean_per_track", dataset_label=dataset_label,
-                            figure_size=(6.0 * CM, 4.0 * CM),
+                            figure_size=(6.0 * CM, 3.9 * CM),
                             out_path=out_root / "best_value__id_switches_mean_per_track.pdf",
                             title="HCV methods: id_switches_mean_per_track", show_title=False),
         plot_metric_heatmap(summary_df, "fragmentation_rate", dataset_label=dataset_label,
@@ -2712,7 +2725,8 @@ def main() -> None:
             gt_tracks_df=regime_tracks_df,
             unblinding_df=unblinding_df,
             out_root=association_root,
-            dataset_label=dataset_label)
+            dataset_label=dataset_label,
+            plot_reference_tracks_df=regime_tracks_df)
         
         drift_summary_df, drift_paths = run_drift_correction_suite(
             gt_tracks_df=gt_tracks_df,

@@ -3394,7 +3394,7 @@ def run_observed_summary_analysis(
     gt_class = classify_tracks_by_displacement(gt_avg_disp, threshold)
     pca_class = classify_tracks_by_displacement(pca_avg_disp, threshold)
     driftcorr_class = classify_tracks_by_displacement(driftcorr_avg_disp, threshold)
-
+    
     three_bar_plot = out_dir / "gt_pca_driftcorr_track_count_summary.pdf"
     plot_three_group_count_bars(
         gt_unique=gt_unique,

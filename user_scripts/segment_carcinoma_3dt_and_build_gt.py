@@ -115,6 +115,7 @@ RESCUE_LOW_THRESHOLD_FRACTION = 0.60
 RESCUE_LOW_THRESHOLD_FLOOR = 0.008
 RESCUE_PEAK_MIN = 0.24
 MAX_TRACK_LINK_DISTANCE = 18.0
+REMOVE_SINGLE_FRAME_TRACKS = True
 ROTATION_TOTAL_DEG_XYZ = (3.0, -2.5, 2.0)
 RIGID_DRIFT_PER_FRAME_XYZ = (2.5, -1.5, 0.8)
 IMARIS_UNIT = "px"
@@ -543,6 +544,56 @@ def assign_tracks(
     tracks_df = pd.DataFrame(track_rows).sort_values(["Time", "TrackID"]).reset_index(drop=True)
     frame_stats_df = pd.DataFrame(stats_rows).sort_values("Time").reset_index(drop=True)
     return global_stack, tracks_df, frame_stats_df
+
+
+def remove_single_frame_tracks(
+    labels_tzyx: np.ndarray,
+    tracks_df: pd.DataFrame,
+) -> tuple[np.ndarray, pd.DataFrame, pd.DataFrame]:
+    """Remove tracks that appear in only one frame from labels and centroid table."""
+    tracks = tracks_df.copy()
+    tracks["TrackID"] = pd.to_numeric(tracks["TrackID"], errors="coerce")
+    tracks["Time"] = pd.to_numeric(tracks["Time"], errors="coerce")
+    tracks = tracks.dropna(subset=["TrackID", "Time"]).copy()
+    if tracks.empty:
+        cleanup_df = pd.DataFrame(
+            [{"removed_single_frame_tracks": 0, "remaining_tracks": 0, "removed_rows": 0}]
+        )
+        return labels_tzyx.copy(), tracks_df.copy(), cleanup_df
+
+    frames_per_track = (
+        tracks.groupby("TrackID")["Time"]
+        .nunique()
+        .rename("n_frames")
+        .reset_index()
+    )
+    remove_ids = frames_per_track.loc[frames_per_track["n_frames"] <= 1, "TrackID"].to_numpy(np.float64)
+    if remove_ids.size == 0:
+        cleanup_df = pd.DataFrame(
+            [{
+                "removed_single_frame_tracks": 0,
+                "remaining_tracks": int(frames_per_track.shape[0]),
+                "removed_rows": 0,
+            }]
+        )
+        return labels_tzyx.copy(), tracks_df.copy(), cleanup_df
+
+    remove_id_set = set(remove_ids.tolist())
+    filtered_tracks_df = tracks_df.loc[~pd.to_numeric(tracks_df["TrackID"], errors="coerce").isin(remove_id_set)].copy()
+    filtered_tracks_df = filtered_tracks_df.sort_values(["Time", "TrackID"]).reset_index(drop=True)
+
+    filtered_labels = labels_tzyx.copy()
+    remove_ids_u32 = np.asarray(remove_ids, dtype=np.uint32)
+    filtered_labels[np.isin(filtered_labels, remove_ids_u32)] = 0
+
+    cleanup_df = pd.DataFrame(
+        [{
+            "removed_single_frame_tracks": int(remove_ids.size),
+            "remaining_tracks": int(pd.to_numeric(filtered_tracks_df["TrackID"], errors="coerce").dropna().nunique()),
+            "removed_rows": int(len(tracks_df) - len(filtered_tracks_df)),
+        }]
+    )
+    return filtered_labels, filtered_tracks_df, cleanup_df
 
 
 def rotation_matrix_xyz(angle_x: float, angle_y: float, angle_z: float) -> np.ndarray:
@@ -2670,15 +2721,24 @@ def main() -> None:
 
     local_stack_tzyx = np.stack(local_labels, axis=0).astype(np.uint32, copy=False)
     tracked_labels_tzyx, gt_tracks_df, tracking_stats_df = assign_tracks(local_stack_tzyx)
+    cleanup_summary_df = pd.DataFrame()
+    if bool(REMOVE_SINGLE_FRAME_TRACKS):
+        tracked_labels_tzyx, gt_tracks_df, cleanup_summary_df = remove_single_frame_tracks(
+            tracked_labels_tzyx,
+            gt_tracks_df,
+        )
     segmentation_df = pd.DataFrame(segmentation_rows)
     summary_df = segmentation_df.merge(tracking_stats_df, on="Time", how="left")
 
     label_tif_path = save_tracked_label_tiff(tracked_labels_tzyx, OUTPUT_DIR / f"{INPUT_TIF.stem}_tracked_labels.tif")
     gt_imaris_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_groundtruth_imaris.csv"
     summary_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_segmentation_tracking_summary.csv"
+    cleanup_summary_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_single_frame_track_cleanup_summary.csv"
 
     gt_tracks_df.to_csv(gt_imaris_path, index=False)
     summary_df.to_csv(summary_path, index=False)
+    if not cleanup_summary_df.empty:
+        cleanup_summary_df.to_csv(cleanup_summary_path, index=False)
     qc_paths = save_qc_overlay_frames(
         raw_stack_tzyx=stack_tzyx,
         labels_tzyx=tracked_labels_tzyx,
@@ -2689,6 +2749,11 @@ def main() -> None:
     print(f"  Labels TIFF: {label_tif_path}")
     print(f"  GT IMARIS CSV: {gt_imaris_path}")
     print(f"  Summary CSV: {summary_path}")
+    if not cleanup_summary_df.empty:
+        removed_tracks = int(cleanup_summary_df.iloc[0]["removed_single_frame_tracks"])
+        remaining_tracks = int(cleanup_summary_df.iloc[0]["remaining_tracks"])
+        print(f"  Single-frame cleanup CSV: {cleanup_summary_path}")
+        print(f"  Single-frame cleanup: removed {removed_tracks} tracks, kept {remaining_tracks}")
     for qc_path in qc_paths:
         print(f"  QC overlay: {qc_path}")
 

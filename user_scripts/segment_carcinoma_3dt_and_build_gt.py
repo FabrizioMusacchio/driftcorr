@@ -236,6 +236,8 @@ HCV_METHOD_DEFS: list[dict[str, Any]] = [
         },
     },
 ]
+
+HCV_METHOD_ORDER = [str(cfg["name"]) for cfg in HCV_METHOD_DEFS]
 DRIFT_REGIMES: list[dict[str, Any]] = [
     {
         "name": "no_drift",
@@ -1157,6 +1159,17 @@ def plot_heatmap_from_pivot(
     return out_path
 
 
+def order_hcv_methods_df(df: pd.DataFrame, method_col: str = "method") -> pd.DataFrame:
+    """Return a dataframe ordered by the canonical HCV method definition sequence."""
+    if method_col not in df.columns:
+        return df.copy()
+    out = df.copy()
+    order_map = {name: idx for idx, name in enumerate(HCV_METHOD_ORDER)}
+    out["_hcv_order"] = out[method_col].astype(str).map(order_map).fillna(len(HCV_METHOD_ORDER)).astype(int)
+    out = out.sort_values(["_hcv_order", method_col]).drop(columns=["_hcv_order"]).reset_index(drop=True)
+    return out
+
+
 def plot_metric_heatmap(summary_df: pd.DataFrame, 
                         metric: str, 
                         out_path: Path, 
@@ -1168,7 +1181,8 @@ def plot_metric_heatmap(summary_df: pd.DataFrame,
     """Create a single-metric heatmap across methods for this dataset."""
     tab = summary_df[["method", metric]].copy()
     tab[metric] = pd.to_numeric(tab[metric], errors="coerce")
-    tab = tab.dropna(subset=[metric]).sort_values(metric, ascending=False).reset_index(drop=True)
+    tab = tab.dropna(subset=[metric]).reset_index(drop=True)
+    tab = order_hcv_methods_df(tab, method_col="method")
     pivot = tab.set_index("method")[[metric]]
     pivot.columns = [str(dataset_label)]
     return plot_heatmap_from_pivot(pivot, title=title, cbar_label=metric, out_path=out_path, figsize=figure_size, clim=clim, show_title=show_title)
@@ -1187,7 +1201,7 @@ def plot_precision_recall_accuracy(summary_df: pd.DataFrame,
     tab = summary_df[cols].copy()
     for metric in metrics:
         tab[metric] = pd.to_numeric(tab[metric], errors="coerce")
-    tab = tab.sort_values("link_f1_mean", ascending=False) if "link_f1_mean" in tab.columns else tab
+    tab = order_hcv_methods_df(tab, method_col="method")
     pivot = tab.set_index("method")[metrics].T
     pivot.columns = tab["method"].astype(str).tolist()
     pivot.index = [f"{dataset_label}: precision", f"{dataset_label}: recall", f"{dataset_label}: accuracy"]

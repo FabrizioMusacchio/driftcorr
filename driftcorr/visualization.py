@@ -508,10 +508,12 @@ def plot_tracks_over_time_panels(
     if has_gt:
         panel_specs.append((4, "Overlay: GT and corrected tracks", "overlay_gt_and_corrected"))
 
-    cm2inch = 1/2.54
+    cm2inch = 1 / 2.54
     for panel_id, panel_title, name_stub in panel_specs:
-        fig_i = plt.figure(figsize=(6.0 * cm2inch, 6.0 * cm2inch), constrained_layout=True)
-        ax_i = fig_i.add_subplot(111, projection="3d")
+        fig_i, ax_i = plt.subplots(
+            figsize=(6.0 * cm2inch, 6.0 * cm2inch),
+            subplot_kw={"projection": "3d"},
+        )
         
         """ 
         # generate some dummy scatter points:
@@ -610,7 +612,7 @@ def plot_tracks_over_time_panels(
             else:
                 ax_i.text2D(0.2, 0.5, "No common GT/corrected TrackIDs", transform=ax_i.transAxes)
 
-        ax_i.set_title(panel_title, pad=-55)
+        ax_i.set_title(panel_title, pad=-55, fontsize=8)
         ax_i.set_xlim(x_min, x_max)
         ax_i.set_ylim(y_min, y_max)
         ax_i.set_zlim(z_min, z_max)
@@ -622,11 +624,12 @@ def plot_tracks_over_time_panels(
             _apply_box_aspect_from_limits(ax_i, x_min, x_max, y_min, y_max, z_min, z_max)
         
         ax_i.set_position([0.1, 0.1, 0.7, 0.8])
-        ax_i.tick_params(axis="both", which="major", pad=-2)
-        ax_i.xaxis.labelpad = -2
-        ax_i.yaxis.labelpad = -2
-        ax_i.zaxis.labelpad = -2
+        ax_i.tick_params(axis="both", which="major", pad=-3)
+        ax_i.xaxis.labelpad = -7
+        ax_i.yaxis.labelpad = -7
+        ax_i.zaxis.labelpad = -7
 
+        fig_i.tight_layout()
         out_i = out_path.parent / f"{out_path.stem}_panel_{panel_id}_{_safe_name(name_stub)}.pdf"
         fig_i.savefig(out_i, dpi=300, transparent=True)
         plt.close(fig_i)

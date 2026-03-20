@@ -116,6 +116,7 @@ MAX_COMPONENT_SIZE_2D = 2200
 LOW_THRESHOLD_FRACTION = 0.55
 LOW_THRESHOLD_FLOOR = 0.02
 MAX_TRACK_LINK_DISTANCE = 28.0
+REMOVE_SINGLE_FRAME_TRACKS = True
 IMARIS_UNIT = "px"
 VOXEL_SIZE_XYZ = (1.0, 1.0, 1.0)
 HCV_DEFAULT_KEEP_PERCENTILE = 99.0
@@ -240,6 +241,7 @@ HCV_METHOD_DEFS: list[dict[str, Any]] = [
         },
     },
 ]
+HCV_METHOD_ORDER = [str(cfg["name"]) for cfg in HCV_METHOD_DEFS]
 # %% FUNCTIONS
 def otsu_threshold(values: np.ndarray, bins: int = 256, value_range: tuple[float, float] | None = None) -> float:
     """Compute an Otsu threshold from a 1D numeric array."""
@@ -609,6 +611,54 @@ def assign_tracks(
     return global_stack, tracks_df, frame_stats_df
 
 
+def remove_single_frame_tracks(
+    labels_tyx: np.ndarray,
+    tracks_df: pd.DataFrame,
+) -> tuple[np.ndarray, pd.DataFrame, pd.DataFrame]:
+    """Remove tracks that appear in only one frame from labels and centroid table."""
+    tracks = tracks_df.copy()
+    tracks["TrackID"] = pd.to_numeric(tracks["TrackID"], errors="coerce")
+    tracks["Time"] = pd.to_numeric(tracks["Time"], errors="coerce")
+    tracks = tracks.dropna(subset=["TrackID", "Time"]).copy()
+    if tracks.empty:
+        cleanup_df = pd.DataFrame([{"removed_single_frame_tracks": 0, "remaining_tracks": 0, "removed_rows": 0}])
+        return labels_tyx.copy(), tracks_df.copy(), cleanup_df
+
+    frames_per_track = (
+        tracks.groupby("TrackID")["Time"]
+        .nunique()
+        .rename("n_frames")
+        .reset_index()
+    )
+    remove_ids = frames_per_track.loc[frames_per_track["n_frames"] <= 1, "TrackID"].to_numpy(np.float64)
+    if remove_ids.size == 0:
+        cleanup_df = pd.DataFrame(
+            [{
+                "removed_single_frame_tracks": 0,
+                "remaining_tracks": int(frames_per_track.shape[0]),
+                "removed_rows": 0,
+            }]
+        )
+        return labels_tyx.copy(), tracks_df.copy(), cleanup_df
+
+    remove_id_set = set(remove_ids.tolist())
+    filtered_tracks_df = tracks_df.loc[~pd.to_numeric(tracks_df["TrackID"], errors="coerce").isin(remove_id_set)].copy()
+    filtered_tracks_df = filtered_tracks_df.sort_values(["Time", "TrackID"]).reset_index(drop=True)
+
+    filtered_labels = labels_tyx.copy()
+    remove_ids_u32 = np.asarray(remove_ids, dtype=np.uint32)
+    filtered_labels[np.isin(filtered_labels, remove_ids_u32)] = 0
+
+    cleanup_df = pd.DataFrame(
+        [{
+            "removed_single_frame_tracks": int(remove_ids.size),
+            "remaining_tracks": int(pd.to_numeric(filtered_tracks_df["TrackID"], errors="coerce").dropna().nunique()),
+            "removed_rows": int(len(tracks_df) - len(filtered_tracks_df)),
+        }]
+    )
+    return filtered_labels, filtered_tracks_df, cleanup_df
+
+
 def build_tracks_from_tracked_labels(tracked_labels_tyx: np.ndarray) -> pd.DataFrame:
     """Extract centroid tracks from a TYX tracked-label stack with stable global TrackIDs."""
     rows: list[dict[str, Any]] = []
@@ -837,7 +887,8 @@ def style_benchmark_2d_axis(
         xlim, ylim = compute_xy_limits(xy)
     else:
         xlim, ylim = plot_window_xy
-    ax.set_title(title, fontsize=8)
+    if title is not None:
+        ax.set_title(title, fontsize=8)
     # ax.set_xlabel("X")
     # ax.set_ylabel("Y")
     ax.set_xlim(*xlim)
@@ -970,10 +1021,10 @@ def plot_2d_frames_comparison(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     panel_base = out_path.with_suffix("")
     panel_paths = [
-        panel_base.with_name(panel_base.name + "_panel_1_gt_tracks.png"),
+        panel_base.with_name(panel_base.name + "_panel_1_gt_tracks.pdf"),
         panel_base.with_name(panel_base.name + "_panel_2_blind_point_clouds.png"),
-        panel_base.with_name(panel_base.name + "_panel_3_inferred_pseudo_tracks.png"),
-        panel_base.with_name(panel_base.name + "_panel_4_overlay_gt_vs_inferred.png"),
+        panel_base.with_name(panel_base.name + "_panel_3_inferred_pseudo_tracks.pdf"),
+        panel_base.with_name(panel_base.name + "_panel_4_overlay_gt_vs_inferred.pdf"),
     ]
 
     gt_xy = gt_tracks_df[["Position X", "Position Y"]].to_numpy(np.float64)
@@ -981,7 +1032,11 @@ def plot_2d_frames_comparison(
     inferred_xy = inferred_tracks_df[["Position X", "Position Y"]].to_numpy(np.float64)
     all_xy = np.vstack([arr for arr in [gt_xy, blind_xy, inferred_xy] if arr.size > 0]) if any(arr.size > 0 for arr in [gt_xy, blind_xy, inferred_xy]) else np.zeros((0, 2), dtype=np.float64)
 
-    def _draw_tracks(ax: Any, df: pd.DataFrame, panel_title: str, singletons_as_black_points: bool = False) -> None:
+    def _draw_tracks(ax: Any, 
+                     df: pd.DataFrame,
+                     panel_title: str,
+                     singletons_as_black_points: bool = False,
+                     show_title: bool = True) -> None:
         track_ids = np.array(sorted(df["TrackID"].astype(float).unique()), dtype=np.float64)
         cmap = plt.get_cmap("turbo")
         denom = max(len(track_ids) - 1, 1)
@@ -995,19 +1050,27 @@ def plot_2d_frames_comparison(
                     s=5,
                     alpha=0.95,
                     linewidths=0.0,
-                    zorder=10,
-                )
+                    zorder=10)
                 continue
             ax.plot(
                 track["Position X"].to_numpy(float),
                 track["Position Y"].to_numpy(float),
                 color=cmap(idx / denom),
                 linewidth=0.8,
-                alpha=0.8,
-            )
-        style_benchmark_2d_axis(ax, all_xy, panel_title, plot_window_xy=plot_window_xy)
+                alpha=0.8)
+        if show_title:
+            style_benchmark_2d_axis(ax, all_xy, panel_title, plot_window_xy=plot_window_xy)
+        else:
+            style_benchmark_2d_axis(ax, all_xy, title=None, plot_window_xy=plot_window_xy)
+        # hide x and y ticks:
+        ax.set_xticks([])
+        ax.set_yticks([])
 
-    def _draw_overlay_tracks(ax: Any, gt_df: pd.DataFrame, inferred_df: pd.DataFrame, panel_title: str) -> None:
+    def _draw_overlay_tracks(ax: Any,
+                             gt_df: pd.DataFrame,
+                             inferred_df: pd.DataFrame,
+                             panel_title: str,
+                             show_title: bool = True) -> None:
         gt_ids = np.array(sorted(gt_df["TrackID"].astype(float).unique()), dtype=np.float64)
         inf_ids = np.array(sorted(inferred_df["TrackID"].astype(float).unique()), dtype=np.float64)
         gt_cmap = plt.get_cmap("turbo")
@@ -1042,40 +1105,40 @@ def plot_2d_frames_comparison(
                 track["Position X"].to_numpy(float),
                 track["Position Y"].to_numpy(float),
                 color=gt_cmap(idx / gt_denom),
-                linewidth=1.5,
-                alpha=0.45,
-                zorder=3)
-
-        style_benchmark_2d_axis(ax, all_xy, panel_title, plot_window_xy=plot_window_xy)
-
-    fig1, ax1 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
-    _draw_tracks(ax1, gt_tracks_df, "GT tracks", singletons_as_black_points=True)
+                linewidth=1.5, alpha=0.45, zorder=3)
+        if show_title:
+            style_benchmark_2d_axis(ax, all_xy, panel_title, plot_window_xy=plot_window_xy)
+        else:
+            style_benchmark_2d_axis(ax, all_xy, title=None, plot_window_xy=plot_window_xy)
+        # hide x and y ticks:
+        ax.set_xticks([])
+        ax.set_yticks([])
+            
+    fig1, ax1 = plt.subplots(figsize=(2.35 * CM, 2.35 * CM), constrained_layout=True)
+    _draw_tracks(ax1, gt_tracks_df, "GT tracks", singletons_as_black_points=True, show_title=False)
     fig1.savefig(panel_paths[0], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig1)
 
-    fig2, ax2 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
-    scatter2 = ax2.scatter(
-        blind_df["x"].to_numpy(float),
-        blind_df["y"].to_numpy(float),
-        c=blind_df["Time"].to_numpy(float),
-        cmap="viridis",
-        s=5,
-        alpha=0.55,
-        linewidths=0.0,)
-    style_benchmark_2d_axis(ax2, all_xy, "Blind point clouds", plot_window_xy=plot_window_xy)
+    fig2, ax2 = plt.subplots(figsize=(2.35 * CM, 2.35 * CM), constrained_layout=True)
+    scatter2 = ax2.scatter(blind_df["x"].to_numpy(float), blind_df["y"].to_numpy(float),
+        c=blind_df["Time"].to_numpy(float), cmap="viridis", s=2, alpha=0.55, linewidths=0.0,)
+    #style_benchmark_2d_axis(ax2, all_xy, "Blind point clouds", plot_window_xy=plot_window_xy)
+    style_benchmark_2d_axis(ax2, all_xy, title=None, plot_window_xy=plot_window_xy)
     # cbar2 = fig2.colorbar(scatter2, ax=ax2, fraction=0.09, pad=0.02)
     # cbar2.outline.set_visible(False)
     # cbar2.ax.tick_params(labelsize=6, pad=1)
-    fig2.savefig(panel_paths[1], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
+    ax2.set_xticks([])
+    ax2.set_yticks([])
+    fig2.savefig(panel_paths[1], dpi=600, transparent=True, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig2)
 
-    fig3, ax3 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
-    _draw_tracks(ax3, inferred_tracks_df, "Inferred pseudo-tracks", singletons_as_black_points=True)
+    fig3, ax3 = plt.subplots(figsize=(2.35 * CM, 2.35 * CM), constrained_layout=True)
+    _draw_tracks(ax3, inferred_tracks_df, "Inferred pseudo-tracks", singletons_as_black_points=True, show_title=False)
     fig3.savefig(panel_paths[2], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig3)
 
-    fig4, ax4 = plt.subplots(figsize=(5.0 * CM, 5.0 * CM), constrained_layout=True)
-    _draw_overlay_tracks(ax4, gt_tracks_df, inferred_tracks_df, "Overlay: GT vs inferred")
+    fig4, ax4 = plt.subplots(figsize=(2.35 * CM, 2.35 * CM), constrained_layout=True)
+    _draw_overlay_tracks(ax4, gt_tracks_df, inferred_tracks_df, "Overlay: GT vs inferred", show_title=False)
     fig4.savefig(panel_paths[3], dpi=300, transparent=True, bbox_inches="tight", pad_inches=0.02)
     plt.close(fig4)
 
@@ -1696,6 +1759,17 @@ def plot_heatmap_from_pivot(
     return out_path
 
 
+def order_hcv_methods_df(df: pd.DataFrame, method_col: str = "method") -> pd.DataFrame:
+    """Return a dataframe ordered by the canonical HCV method definition sequence."""
+    if method_col not in df.columns:
+        return df.copy()
+    out = df.copy()
+    order_map = {name: idx for idx, name in enumerate(HCV_METHOD_ORDER)}
+    out["_hcv_order"] = out[method_col].astype(str).map(order_map).fillna(len(HCV_METHOD_ORDER)).astype(int)
+    out = out.sort_values(["_hcv_order", method_col]).drop(columns=["_hcv_order"]).reset_index(drop=True)
+    return out
+
+
 def plot_metric_heatmap(summary_df: pd.DataFrame, 
                         metric: str, 
                         out_path: Path, 
@@ -1707,7 +1781,8 @@ def plot_metric_heatmap(summary_df: pd.DataFrame,
     """Create a single-metric heatmap across methods for this dataset."""
     tab = summary_df[["method", metric]].copy()
     tab[metric] = pd.to_numeric(tab[metric], errors="coerce")
-    tab = tab.dropna(subset=[metric]).sort_values(metric, ascending=False).reset_index(drop=True)
+    tab = tab.dropna(subset=[metric]).reset_index(drop=True)
+    tab = order_hcv_methods_df(tab, method_col="method")
     pivot = tab.set_index("method")[[metric]]
     pivot.columns = [str(dataset_label)]
     return plot_heatmap_from_pivot(pivot, title=title, cbar_label=metric, out_path=out_path, figsize=figure_size, clim=clim, show_title=show_title)
@@ -1726,7 +1801,7 @@ def plot_precision_recall_accuracy(summary_df: pd.DataFrame,
     tab = summary_df[cols].copy()
     for metric in metrics:
         tab[metric] = pd.to_numeric(tab[metric], errors="coerce")
-    tab = tab.sort_values("link_f1_mean", ascending=False) if "link_f1_mean" in tab.columns else tab
+    tab = order_hcv_methods_df(tab, method_col="method")
     pivot = tab.set_index("method")[metrics].T
     pivot.columns = tab["method"].astype(str).tolist()
     pivot.index = [f"{dataset_label}: precision", f"{dataset_label}: recall", f"{dataset_label}: accuracy"]
@@ -2956,7 +3031,7 @@ def run_blind_point_cloud_association_suite(
     saved_paths: list[Path] = []
 
     for method_cfg in HCV_METHOD_DEFS:
-        # method_cfg = HCV_METHOD_DEFS[0]
+        # method_cfg = HCV_METHOD_DEFS[4]
         method_name = str(method_cfg["name"])
         method_dir = out_root / method_name
         method_dir.mkdir(parents=True, exist_ok=True)
@@ -3027,11 +3102,11 @@ def run_blind_point_cloud_association_suite(
     saved_paths.append(summary_csv)
 
     aggregate_plots = [
-        plot_metric_heatmap(summary_df, "link_f1_mean", dataset_label=dataset_label, clim=(0.0, 1.0), figure_size=(6.0 * CM, 4.0 * CM),
+        plot_metric_heatmap(summary_df, "link_f1_mean", dataset_label=dataset_label, clim=None, figure_size=(6.0 * CM, 3.9 * CM),
                             out_path=out_root / "best_value__link_f1_mean.pdf", 
                             title = "HCV methods: link_f1_mean", show_title=False),
         plot_metric_heatmap(summary_df, "id_switches_mean_per_track", dataset_label=dataset_label,
-                            figure_size=(6.0 * CM, 4.0 * CM),
+                            figure_size=(6.0 * CM, 3.9 * CM),
                             out_path=out_root / "best_value__id_switches_mean_per_track.pdf",
                             title="HCV methods: id_switches_mean_per_track", show_title=False),
         plot_metric_heatmap(summary_df, "fragmentation_rate", dataset_label=dataset_label,
@@ -3205,8 +3280,28 @@ def plot_average_displacement_histogram_threeway(
     fig, ax = plt.subplots(figsize=(6.2 * CM, 3.5 * CM))
     labels_colors = [("HL", "#4C72B0"), ("PCA", "#DD8452"), ("DriftCorr", "#55A868")]
     for arr, (label, color) in zip(arrays, labels_colors):
-        if arr.size:
-            ax.hist(arr, bins=bins, alpha=0.35, color=color, label=label)
+        if not arr.size:
+            continue
+        if label == "DriftCorr":
+            hatch_color = (0.184, 0.365, 0.227, 0.45)
+            with matplotlib.rc_context({"hatch.linewidth": 0.8}):
+                _, _, patches = ax.hist(
+                    arr,
+                    bins=bins,
+                    label=label,
+                    facecolor="none",
+                    edgecolor=hatch_color,
+                    linewidth=0.0,
+                    hatch="///",
+                    zorder=3,
+                )
+            for patch in patches:
+                patch.set_facecolor("none")
+                patch.set_edgecolor(hatch_color)
+                patch.set_linewidth(0.0)
+                patch.set_hatch("///")
+        else:
+            ax.hist(arr, bins=bins, alpha=0.35, color=color, label=label, linewidth=0.0, zorder=2)
     ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"migration\nthreshold={threshold:.3f}")
     ax.set_xlabel("average step displacement")
     ax.set_ylabel("tracks")
@@ -3216,7 +3311,7 @@ def plot_average_displacement_histogram_threeway(
     
     if show_title:
         ax.set_title("Average displacement histogram", fontsize=8)
-    ax.legend(frameon=False, fontsize=7)
+    ax.legend(frameon=False, fontsize=7, loc="upper right")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=300, transparent=True)
@@ -3546,9 +3641,18 @@ def main() -> None:
 
     matched_overview_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_matched_raw_frames_0_99_199.pdf"
     matched_overlay_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_matched_segmented_overlay_frames_0_99_199.pdf"
+    cleanup_summary_df = pd.DataFrame()
+    cleanup_summary_path = OUTPUT_DIR / f"{INPUT_TIF.stem}_single_frame_track_cleanup_summary.csv"
+
+    if bool(REMOVE_SINGLE_FRAME_TRACKS):
+        tracked_labels_tzyx, gt_tracks_df, cleanup_summary_df = remove_single_frame_tracks(
+            tracked_labels_tzyx,
+            gt_tracks_df)
 
     gt_tracks_df.to_csv(gt_imaris_path, index=False)
     summary_df.to_csv(summary_path, index=False)
+    if not cleanup_summary_df.empty:
+        cleanup_summary_df.to_csv(cleanup_summary_path, index=False)
     save_matched_raw_overview_pdf(matched_stack_tyx, [0, 99, 199], matched_overview_path)
     save_matched_label_overlay_pdf(matched_stack_tyx, tracked_labels_tzyx, [0, 99, 199], matched_overlay_path)
     qc_paths = save_qc_overlay_frames(
@@ -3561,6 +3665,11 @@ def main() -> None:
     print(f"  Labels TIFF: {label_tif_path}")
     print(f"  GT IMARIS CSV: {gt_imaris_path}")
     print(f"  Summary CSV: {summary_path}")
+    if not cleanup_summary_df.empty:
+        removed_tracks = int(cleanup_summary_df.iloc[0]["removed_single_frame_tracks"])
+        remaining_tracks = int(cleanup_summary_df.iloc[0]["remaining_tracks"])
+        print(f"  Single-frame cleanup CSV: {cleanup_summary_path}")
+        print(f"  Single-frame cleanup: removed {removed_tracks} tracks, kept {remaining_tracks}")
     print(f"  Matched raw overview PDF: {matched_overview_path}")
     print(f"  Matched overlay PDF: {matched_overlay_path}")
     for qc_path in qc_paths:

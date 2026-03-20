@@ -96,6 +96,7 @@ HCV_BENCHMARK_STATS_PATH = (
     / "hungarian_cv_variants_sweep_nis_dx_blind_varying_dx"
     / "aggregated_hcv_nis_dx_blind_varying_dx_stats.csv"
 )
+PCA_MAX_FRAME_GAP = 2
 RIGID_FAIRNESS_STATS_PATH = PROJECT_ROOT / "Synthetic files parameter sweep" / "rigid_fairness_sweep" / "rigid_fairness_aggregated.csv"
 LOCAL_FAIRNESS_STATS_PATH = PROJECT_ROOT / "Synthetic files parameter sweep" / "local_fairness_sweep" / "local_fairness_aggregated.csv"
 ST_RBF_GRID_STATS_PATH = PROJECT_ROOT / "Synthetic files parameter sweep" / "st_rbf_parameter_selection" / "st_rbf_grid_aggregated.csv"
@@ -1059,6 +1060,7 @@ def make_hcv_gating_and_params(
             "dx_scale": float(dx_scale_est),
             "sigma_init_mode": str(best_cfg.get("sigma_init_mode", "dx")),
             "nn_scale_factor": float(best_cfg.get("nn_scale_factor", 0.3)),
+            "max_gap": int(PCA_MAX_FRAME_GAP),
         }
     )
     gating = {
@@ -2671,6 +2673,7 @@ def run_blind_point_cloud_association_suite(
             "dx_scale_est": float(dx_scale_est),
             "gate_max_dist": float(gating["max_dist"]),
             "gate_keep_percentile": float(gating["keep_percentile"]),
+            "max_gap": int(params.get("max_gap", 0)),
             **{f"assoc_{k}": v for k, v in assoc.quality.items()},
             **summary_gt,
             "accuracy_mean": float(pd.to_numeric(accuracy_df.get("accuracy", np.nan), errors="coerce").mean()) if not accuracy_df.empty else float("nan"),

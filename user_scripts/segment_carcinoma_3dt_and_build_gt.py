@@ -2343,7 +2343,9 @@ def run_drift_correction_suite(
             df_corr=df_corr_eval,
             out_prefix=out_prefix,
             method_name=method_name,
-            df_groundtruth=gt_eval_df)
+            df_groundtruth=gt_eval_df,
+            use_data_box_aspect_tracks_over_time=True,
+        )
         visual_paths.extend(visual_outputs.values())
 
     gt_outputs = save_groundtruth_evaluation_outputs(
@@ -2441,6 +2443,7 @@ def run_drift_correction_suite_gt_input(
             out_prefix=out_prefix,
             method_name=method_name,
             df_groundtruth=gt_eval_df,
+            use_data_box_aspect_tracks_over_time=True,
         )
         visual_paths.extend(visual_outputs.values())
 

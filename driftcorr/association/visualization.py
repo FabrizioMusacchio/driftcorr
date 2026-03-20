@@ -396,10 +396,10 @@ def plot_3d_frames_comparison(
             # print("true for i=3")
         elif i == 4:
             if not gt_tracks.empty:
-                _plot_tracks(ax, gt_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=1.0, alpha=1.0)
+                _plot_tracks(ax, inf_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=1.0, alpha=1.0)
                 # print("true for i=4.1")
             if not inf_tracks.empty:
-                _plot_tracks(ax, inf_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=2.0, alpha=0.5)
+                _plot_tracks(ax, gt_tracks, color_col="TrackID", xyz_cols=("x", "y", "z"), linewidth=2.0, alpha=0.5)
                 # print("true for i=4.2")
 
         ax.set_title(title_use, pad=-55, fontsize=8)

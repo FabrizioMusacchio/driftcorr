@@ -58,6 +58,37 @@ def _compute_limits(
     return x_min, x_max, y_min, y_max, z_min, z_max
 
 
+def _compute_box_aspect_from_limits(
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    z_min: float,
+    z_max: float,
+) -> tuple[float, float, float]:
+    """Return positive XYZ spans for use with set_box_aspect."""
+    span_x = max(float(x_max) - float(x_min), 1e-6)
+    span_y = max(float(y_max) - float(y_min), 1e-6)
+    span_z = max(float(z_max) - float(z_min), 1e-6)
+    return span_x, span_y, span_z
+
+
+def _apply_box_aspect_from_limits(
+    ax,
+    x_min: float,
+    x_max: float,
+    y_min: float,
+    y_max: float,
+    z_min: float,
+    z_max: float,
+) -> None:
+    """Apply data-derived 3D box aspect if supported."""
+    try:
+        ax.set_box_aspect(_compute_box_aspect_from_limits(x_min, x_max, y_min, y_max, z_min, z_max))
+    except Exception:
+        pass
+
+
 def plot_tracks_comparison(
     df_orig: pd.DataFrame,
     df_corr: pd.DataFrame,
@@ -307,7 +338,9 @@ def plot_tracks_over_time_panels(
     df_corr: pd.DataFrame,
     out_path: str | Path,
     title_prefix: str = "",
-    df_groundtruth: pd.DataFrame | None = None) -> Path:
+    df_groundtruth: pd.DataFrame | None = None,
+    use_data_box_aspect: bool = False,
+) -> Path:
     """Plot full track trajectories over all timepoints.
 
     Layout:
@@ -345,6 +378,8 @@ def plot_tracks_over_time_panels(
         ax_gt.set_ylabel("Y")
         ax_gt.set_zlabel("Z")
         ax_gt.view_init(elev=25, azim=-60)
+        if use_data_box_aspect:
+            _apply_box_aspect_from_limits(ax_gt, x_min, x_max, y_min, y_max, z_min, z_max)
 
     # Panel: original input
     for tid in df_orig["TrackID"].dropna().unique():
@@ -358,6 +393,8 @@ def plot_tracks_over_time_panels(
     ax1.set_ylabel("Y")
     ax1.set_zlabel("Z")
     ax1.view_init(elev=25, azim=-60)
+    if use_data_box_aspect:
+        _apply_box_aspect_from_limits(ax1, x_min, x_max, y_min, y_max, z_min, z_max)
 
     # Panel: corrected
     for tid in df_corr["TrackID"].dropna().unique():
@@ -371,6 +408,8 @@ def plot_tracks_over_time_panels(
     ax2.set_ylabel("Y")
     ax2.set_zlabel("Z")
     ax2.view_init(elev=25, azim=-60)
+    if use_data_box_aspect:
+        _apply_box_aspect_from_limits(ax2, x_min, x_max, y_min, y_max, z_min, z_max)
 
     # Panel: overlay GT + corrected (no residual computation, no merge)
     if has_gt:
@@ -422,6 +461,8 @@ def plot_tracks_over_time_panels(
             ax_overlay.set_ylabel("Y")
             ax_overlay.set_zlabel("Z")
             ax_overlay.view_init(elev=25, azim=-60)
+            if use_data_box_aspect:
+                _apply_box_aspect_from_limits(ax_overlay, x_min, x_max, y_min, y_max, z_min, z_max)
             ax_overlay.text2D(
                 0.02,
                 0.98,
@@ -577,6 +618,8 @@ def plot_tracks_over_time_panels(
         ax_i.set_ylabel("Y")
         ax_i.set_zlabel("Z")
         ax_i.view_init(elev=25, azim=-60)
+        if use_data_box_aspect:
+            _apply_box_aspect_from_limits(ax_i, x_min, x_max, y_min, y_max, z_min, z_max)
         
         ax_i.set_position([0.1, 0.1, 0.7, 0.8])
         ax_i.tick_params(axis="both", which="major", pad=-2)
@@ -598,6 +641,7 @@ def save_visual_inspection_plots(
     out_prefix: str | Path,
     method_name: str,
     df_groundtruth: pd.DataFrame | None = None,
+    use_data_box_aspect_tracks_over_time: bool = False,
 ) -> dict[str, Path]:
     """Save both trajectory and per-timepoint visual inspection plots."""
     out_prefix = Path(out_prefix)
@@ -625,6 +669,7 @@ def save_visual_inspection_plots(
         out_path=frames_dir / "tracks_over_time_panels.png",
         title_prefix=method_name,
         df_groundtruth=df_groundtruth,
+        use_data_box_aspect=use_data_box_aspect_tracks_over_time,
     )
     gif_path = _save_frames_as_gif(frame_paths, frames_dir / "timeseries.gif", fps=4.0)
 

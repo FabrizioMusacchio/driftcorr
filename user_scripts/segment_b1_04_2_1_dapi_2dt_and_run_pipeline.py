@@ -117,6 +117,8 @@ LOW_THRESHOLD_FRACTION = 0.55
 LOW_THRESHOLD_FLOOR = 0.02
 MAX_TRACK_LINK_DISTANCE = 28.0
 REMOVE_SINGLE_FRAME_TRACKS = True
+MOTION_CLASSIFICATION_MODE = "median_manual"  # options: "mean_otsu_log", "median_gmm", "median_kde_valley", "median_manual"
+MANUAL_STATIONARY_THRESHOLD = 2.2  # px/frame; used only when MOTION_CLASSIFICATION_MODE == "median_manual"
 IMARIS_UNIT = "px"
 VOXEL_SIZE_XYZ = (1.0, 1.0, 1.0)
 HCV_DEFAULT_KEEP_PERCENTILE = 99.0
@@ -2109,18 +2111,26 @@ def build_regime_tracks(gt_tracks_df: pd.DataFrame, regime_name: str) -> pd.Data
 
 
 def compute_track_average_displacements(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute mean frame-to-frame displacement per track."""
+    """Compute per-track step-displacement summaries used for motion classification."""
     rows: list[dict[str, float]] = []
     for track_id, grp in df.groupby("TrackID", sort=True):
         track = grp.sort_values("Time")
         pts = track[["Position X", "Position Y", "Position Z"]].to_numpy(np.float64)
         if pts.shape[0] < 2:
             mean_disp = 0.0
+            median_disp = 0.0
         else:
             diffs = np.diff(pts, axis=0)
             step_disp = np.linalg.norm(diffs, axis=1)
             mean_disp = float(np.mean(step_disp)) if step_disp.size else 0.0
-        rows.append({"TrackID": float(track_id), "mean_step_displacement": float(mean_disp)})
+            median_disp = float(np.median(step_disp)) if step_disp.size else 0.0
+        rows.append(
+            {
+                "TrackID": float(track_id),
+                "mean_step_displacement": float(mean_disp),
+                "median_step_displacement": float(median_disp),
+            }
+        )
     return pd.DataFrame(rows).sort_values("TrackID").reset_index(drop=True)
 
 
@@ -2138,25 +2148,145 @@ def corrected_tracks_csv_path(drift_root: Path, regime_name: str, method_name: s
     return prefix.with_name(prefix.name + suffix_by_method[method_name])
 
 
+def get_motion_metric_config() -> tuple[str, str]:
+    """Return the active per-track displacement column and display label."""
+    mode = str(MOTION_CLASSIFICATION_MODE).strip().lower()
+    if mode == "mean_otsu_log":
+        return "mean_step_displacement", "average step displacement"
+    if mode in {"median_gmm", "median_kde_valley", "median_manual"}:
+        return "median_step_displacement", "median step displacement"
+    raise ValueError(f"Unsupported MOTION_CLASSIFICATION_MODE: {MOTION_CLASSIFICATION_MODE}")
+
+
+def _fit_two_component_gmm_threshold(values: np.ndarray) -> float:
+    """Fit a simple 1D two-component Gaussian mixture and return the density-intersection threshold."""
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if vals.size < 5 or np.allclose(vals, vals[0]):
+        return float(np.median(vals)) if vals.size else 0.0
+
+    x = np.log1p(vals)
+    q25, q75 = np.percentile(x, [25.0, 75.0])
+    means = np.array([q25, q75], dtype=np.float64)
+    vars_ = np.array([max(np.var(x), 1e-3), max(np.var(x), 1e-3)], dtype=np.float64)
+    weights = np.array([0.5, 0.5], dtype=np.float64)
+
+    for _ in range(100):
+        stds = np.sqrt(np.maximum(vars_, 1e-6))
+        pdfs = np.column_stack(
+            [
+                weights[k] * np.exp(-0.5 * ((x - means[k]) / stds[k]) ** 2) / max(stds[k], 1e-6)
+                for k in range(2)
+            ]
+        )
+        denom = np.maximum(np.sum(pdfs, axis=1, keepdims=True), 1e-12)
+        resp = pdfs / denom
+        nk = np.maximum(resp.sum(axis=0), 1e-6)
+        new_weights = nk / float(x.size)
+        new_means = (resp * x[:, None]).sum(axis=0) / nk
+        new_vars = (resp * (x[:, None] - new_means[None, :]) ** 2).sum(axis=0) / nk
+        if np.allclose(means, new_means, atol=1e-5) and np.allclose(vars_, new_vars, atol=1e-5):
+            weights, means, vars_ = new_weights, new_means, np.maximum(new_vars, 1e-6)
+            break
+        weights, means, vars_ = new_weights, new_means, np.maximum(new_vars, 1e-6)
+
+    order = np.argsort(means)
+    weights = weights[order]
+    means = means[order]
+    vars_ = vars_[order]
+    grid = np.linspace(float(np.min(x)), float(np.max(x)), 2048)
+    stds = np.sqrt(np.maximum(vars_, 1e-6))
+    pdf0 = weights[0] * np.exp(-0.5 * ((grid - means[0]) / stds[0]) ** 2) / max(stds[0], 1e-6)
+    pdf1 = weights[1] * np.exp(-0.5 * ((grid - means[1]) / stds[1]) ** 2) / max(stds[1], 1e-6)
+    between = (grid >= means[0]) & (grid <= means[1])
+    if np.any(between):
+        idx_rel = int(np.argmin(np.abs(pdf0[between] - pdf1[between])))
+        thr_log = float(grid[between][idx_rel])
+    else:
+        thr_log = float(0.5 * (means[0] + means[1]))
+    thr = float(np.expm1(thr_log))
+    return float(np.clip(thr, np.min(vals), np.max(vals)))
+
+
+def _fit_kde_valley_threshold(values: np.ndarray) -> float:
+    """Estimate a threshold from the density valley preceding the dominant migration peak."""
+    vals = np.asarray(values, dtype=np.float64)
+    vals = vals[np.isfinite(vals)]
+    if vals.size < 8 or np.allclose(vals, vals[0]):
+        return float(np.median(vals)) if vals.size else 0.0
+
+    x = np.log1p(vals)
+    x_min = float(np.min(x))
+    x_max = float(np.max(x))
+    if not np.isfinite(x_min) or not np.isfinite(x_max) or x_max <= x_min:
+        return float(np.median(vals))
+
+    grid = np.linspace(x_min, x_max, 2048)
+    try:
+        kde = sstats.gaussian_kde(x)
+        density = np.asarray(kde(grid), dtype=np.float64)
+    except Exception:
+        return _fit_two_component_gmm_threshold(vals)
+    if density.size < 3 or not np.all(np.isfinite(density)):
+        return _fit_two_component_gmm_threshold(vals)
+
+    left = density[:-2]
+    mid = density[1:-1]
+    right = density[2:]
+    maxima = np.where((mid > left) & (mid >= right))[0] + 1
+    minima = np.where((mid < left) & (mid <= right))[0] + 1
+    if maxima.size == 0:
+        return _fit_two_component_gmm_threshold(vals)
+
+    global_peak = int(maxima[np.argmax(density[maxima])])
+    left_peaks = maxima[maxima < global_peak]
+    if left_peaks.size > 0:
+        left_peak = int(left_peaks[np.argmax(density[left_peaks])])
+        between = minima[(minima > left_peak) & (minima < global_peak)]
+        if between.size > 0:
+            valley_idx = int(between[np.argmin(density[between])])
+            thr = float(np.expm1(grid[valley_idx]))
+            return float(np.clip(thr, np.min(vals), np.max(vals)))
+
+    if maxima.size >= 2:
+        strongest = maxima[np.argsort(density[maxima])[-2:]]
+        strongest = np.sort(strongest)
+        between = minima[(minima > strongest[0]) & (minima < strongest[1])]
+        if between.size > 0:
+            valley_idx = int(between[np.argmin(density[between])])
+            thr = float(np.expm1(grid[valley_idx]))
+            return float(np.clip(thr, np.min(vals), np.max(vals)))
+
+    return _fit_two_component_gmm_threshold(vals)
+
+
 def determine_stationary_threshold(avg_disp_df: pd.DataFrame) -> float:
-    """Estimate a GT-based threshold separating semi-stationary and migrating cells."""
-    vals = pd.to_numeric(avg_disp_df["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64)
+    """Estimate a threshold separating semi-stationary and migrating cells."""
+    metric_col, _ = get_motion_metric_config()
+    vals = pd.to_numeric(avg_disp_df[metric_col], errors="coerce").dropna().to_numpy(np.float64)
     vals = vals[np.isfinite(vals)]
     if vals.size == 0:
         return 0.0
+    mode = str(MOTION_CLASSIFICATION_MODE).strip().lower()
+    if mode == "median_manual":
+        return float(MANUAL_STATIONARY_THRESHOLD)
     if vals.size < 5 or np.allclose(vals, vals[0]):
         return float(np.median(vals))
+    if mode == "median_gmm":
+        return _fit_two_component_gmm_threshold(vals)
+    if mode == "median_kde_valley":
+        return _fit_kde_valley_threshold(vals)
     thr_log = otsu_threshold(np.log1p(vals), bins=128, value_range=(float(np.min(np.log1p(vals))), float(np.max(np.log1p(vals)))))
     thr = float(np.expm1(thr_log))
-    thr = float(np.clip(thr, np.min(vals), np.max(vals)))
-    return thr
+    return float(np.clip(thr, np.min(vals), np.max(vals)))
 
 
 def classify_tracks_by_displacement(avg_disp_df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     """Attach stationary/migrating class labels using a shared threshold."""
     out = avg_disp_df.copy()
+    metric_col, _ = get_motion_metric_config()
     out["motion_class"] = np.where(
-        pd.to_numeric(out["mean_step_displacement"], errors="coerce").to_numpy(np.float64) <= float(threshold),
+        pd.to_numeric(out[metric_col], errors="coerce").to_numpy(np.float64) <= float(threshold),
         "stationary",
         "migrating",
     )
@@ -2588,7 +2718,7 @@ def plot_average_displacement_histogram(
         ax.hist(gt, bins=bins, alpha=0.45, color="#4C72B0", label=str(group_labels[0]))
     if other.size:
         ax.hist(other, bins=bins, alpha=0.45, color="#DD8452", label=str(group_labels[1]))
-    ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"migration\nthreshold={threshold:.3f}")
+    ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"migration\nthreshold={threshold:.2f}")
     ax.set_xlabel("average step displacement")
     ax.set_ylabel("tracks")
     if show_title:
@@ -3269,11 +3399,12 @@ def plot_average_displacement_histogram_threeway(
     out_path: Path,
     show_title: bool = True,
 ) -> Path:
-    """Overlay histograms of mean step displacement for GT, PCA and drift-corrected tracks."""
+    """Overlay histograms of the active step-displacement metric for HL, PCA and drift-corrected tracks."""
+    metric_col, axis_label = get_motion_metric_config()
     arrays = [
-        pd.to_numeric(gt_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
-        pd.to_numeric(pca_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
-        pd.to_numeric(driftcorr_avg_disp["mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
+        pd.to_numeric(gt_avg_disp[metric_col], errors="coerce").dropna().to_numpy(np.float64),
+        pd.to_numeric(pca_avg_disp[metric_col], errors="coerce").dropna().to_numpy(np.float64),
+        pd.to_numeric(driftcorr_avg_disp[metric_col], errors="coerce").dropna().to_numpy(np.float64),
     ]
     max_val = max([float(np.max(arr)) if arr.size else 0.0 for arr in arrays] + [float(threshold), 1.0])
     bins = np.linspace(0.0, max_val * 1.05, 24)
@@ -3302,8 +3433,8 @@ def plot_average_displacement_histogram_threeway(
                 patch.set_hatch("///")
         else:
             ax.hist(arr, bins=bins, alpha=0.35, color=color, label=label, linewidth=0.0, zorder=2)
-    ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"migration\nthreshold={threshold:.3f}")
-    ax.set_xlabel("average step displacement")
+    ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"migration\nthreshold={threshold:.2f}")
+    ax.set_xlabel(axis_label)
     ax.set_ylabel("tracks")
     ax.set_xlim(left=0.0)
     ax.set_ylim(bottom=0.0)
@@ -3327,14 +3458,15 @@ def plot_motion_class_average_displacement_threeway(
     stats_csv_path: Path | None = None,
     group_labels: tuple[str, str, str] = ("GT", "PCA", "DriftCorr"),
 ) -> Path:
-    """Plot average displacement for stationary vs migrating tracks across GT/PCA/driftcorr."""
+    """Plot the active displacement metric for stationary vs migrating tracks across HL/PCA/driftcorr."""
     stats_rows: list[dict[str, Any]] = []
+    metric_col, axis_label = get_motion_metric_config()
     fig, axes = plt.subplots(1, 2, figsize=(9.0 * CM, 3.6 * CM), sharey=False)
     for ax, motion_class, title in zip(axes, ["stationary", "migrating"], ["Stationary", "Migrating"]):
         groups = [
-            pd.to_numeric(gt_class_df.loc[gt_class_df["motion_class"] == motion_class, "mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
-            pd.to_numeric(pca_class_df.loc[pca_class_df["motion_class"] == motion_class, "mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
-            pd.to_numeric(driftcorr_class_df.loc[driftcorr_class_df["motion_class"] == motion_class, "mean_step_displacement"], errors="coerce").dropna().to_numpy(np.float64),
+            pd.to_numeric(gt_class_df.loc[gt_class_df["motion_class"] == motion_class, metric_col], errors="coerce").dropna().to_numpy(np.float64),
+            pd.to_numeric(pca_class_df.loc[pca_class_df["motion_class"] == motion_class, metric_col], errors="coerce").dropna().to_numpy(np.float64),
+            pd.to_numeric(driftcorr_class_df.loc[driftcorr_class_df["motion_class"] == motion_class, metric_col], errors="coerce").dropna().to_numpy(np.float64),
         ]
         means = [float(np.mean(arr)) if arr.size else 0.0 for arr in groups]
         medians = [float(np.median(arr)) if arr.size else 0.0 for arr in groups]
@@ -3409,7 +3541,7 @@ def plot_motion_class_average_displacement_threeway(
         ax.set_xticks(x)
         ax.set_xticklabels(list(("HL", "PCA", "DriftCorr")))
         ax.set_title(title, fontsize=8)
-        ax.set_ylabel("average step\ndisplacement")
+        ax.set_ylabel(axis_label.replace(" ", "\n", 1))
         #ax.set_ylim(bottom=0.0)
         data_max = max([float(np.max(arr)) if arr.size else 0.0 for arr in groups] + [0.0])
         data_span = data_max if data_max > 0.0 else 1.0
@@ -3537,6 +3669,8 @@ def run_observed_summary_analysis(
             {
                 "best_association_method": BEST_ASSOCIATION_METHOD,
                 "best_driftcorr_method_no_gt": str(best_driftcorr_method),
+                "motion_classification_mode": str(MOTION_CLASSIFICATION_MODE),
+                "motion_metric_column": str(get_motion_metric_config()[0]),
                 "stationary_threshold": float(threshold),
                 "gt_unique_tracks": gt_unique,
                 "pca_unique_tracks": pca_unique,

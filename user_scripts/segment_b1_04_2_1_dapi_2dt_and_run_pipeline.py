@@ -3576,6 +3576,9 @@ def plot_average_displacement_histogram_threeway(
     fig, ax = plt.subplots(figsize=(6.2 * CM, 3.5 * CM))
     labels_colors = [("HL", "#4C72B0"), ("PCA", "#DD8452"), ("DriftCorr", "#55A868")]
     for arr, (label, color) in zip(arrays, labels_colors):
+        if arr.size:
+            ax.hist(arr, bins=bins, alpha=0.35, color=color, label=label)
+    """ for arr, (label, color) in zip(arrays, labels_colors):
         if not arr.size:
             continue
         if label == "DriftCorr":
@@ -3597,7 +3600,7 @@ def plot_average_displacement_histogram_threeway(
                 patch.set_linewidth(0.0)
                 patch.set_hatch("///")
         else:
-            ax.hist(arr, bins=bins, alpha=0.35, color=color, label=label, linewidth=0.0, zorder=2)
+            ax.hist(arr, bins=bins, alpha=0.35, color=color, label=label, linewidth=0.0, zorder=2) """
     ax.axvline(float(threshold), color="black", linestyle="--", linewidth=1.2, label=f"migration\nthreshold={threshold:.2f}")
     ax.set_xlabel(axis_label)
     ax.set_ylabel("tracks")

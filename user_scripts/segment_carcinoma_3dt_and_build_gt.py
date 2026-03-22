@@ -1554,6 +1554,21 @@ def corrected_tracks_csv_path(drift_root: Path, regime_name: str, method_name: s
     return prefix.with_name(prefix.name + suffix_by_method[method_name])
 
 
+def load_tracks_csv(path: Path, prefer_corrected_columns: bool = False) -> pd.DataFrame:
+    """Load a track CSV and optionally promote corrected coordinate columns to the standard names."""
+    df = pd.read_csv(path)
+    if prefer_corrected_columns:
+        corr_map = {
+            "Position X_corr": "Position X",
+            "Position Y_corr": "Position Y",
+            "Position Z_corr": "Position Z",
+        }
+        for src, dst in corr_map.items():
+            if src in df.columns:
+                df[dst] = pd.to_numeric(df[src], errors="coerce")
+    return ensure_numeric_tracks(df)
+
+
 def get_motion_metric_config() -> tuple[str, str]:
     """Return the active per-track displacement column and display label."""
     mode = str(MOTION_CLASSIFICATION_MODE).strip().lower()
@@ -2297,7 +2312,7 @@ def run_regime_summary_analysis(
     corrected_tracks_path = corrected_tracks_csv_path(drift_root=drift_root, regime_name=regime_name, method_name=best_drift_method)
     if not corrected_tracks_path.exists():
         raise FileNotFoundError(f"Best drift-corrected tracks not found: {corrected_tracks_path}")
-    driftcorr_tracks_df = ensure_numeric_tracks(pd.read_csv(corrected_tracks_path))
+    driftcorr_tracks_df = load_tracks_csv(corrected_tracks_path, prefer_corrected_columns=True)
 
     gt_unique = int(pd.to_numeric(gt_tracks_df["TrackID"], errors="coerce").dropna().nunique())
     pca_unique = int(pd.to_numeric(pca_tracks_df["TrackID"], errors="coerce").dropna().nunique())

@@ -49,6 +49,7 @@ except ModuleNotFoundError as exc:
 try:
     from scipy import ndimage as ndi
     from scipy import stats as sstats
+    from scipy.spatial import ConvexHull, QhullError
 except ModuleNotFoundError as exc:
     raise ModuleNotFoundError(
         "This script requires `scipy`. Install it in your environment, then rerun."
@@ -124,6 +125,8 @@ VOXEL_SIZE_XYZ = (1.0, 1.0, 1.0)
 HCV_DEFAULT_KEEP_PERCENTILE = 99.0
 HCV_DEFAULT_MAX_DIST_FACTOR = 6.0
 PCA_MAX_FRAME_GAP = 5
+MOTION_AUTOCORR_MAX_LAG = 5
+MOTION_MSD_MAX_LAG = 10
 BEST_ASSOCIATION_METHOD = "hungarian_two_stage_nis_cv"
 OBSERVED_REGIME_NAME = "observed_raw"
 OBSERVED_DATASET_LABEL = "b1_04_2_1_dapi_observed_raw"
@@ -2110,28 +2113,175 @@ def build_regime_tracks(gt_tracks_df: pd.DataFrame, regime_name: str) -> pd.Data
     return out
 
 
-def compute_track_average_displacements(df: pd.DataFrame) -> pd.DataFrame:
-    """Compute per-track step-displacement summaries used for motion classification."""
-    rows: list[dict[str, float]] = []
+def compute_track_motion_metrics(
+    df: pd.DataFrame,
+    autocorr_max_lag: int = MOTION_AUTOCORR_MAX_LAG,
+    msd_max_lag: int = MOTION_MSD_MAX_LAG,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Compute per-track motion metrics, directional autocorrelation, and MSD curves in 2D."""
+    track_rows: list[dict[str, float]] = []
+    autocorr_rows: list[dict[str, float]] = []
+    msd_rows: list[dict[str, float]] = []
+    autocorr_max_lag = max(int(autocorr_max_lag), 1)
+    msd_max_lag = max(int(msd_max_lag), 1)
     for track_id, grp in df.groupby("TrackID", sort=True):
         track = grp.sort_values("Time")
-        pts = track[["Position X", "Position Y", "Position Z"]].to_numpy(np.float64)
-        if pts.shape[0] < 2:
-            mean_disp = 0.0
-            median_disp = 0.0
-        else:
-            diffs = np.diff(pts, axis=0)
-            step_disp = np.linalg.norm(diffs, axis=1)
-            mean_disp = float(np.mean(step_disp)) if step_disp.size else 0.0
-            median_disp = float(np.median(step_disp)) if step_disp.size else 0.0
-        rows.append(
+        pts = track[["Position X", "Position Y"]].to_numpy(np.float64)
+        n_points = int(pts.shape[0])
+        step_vecs = np.diff(pts, axis=0) if n_points >= 2 else np.zeros((0, 2), dtype=np.float64)
+        step_lengths = np.linalg.norm(step_vecs, axis=1) if step_vecs.size else np.zeros(0, dtype=np.float64)
+        cumulative_path_length = float(np.sum(step_lengths)) if step_lengths.size else 0.0
+        mean_disp = float(np.mean(step_lengths)) if step_lengths.size else 0.0
+        median_disp = float(np.median(step_lengths)) if step_lengths.size else 0.0
+        max_disp = float(np.max(step_lengths)) if step_lengths.size else 0.0
+        net_displacement = float(np.linalg.norm(pts[-1] - pts[0])) if n_points >= 2 else 0.0
+        straightness = float(net_displacement / cumulative_path_length) if cumulative_path_length > 1e-12 else 0.0
+
+        valid_steps = step_lengths > 1e-12
+        unit_vecs = np.zeros_like(step_vecs)
+        if np.any(valid_steps):
+            unit_vecs[valid_steps] = step_vecs[valid_steps] / step_lengths[valid_steps][:, None]
+
+        signed_angles_deg = np.zeros(0, dtype=np.float64)
+        if unit_vecs.shape[0] >= 2:
+            prev_u = unit_vecs[:-1]
+            next_u = unit_vecs[1:]
+            valid_pair = valid_steps[:-1] & valid_steps[1:]
+            if np.any(valid_pair):
+                cross_z = prev_u[valid_pair, 0] * next_u[valid_pair, 1] - prev_u[valid_pair, 1] * next_u[valid_pair, 0]
+                dot = prev_u[valid_pair, 0] * next_u[valid_pair, 0] + prev_u[valid_pair, 1] * next_u[valid_pair, 1]
+                signed_angles_deg = np.degrees(np.arctan2(cross_z, dot))
+        abs_angles_deg = np.abs(signed_angles_deg)
+        mean_abs_turn_deg = float(np.mean(abs_angles_deg)) if abs_angles_deg.size else 0.0
+        mean_sq_turn_deg2 = float(np.mean(signed_angles_deg ** 2)) if signed_angles_deg.size else 0.0
+
+        sign_change_count = 0
+        if signed_angles_deg.size >= 2:
+            sign_series = np.sign(signed_angles_deg)
+            nonzero = sign_series != 0
+            sign_series = sign_series[nonzero]
+            if sign_series.size >= 2:
+                sign_change_count = int(np.sum(sign_series[1:] != sign_series[:-1]))
+        uturn_count = int(np.sum(abs_angles_deg > 150.0)) if abs_angles_deg.size else 0
+
+        unique_pts = np.unique(pts, axis=0) if n_points else np.zeros((0, 2), dtype=np.float64)
+        hull_area = 0.0
+        hull_perimeter = 0.0
+        if unique_pts.shape[0] >= 3:
+            try:
+                hull = ConvexHull(unique_pts)
+                hull_area = float(hull.volume)
+                hull_perimeter = float(hull.area)
+            except QhullError:
+                hull_area = 0.0
+                hull_perimeter = 0.0
+
+        track_rows.append(
             {
                 "TrackID": float(track_id),
+                "n_points": float(n_points),
+                "cumulative_path_length": float(cumulative_path_length),
                 "mean_step_displacement": float(mean_disp),
                 "median_step_displacement": float(median_disp),
+                "max_step_displacement": float(max_disp),
+                "net_displacement": float(net_displacement),
+                "straightness_index": float(straightness),
+                "mean_abs_turning_angle_deg": float(mean_abs_turn_deg),
+                "mean_squared_turning_angle_deg2": float(mean_sq_turn_deg2),
+                "curvature_sign_change_count": float(sign_change_count),
+                "u_turn_count_gt_150deg": float(uturn_count),
+                "convex_hull_area": float(hull_area),
+                "convex_hull_perimeter": float(hull_perimeter),
             }
         )
-    return pd.DataFrame(rows).sort_values("TrackID").reset_index(drop=True)
+
+        if np.any(valid_steps):
+            valid_unit_vecs = unit_vecs[valid_steps]
+            max_k = min(int(autocorr_max_lag), max(valid_unit_vecs.shape[0] - 1, 0))
+            for k in range(1, max_k + 1):
+                dots = np.sum(valid_unit_vecs[:-k] * valid_unit_vecs[k:], axis=1)
+                if dots.size:
+                    autocorr_rows.append(
+                        {
+                            "TrackID": float(track_id),
+                            "lag": float(k),
+                            "directional_autocorrelation": float(np.mean(dots)),
+                            "n_pairs": float(dots.size),
+                        }
+                    )
+
+        max_k = min(int(msd_max_lag), max(n_points - 1, 0))
+        for k in range(1, max_k + 1):
+            deltas = pts[k:] - pts[:-k]
+            if deltas.size:
+                sq_disp = np.sum(deltas ** 2, axis=1)
+                msd_rows.append(
+                    {
+                        "TrackID": float(track_id),
+                        "lag": float(k),
+                        "msd": float(np.mean(sq_disp)),
+                        "n_pairs": float(sq_disp.size),
+                    }
+                )
+
+    metrics_df = pd.DataFrame(track_rows).sort_values("TrackID").reset_index(drop=True)
+    autocorr_df = pd.DataFrame(autocorr_rows)
+    if not autocorr_df.empty:
+        autocorr_df = autocorr_df.sort_values(["TrackID", "lag"]).reset_index(drop=True)
+    msd_df = pd.DataFrame(msd_rows)
+    if not msd_df.empty:
+        msd_df = msd_df.sort_values(["TrackID", "lag"]).reset_index(drop=True)
+    return metrics_df, autocorr_df, msd_df
+
+
+def compute_track_average_displacements(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute per-track step-displacement summaries used for motion classification."""
+    metrics_df, _, _ = compute_track_motion_metrics(df)
+    return metrics_df[["TrackID", "mean_step_displacement", "median_step_displacement"]].copy()
+
+
+def summarize_track_motion_metrics(metrics_df: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Summarize per-track motion metrics for one dataset label."""
+    numeric_cols = [col for col in metrics_df.columns if col != "TrackID"]
+    rows: list[dict[str, float | str]] = []
+    for col in numeric_cols:
+        vals = pd.to_numeric(metrics_df[col], errors="coerce").dropna().to_numpy(np.float64)
+        rows.append(
+            {
+                "dataset": str(label),
+                "metric": str(col),
+                "n_tracks": int(vals.size),
+                "mean": float(np.mean(vals)) if vals.size else np.nan,
+                "median": float(np.median(vals)) if vals.size else np.nan,
+                "std": float(np.std(vals, ddof=1)) if vals.size >= 2 else 0.0,
+                "sem": sem_or_zero(vals),
+                "min": float(np.min(vals)) if vals.size else np.nan,
+                "max": float(np.max(vals)) if vals.size else np.nan,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def summarize_lag_metric(metric_df: pd.DataFrame, value_col: str, label: str) -> pd.DataFrame:
+    """Aggregate lag-dependent metrics such as MSD and directional autocorrelation."""
+    if metric_df.empty:
+        return pd.DataFrame(columns=["dataset", "lag", "n_tracks", "mean", "median", "std", "sem", "metric"])
+    rows: list[dict[str, float | str]] = []
+    for lag, grp in metric_df.groupby("lag", sort=True):
+        vals = pd.to_numeric(grp[value_col], errors="coerce").dropna().to_numpy(np.float64)
+        rows.append(
+            {
+                "dataset": str(label),
+                "metric": str(value_col),
+                "lag": float(lag),
+                "n_tracks": int(pd.to_numeric(grp["TrackID"], errors="coerce").dropna().nunique()),
+                "mean": float(np.mean(vals)) if vals.size else np.nan,
+                "median": float(np.median(vals)) if vals.size else np.nan,
+                "std": float(np.std(vals, ddof=1)) if vals.size >= 2 else 0.0,
+                "sem": sem_or_zero(vals),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def corrected_tracks_csv_path(drift_root: Path, regime_name: str, method_name: str) -> Path:
@@ -2146,6 +2296,21 @@ def corrected_tracks_csv_path(drift_root: Path, regime_name: str, method_name: s
     if method_name not in suffix_by_method:
         raise ValueError(f"Unsupported drift-correction method: {method_name}")
     return prefix.with_name(prefix.name + suffix_by_method[method_name])
+
+
+def load_tracks_csv(path: Path, prefer_corrected_columns: bool = False) -> pd.DataFrame:
+    """Load a track CSV and optionally promote corrected coordinate columns to the standard names."""
+    df = pd.read_csv(path)
+    if prefer_corrected_columns:
+        corr_map = {
+            "Position X_corr": "Position X",
+            "Position Y_corr": "Position Y",
+            "Position Z_corr": "Position Z",
+        }
+        for src, dst in corr_map.items():
+            if src in df.columns:
+                df[dst] = pd.to_numeric(df[src], errors="coerce")
+    return ensure_numeric_tracks(df)
 
 
 def get_motion_metric_config() -> tuple[str, str]:
@@ -2753,7 +2918,7 @@ def run_regime_summary_analysis(
     corrected_tracks_path = corrected_tracks_csv_path(drift_root=drift_root, regime_name=regime_name, method_name=best_drift_method)
     if not corrected_tracks_path.exists():
         raise FileNotFoundError(f"Best drift-corrected tracks not found: {corrected_tracks_path}")
-    driftcorr_tracks_df = ensure_numeric_tracks(pd.read_csv(corrected_tracks_path))
+    driftcorr_tracks_df = load_tracks_csv(corrected_tracks_path, prefer_corrected_columns=True)
 
     gt_unique = int(pd.to_numeric(gt_tracks_df["TrackID"], errors="coerce").dropna().nunique())
     pca_unique = int(pd.to_numeric(pca_tracks_df["TrackID"], errors="coerce").dropna().nunique())
@@ -3573,6 +3738,209 @@ def plot_motion_class_average_displacement_threeway(
     return out_path
 
 
+def plot_track_metric_violin_threeway(
+    gt_metrics_df: pd.DataFrame,
+    pca_metrics_df: pd.DataFrame,
+    driftcorr_metrics_df: pd.DataFrame,
+    metric_col: str,
+    ylabel: str,
+    out_path: Path,
+    stats_csv_path: Path | None = None,
+    title: str | None = None,
+    group_labels: tuple[str, str, str] = ("HL", "PCA", "DriftCorr"),
+    figsize: tuple[float, float] = (5.4 * CM, 3.6 * CM),
+) -> Path:
+    """Plot one scalar per-track metric as a compact three-group violin plot."""
+    groups = [
+        pd.to_numeric(gt_metrics_df.get(metric_col, np.nan), errors="coerce").dropna().to_numpy(np.float64),
+        pd.to_numeric(pca_metrics_df.get(metric_col, np.nan), errors="coerce").dropna().to_numpy(np.float64),
+        pd.to_numeric(driftcorr_metrics_df.get(metric_col, np.nan), errors="coerce").dropna().to_numpy(np.float64),
+    ]
+    fig, ax = plt.subplots(figsize=figsize)
+    x = np.arange(3, dtype=np.float64)
+    group_map = {
+        str(group_labels[0]): groups[0],
+        str(group_labels[1]): groups[1],
+        str(group_labels[2]): groups[2],
+    }
+    omnibus_row, test_rows = run_three_group_statistical_analysis(group_map)
+    if any(arr.size for arr in groups):
+        vp = ax.violinplot(groups, positions=x, widths=0.65, showmeans=False, showmedians=True, showextrema=False)
+        violin_colors = ["#4C72B0", "#DD8452", "#55A868"]
+        for body, color in zip(vp["bodies"], violin_colors):
+            body.set_facecolor(color)
+            body.set_edgecolor("none")
+            body.set_linewidth(0.0)
+            body.set_alpha(0.6)
+            body.set_zorder(1)
+    medians = [float(np.median(arr)) if arr.size else np.nan for arr in groups]
+    for xi, median, color in zip(x, medians, ["#0b1f33", "#4a2208", "#10351d"]):
+        if np.isfinite(median):
+            ax.scatter(xi, median, s=14, color=color, zorder=6)
+    data_max = max([float(np.max(arr)) if arr.size else 0.0 for arr in groups] + [0.0])
+    data_span = data_max if data_max > 0.0 else 1.0
+    pairwise_rows = [row for row in test_rows if row.get("row_type") == "pairwise"]
+    pair_lookup = {
+        (str(row.get("group_a")), str(row.get("group_b"))): float(row.get("adjusted_p_value", np.nan))
+        for row in pairwise_rows
+    }
+    annotation_specs = [
+        (0.0, 1.0, pair_lookup.get((str(group_labels[0]), str(group_labels[1])), np.nan)),
+        (1.0, 2.0, pair_lookup.get((str(group_labels[1]), str(group_labels[2])), np.nan)),
+        (0.0, 2.0, pair_lookup.get((str(group_labels[0]), str(group_labels[2])), np.nan)),
+    ]
+    base_y = data_max + 0.08 * data_span
+    step_y = 0.22 * data_span
+    for idx, (x0, x1, p_value) in enumerate(annotation_specs):
+        if np.isfinite(p_value):
+            annotate_pvalue(ax, x0, x1, base_y + idx * step_y, float(p_value), fontsize=7.0)
+    ax.set_xticks(x)
+    ax.set_xticklabels(list(group_labels))
+    ax.set_ylabel(ylabel)
+    ax.set_ylim(bottom=0.0)
+    ax.set_ylim(top=base_y + max(len(annotation_specs) - 1, 0) * step_y + 0.14 * data_span)
+    if title:
+        ax.set_title(title, fontsize=8)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+    if stats_csv_path is not None:
+        stats_rows: list[dict[str, Any]] = [
+            {
+                "metric": str(metric_col),
+                "row_type": "summary",
+                "groups": ",".join(group_map.keys()),
+                "global_test": omnibus_row.get("global_test", "not_applicable"),
+                "global_p_value": omnibus_row.get("global_p_value", np.nan),
+                "all_groups_normal": omnibus_row.get("all_groups_normal", False),
+            }
+        ]
+        for label, arr in zip(group_labels, groups):
+            stats_rows.append(
+                {
+                    "metric": str(metric_col),
+                    "row_type": "group_summary",
+                    "group": str(label),
+                    "n": int(arr.size),
+                    "mean": float(np.mean(arr)) if arr.size else np.nan,
+                    "median": float(np.median(arr)) if arr.size else np.nan,
+                    "sem": sem_or_zero(arr),
+                }
+            )
+        stats_rows.extend([{**row, "metric": str(metric_col)} for row in [omnibus_row, *test_rows]])
+        stats_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(stats_rows).to_csv(stats_csv_path, index=False)
+    return out_path
+
+
+def plot_lag_metric_threeway(
+    gt_df: pd.DataFrame,
+    pca_df: pd.DataFrame,
+    driftcorr_df: pd.DataFrame,
+    value_col: str,
+    ylabel: str,
+    out_path: Path,
+    stats_csv_path: Path | None = None,
+    title: str | None = None,
+    group_labels: tuple[str, str, str] = ("HL", "PCA", "DriftCorr"),
+    figsize: tuple[float, float] = (6.2 * CM, 3.8 * CM),
+) -> Path:
+    """Plot one lag-dependent metric as mean ± SEM curves for HL, PCA and DriftCorr."""
+    fig, ax = plt.subplots(figsize=figsize)
+    colors = ["#4C72B0", "#DD8452", "#55A868"]
+    stats_rows: list[dict[str, Any]] = []
+    for df_cur, label, color in zip([gt_df, pca_df, driftcorr_df], group_labels, colors):
+        if df_cur.empty or value_col not in df_cur.columns:
+            continue
+        cur = df_cur.copy()
+        cur["lag"] = pd.to_numeric(cur["lag"], errors="coerce")
+        cur[value_col] = pd.to_numeric(cur[value_col], errors="coerce")
+        cur = cur.dropna(subset=["lag", value_col])
+        if cur.empty:
+            continue
+        lag_summary = (
+            cur.groupby("lag", observed=False)[value_col]
+            .agg(["mean", "count", "std"])
+            .reset_index()
+            .sort_values("lag")
+        )
+        lag_summary["sem"] = np.where(
+            lag_summary["count"].to_numpy(np.float64) > 1.0,
+            lag_summary["std"].to_numpy(np.float64) / np.sqrt(lag_summary["count"].to_numpy(np.float64)),
+            0.0,
+        )
+        x = lag_summary["lag"].to_numpy(np.float64)
+        y = lag_summary["mean"].to_numpy(np.float64)
+        sem_vals = lag_summary["sem"].to_numpy(np.float64)
+        ax.plot(x, y, color=color, linewidth=1.5, marker="o", markersize=2.8, label=str(label))
+        ax.fill_between(x, y - sem_vals, y + sem_vals, color=color, alpha=0.18, linewidth=0.0)
+    ax.set_xlabel("lag (frames)")
+    ax.set_ylabel(ylabel)
+    ax.set_xlim(left=1.0)
+    if value_col != "directional_autocorrelation":
+        ax.set_ylim(bottom=0.0)
+    if title:
+        ax.set_title(title, fontsize=8)
+    ax.legend(frameon=False, fontsize=7)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=300, transparent=True)
+    plt.close(fig)
+    if stats_csv_path is not None:
+        def _values_at_lag(df_cur: pd.DataFrame, lag_value: float) -> np.ndarray:
+            if df_cur.empty or "lag" not in df_cur.columns or value_col not in df_cur.columns:
+                return np.zeros(0, dtype=np.float64)
+            cur = df_cur.copy()
+            cur["lag"] = pd.to_numeric(cur["lag"], errors="coerce")
+            cur[value_col] = pd.to_numeric(cur[value_col], errors="coerce")
+            cur = cur.dropna(subset=["lag", value_col])
+            if cur.empty:
+                return np.zeros(0, dtype=np.float64)
+            return cur.loc[cur["lag"] == float(lag_value), value_col].to_numpy(np.float64)
+
+        all_lags = sorted(
+            set(pd.to_numeric(gt_df.get("lag", pd.Series(dtype=float)), errors="coerce").dropna().tolist())
+            | set(pd.to_numeric(pca_df.get("lag", pd.Series(dtype=float)), errors="coerce").dropna().tolist())
+            | set(pd.to_numeric(driftcorr_df.get("lag", pd.Series(dtype=float)), errors="coerce").dropna().tolist())
+        )
+        for lag in all_lags:
+            group_map = {
+                str(group_labels[0]): _values_at_lag(gt_df, float(lag)),
+                str(group_labels[1]): _values_at_lag(pca_df, float(lag)),
+                str(group_labels[2]): _values_at_lag(driftcorr_df, float(lag)),
+            }
+            omnibus_row, test_rows = run_three_group_statistical_analysis(group_map)
+            stats_rows.append(
+                {
+                    "metric": str(value_col),
+                    "lag": float(lag),
+                    "row_type": "summary",
+                    "groups": ",".join(group_map.keys()),
+                    "global_test": omnibus_row.get("global_test", "not_applicable"),
+                    "global_p_value": omnibus_row.get("global_p_value", np.nan),
+                    "all_groups_normal": omnibus_row.get("all_groups_normal", False),
+                }
+            )
+            for label, arr in group_map.items():
+                stats_rows.append(
+                    {
+                        "metric": str(value_col),
+                        "lag": float(lag),
+                        "row_type": "group_summary",
+                        "group": str(label),
+                        "n": int(arr.size),
+                        "mean": float(np.mean(arr)) if arr.size else np.nan,
+                        "median": float(np.median(arr)) if arr.size else np.nan,
+                        "sem": sem_or_zero(arr),
+                    }
+                )
+            stats_rows.extend([{**row, "metric": str(value_col), "lag": float(lag)} for row in [omnibus_row, *test_rows]])
+        stats_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(stats_rows).to_csv(stats_csv_path, index=False)
+    return out_path
+
+
 def run_observed_summary_analysis(
     gt_tracks_df: pd.DataFrame,
     association_root: Path,
@@ -3600,7 +3968,11 @@ def run_observed_summary_analysis(
 
     gt_tracks_df = ensure_numeric_tracks(gt_tracks_df)
     pca_tracks_df = ensure_numeric_tracks(pd.read_csv(inferred_tracks_path))
-    driftcorr_tracks_df = ensure_numeric_tracks(pd.read_csv(corrected_tracks_path))
+    driftcorr_tracks_df = load_tracks_csv(corrected_tracks_path, prefer_corrected_columns=True)
+
+    gt_motion_df, gt_autocorr_df, gt_msd_df = compute_track_motion_metrics(gt_tracks_df)
+    pca_motion_df, pca_autocorr_df, pca_msd_df = compute_track_motion_metrics(pca_tracks_df)
+    driftcorr_motion_df, driftcorr_autocorr_df, driftcorr_msd_df = compute_track_motion_metrics(driftcorr_tracks_df)
 
     gt_unique = int(pd.to_numeric(gt_tracks_df["TrackID"], errors="coerce").dropna().nunique())
     pca_unique = int(pd.to_numeric(pca_tracks_df["TrackID"], errors="coerce").dropna().nunique())
@@ -3614,13 +3986,17 @@ def run_observed_summary_analysis(
     birthdeath_stats = out_dir / "gt_vs_pca_births_deaths_stats.csv"
     plot_birth_death_bars(gt_birthdeath, pca_birthdeath, out_path=birthdeath_plot, stats_csv_path=birthdeath_stats)
 
-    gt_avg_disp = compute_track_average_displacements(gt_tracks_df)
-    pca_avg_disp = compute_track_average_displacements(pca_tracks_df)
-    driftcorr_avg_disp = compute_track_average_displacements(driftcorr_tracks_df)
+    gt_avg_disp = gt_motion_df[["TrackID", "mean_step_displacement", "median_step_displacement"]].copy()
+    pca_avg_disp = pca_motion_df[["TrackID", "mean_step_displacement", "median_step_displacement"]].copy()
+    driftcorr_avg_disp = driftcorr_motion_df[["TrackID", "mean_step_displacement", "median_step_displacement"]].copy()
     threshold = determine_stationary_threshold(gt_avg_disp)
     gt_class = classify_tracks_by_displacement(gt_avg_disp, threshold)
     pca_class = classify_tracks_by_displacement(pca_avg_disp, threshold)
     driftcorr_class = classify_tracks_by_displacement(driftcorr_avg_disp, threshold)
+
+    gt_motion_df = gt_motion_df.merge(gt_class[["TrackID", "motion_class"]], on="TrackID", how="left")
+    pca_motion_df = pca_motion_df.merge(pca_class[["TrackID", "motion_class"]], on="TrackID", how="left")
+    driftcorr_motion_df = driftcorr_motion_df.merge(driftcorr_class[["TrackID", "motion_class"]], on="TrackID", how="left")
     
     three_bar_plot = out_dir / "gt_pca_driftcorr_track_count_summary.pdf"
     plot_three_group_count_bars(
@@ -3663,6 +4039,98 @@ def run_observed_summary_analysis(
         radius_px=6,
     )
 
+    gt_motion_metrics_csv = out_dir / "hl_track_motion_metrics.csv"
+    pca_motion_metrics_csv = out_dir / "pca_track_motion_metrics.csv"
+    driftcorr_motion_metrics_csv = out_dir / "driftcorr_track_motion_metrics.csv"
+    gt_motion_df.to_csv(gt_motion_metrics_csv, index=False)
+    pca_motion_df.to_csv(pca_motion_metrics_csv, index=False)
+    driftcorr_motion_df.to_csv(driftcorr_motion_metrics_csv, index=False)
+
+    motion_summary_csv = out_dir / "gt_pca_driftcorr_motion_metrics_summary.csv"
+    pd.concat(
+        [
+            summarize_track_motion_metrics(gt_motion_df, label="HL"),
+            summarize_track_motion_metrics(pca_motion_df, label="PCA"),
+            summarize_track_motion_metrics(driftcorr_motion_df, label="DriftCorr"),
+        ],
+        ignore_index=True,
+    ).to_csv(motion_summary_csv, index=False)
+
+    autocorr_summary_csv = out_dir / "gt_pca_driftcorr_directional_autocorrelation_summary.csv"
+    pd.concat(
+        [
+            summarize_lag_metric(gt_autocorr_df, "directional_autocorrelation", label="HL"),
+            summarize_lag_metric(pca_autocorr_df, "directional_autocorrelation", label="PCA"),
+            summarize_lag_metric(driftcorr_autocorr_df, "directional_autocorrelation", label="DriftCorr"),
+        ],
+        ignore_index=True,
+    ).to_csv(autocorr_summary_csv, index=False)
+
+    msd_summary_csv = out_dir / "gt_pca_driftcorr_msd_summary.csv"
+    pd.concat(
+        [
+            summarize_lag_metric(gt_msd_df, "msd", label="HL"),
+            summarize_lag_metric(pca_msd_df, "msd", label="PCA"),
+            summarize_lag_metric(driftcorr_msd_df, "msd", label="DriftCorr"),
+        ],
+        ignore_index=True,
+    ).to_csv(msd_summary_csv, index=False)
+
+    metric_plot_specs = [
+        ("cumulative_path_length", "cumulative\npath length", "gt_pca_driftcorr_cumulative_path_length.pdf"),
+        ("median_step_displacement", "median step\ndisplacement", "gt_pca_driftcorr_median_step_displacement.pdf"),
+        ("max_step_displacement", "max step\ndisplacement", "gt_pca_driftcorr_max_step_displacement.pdf"),
+        ("net_displacement", "net\ndisplacement", "gt_pca_driftcorr_net_displacement.pdf"),
+        ("straightness_index", "straightness\nindex", "gt_pca_driftcorr_straightness_index.pdf"),
+        ("mean_abs_turning_angle_deg", "mean |turning\nangle| (deg)", "gt_pca_driftcorr_mean_abs_turning_angle.pdf"),
+        ("mean_squared_turning_angle_deg2", "mean squared\nturn angle (deg$^2$)", "gt_pca_driftcorr_mean_squared_turning_angle.pdf"),
+        ("curvature_sign_change_count", "curvature sign\nchanges", "gt_pca_driftcorr_curvature_sign_changes.pdf"),
+        ("u_turn_count_gt_150deg", "U-turn count\n(>150 deg)", "gt_pca_driftcorr_u_turn_count.pdf"),
+        ("convex_hull_area", "convex hull\narea", "gt_pca_driftcorr_convex_hull_area.pdf"),
+        ("convex_hull_perimeter", "convex hull\nperimeter", "gt_pca_driftcorr_convex_hull_perimeter.pdf"),
+    ]
+    metric_plot_paths: list[Path] = []
+    metric_stats_paths: list[Path] = []
+    for metric_col, ylabel, filename in metric_plot_specs:
+        stats_filename = filename.replace(".pdf", "_stats.csv")
+        metric_stats_path = out_dir / stats_filename
+        metric_stats_paths.append(metric_stats_path)
+        metric_plot_paths.append(
+            plot_track_metric_violin_threeway(
+                gt_metrics_df=gt_motion_df,
+                pca_metrics_df=pca_motion_df,
+                driftcorr_metrics_df=driftcorr_motion_df,
+                metric_col=metric_col,
+                ylabel=ylabel,
+                out_path=out_dir / filename,
+                stats_csv_path=metric_stats_path,
+                title=None,
+            )
+        )
+
+    autocorr_stats_csv = out_dir / "gt_pca_driftcorr_directional_autocorrelation_stats.csv"
+    autocorr_plot = plot_lag_metric_threeway(
+        gt_df=gt_autocorr_df,
+        pca_df=pca_autocorr_df,
+        driftcorr_df=driftcorr_autocorr_df,
+        value_col="directional_autocorrelation",
+        ylabel="directional\nautocorrelation",
+        out_path=out_dir / "gt_pca_driftcorr_directional_autocorrelation.pdf",
+        stats_csv_path=autocorr_stats_csv,
+        title=None,
+    )
+    msd_stats_csv = out_dir / "gt_pca_driftcorr_msd_stats.csv"
+    msd_plot = plot_lag_metric_threeway(
+        gt_df=gt_msd_df,
+        pca_df=pca_msd_df,
+        driftcorr_df=driftcorr_msd_df,
+        value_col="msd",
+        ylabel="MSD",
+        out_path=out_dir / "gt_pca_driftcorr_msd.pdf",
+        stats_csv_path=msd_stats_csv,
+        title=None,
+    )
+
     summary_csv = out_dir / "gt_pca_driftcorr_summary.csv"
     pd.DataFrame(
         [
@@ -3681,6 +4149,8 @@ def run_observed_summary_analysis(
                 "gt_migrating_tracks": int((gt_class["motion_class"] == "migrating").sum()),
                 "pca_migrating_tracks": int((pca_class["motion_class"] == "migrating").sum()),
                 "driftcorr_migrating_tracks": int((driftcorr_class["motion_class"] == "migrating").sum()),
+                "motion_autocorr_max_lag": int(MOTION_AUTOCORR_MAX_LAG),
+                "motion_msd_max_lag": int(MOTION_MSD_MAX_LAG),
                 "exported_track_label_tifs": int(len(exported_label_tifs)),
             }
         ]
@@ -3693,8 +4163,22 @@ def run_observed_summary_analysis(
         "three_bar_plot": three_bar_plot,
         "histogram_plot": histogram_plot,
         "motion_bar_plot": motion_bar_plot,
+        "gt_motion_metrics_csv": gt_motion_metrics_csv,
+        "pca_motion_metrics_csv": pca_motion_metrics_csv,
+        "driftcorr_motion_metrics_csv": driftcorr_motion_metrics_csv,
+        "motion_summary_csv": motion_summary_csv,
+        "autocorr_summary_csv": autocorr_summary_csv,
+        "msd_summary_csv": msd_summary_csv,
+        "autocorr_plot": autocorr_plot,
+        "autocorr_stats_csv": autocorr_stats_csv,
+        "msd_plot": msd_plot,
+        "msd_stats_csv": msd_stats_csv,
         "summary_csv": summary_csv,
     }
+    for idx, metric_plot_path in enumerate(metric_plot_paths, start=1):
+        result[f"motion_metric_plot_{idx:02d}"] = metric_plot_path
+    for idx, metric_stats_path in enumerate(metric_stats_paths, start=1):
+        result[f"motion_metric_stats_{idx:02d}"] = metric_stats_path
     for idx, tif_path in enumerate(exported_label_tifs, start=1):
         result[f"track_label_tif_{idx:02d}"] = tif_path
     return result

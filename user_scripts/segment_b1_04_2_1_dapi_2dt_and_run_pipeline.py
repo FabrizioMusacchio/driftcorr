@@ -4108,6 +4108,7 @@ def run_observed_summary_analysis(
                 out_path=out_dir / filename,
                 stats_csv_path=metric_stats_path,
                 title=None,
+                figsize = (4.8 * CM, 3.6 * CM)
             )
         )
 

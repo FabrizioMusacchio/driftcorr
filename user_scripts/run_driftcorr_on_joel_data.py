@@ -24,7 +24,10 @@ from pathlib import Path
 import sys
 import traceback
 
+import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
+from mpl_toolkits.mplot3d import proj3d
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,6 +79,11 @@ JOEL_DIR = PROJECT_ROOT / "example_image_data" / "Joel_data"
 RESULTS_ROOT = JOEL_DIR / "driftcorr_results"
 
 DEFAULT_METHODS = ["rigid", "local", "rbf", "st_rbf"]
+WRITE_INPUT_SUMMARY = False
+SAVE_ONLY_MINIMAL_OUTPUTS = True
+ANNOTATE_TRACK_IDS_IN_COMPARISON_PLOTS = True
+TRACK_ID_ANNOTATION_FONTSIZE = 4
+COLOR_TRACK_ID_TEXT_BY_TRACK = True
 
 OPTIONS = {
     "reference_time": None,
@@ -167,6 +175,377 @@ def _write_input_summary(df: pd.DataFrame, out_prefix: Path) -> None:
     )
     summary.to_csv(str(out_prefix) + "_input_summary.csv", index=False)
     df.to_csv(str(out_prefix) + "_input_numeric.csv", index=False)
+
+
+def _compute_track_limits(df_orig: pd.DataFrame, df_corr: pd.DataFrame) -> tuple[float, float, float, float, float, float]:
+    """Compute shared plot limits across original and corrected coordinates."""
+    x_min = min(float(df_orig["Position X"].min()), float(df_corr["Position X_corr"].min()))
+    x_max = max(float(df_orig["Position X"].max()), float(df_corr["Position X_corr"].max()))
+    y_min = min(float(df_orig["Position Y"].min()), float(df_corr["Position Y_corr"].min()))
+    y_max = max(float(df_orig["Position Y"].max()), float(df_corr["Position Y_corr"].max()))
+    z_min = min(float(df_orig["Position Z"].min()), float(df_corr["Position Z_corr"].min()))
+    z_max = max(float(df_orig["Position Z"].max()), float(df_corr["Position Z_corr"].max()))
+    return x_min, x_max, y_min, y_max, z_min, z_max
+
+
+def _estimate_label_bbox(display_xy: np.ndarray, label: str, fig_dpi: float, font_size: float) -> tuple[float, float, float, float]:
+    """Approximate a text bounding box in display coordinates."""
+    char_w = 0.58 * float(font_size) * float(fig_dpi) / 72.0
+    text_w = max(10.0, char_w * max(len(str(label)), 1))
+    text_h = max(8.0, 1.25 * float(font_size) * float(fig_dpi) / 72.0)
+    x0 = float(display_xy[0])
+    y0 = float(display_xy[1] - 0.5 * text_h)
+    return (x0, y0, x0 + text_w, y0 + text_h)
+
+
+def _bbox_overlaps(a: tuple[float, float, float, float], b: tuple[float, float, float, float], pad: float = 2.0) -> bool:
+    """Return whether two display-space bounding boxes overlap."""
+    return not (
+        a[2] + pad < b[0]
+        or a[0] - pad > b[2]
+        or a[3] + pad < b[1]
+        or a[1] - pad > b[3]
+    )
+
+
+def _bbox_inside_axis(bbox: tuple[float, float, float, float], axis_bbox) -> bool:
+    """Return whether a label bbox stays inside an axis bbox."""
+    return (
+        bbox[0] >= axis_bbox.x0
+        and bbox[2] <= axis_bbox.x1
+        and bbox[1] >= axis_bbox.y0
+        and bbox[3] <= axis_bbox.y1
+    )
+
+
+def _choose_label_position_2d(
+    ax,
+    renderer,
+    x: float,
+    y: float,
+    label: str,
+    dx: float,
+    dy: float,
+    used_bboxes: list[tuple[float, float, float, float]],
+    font_size: float,
+) -> tuple[float, float]:
+    """Choose a non-overlapping 2D label position from a set of candidate offsets."""
+    candidates = [
+        (x + dx, y + dy),
+        (x + dx, y - dy),
+        (x - dx, y + dy),
+        (x - dx, y - dy),
+        (x + 1.8 * dx, y),
+        (x - 1.8 * dx, y),
+        (x, y + 1.8 * dy),
+        (x, y - 1.8 * dy),
+        (x + 1.8 * dx, y + 1.8 * dy),
+        (x - 1.8 * dx, y + 1.8 * dy),
+        (x + 1.8 * dx, y - 1.8 * dy),
+        (x - 1.8 * dx, y - 1.8 * dy),
+    ]
+    axis_bbox = ax.get_window_extent(renderer=renderer)
+    dpi = float(ax.figure.dpi)
+    fallback = candidates[0]
+    for cx, cy in candidates:
+        disp = ax.transData.transform((cx, cy))
+        bbox = _estimate_label_bbox(disp, label, dpi, font_size)
+        if not _bbox_inside_axis(bbox, axis_bbox):
+            continue
+        if any(_bbox_overlaps(bbox, ub) for ub in used_bboxes):
+            continue
+        used_bboxes.append(bbox)
+        return float(cx), float(cy)
+    disp = ax.transData.transform(fallback)
+    used_bboxes.append(_estimate_label_bbox(disp, label, dpi, font_size))
+    return float(fallback[0]), float(fallback[1])
+
+
+def _choose_label_position_3d(
+    ax,
+    renderer,
+    x: float,
+    y: float,
+    z: float,
+    label: str,
+    dx: float,
+    dy: float,
+    dz: float,
+    used_bboxes: list[tuple[float, float, float, float]],
+    font_size: float,
+) -> tuple[float, float, float]:
+    """Choose a non-overlapping 3D label position based on projected display-space overlap."""
+    candidates = [
+        (x + dx, y + dy, z + dz),
+        (x + dx, y - dy, z + dz),
+        (x - dx, y + dy, z + dz),
+        (x - dx, y - dy, z + dz),
+        (x + 1.8 * dx, y, z + 0.6 * dz),
+        (x - 1.8 * dx, y, z + 0.6 * dz),
+        (x, y + 1.8 * dy, z + 0.6 * dz),
+        (x, y - 1.8 * dy, z + 0.6 * dz),
+        (x + 1.8 * dx, y + 1.8 * dy, z),
+        (x - 1.8 * dx, y + 1.8 * dy, z),
+        (x + 1.8 * dx, y - 1.8 * dy, z),
+        (x - 1.8 * dx, y - 1.8 * dy, z),
+    ]
+    axis_bbox = ax.get_window_extent(renderer=renderer)
+    dpi = float(ax.figure.dpi)
+    fallback = candidates[0]
+    for cx, cy, cz in candidates:
+        xp, yp, _ = proj3d.proj_transform(cx, cy, cz, ax.get_proj())
+        disp = ax.transData.transform((xp, yp))
+        bbox = _estimate_label_bbox(disp, label, dpi, font_size)
+        if not _bbox_inside_axis(bbox, axis_bbox):
+            continue
+        if any(_bbox_overlaps(bbox, ub) for ub in used_bboxes):
+            continue
+        used_bboxes.append(bbox)
+        return float(cx), float(cy), float(cz)
+    xp, yp, _ = proj3d.proj_transform(*fallback, ax.get_proj())
+    disp = ax.transData.transform((xp, yp))
+    used_bboxes.append(_estimate_label_bbox(disp, label, dpi, font_size))
+    return float(fallback[0]), float(fallback[1]), float(fallback[2])
+
+
+def _annotate_track_end_2d(
+    ax,
+    x: float,
+    y: float,
+    x2: float,
+    y2: float,
+    label: str,
+    font_size: float,
+    text_color: str = "black",
+) -> None:
+    """Annotate one track end in a 2D axis with a thin connector line."""
+    ha = "left" if x2 >= x else "right"
+    ax.annotate(
+        str(label),
+        xy=(x, y),
+        xytext=(x2, y2),
+        textcoords="data",
+        fontsize=float(font_size),
+        color=text_color,
+        ha=ha,
+        va="center",
+        arrowprops={"arrowstyle": "-", "color": "black", "lw": 0.5, "shrinkA": 0, "shrinkB": 0},
+        clip_on=True,
+    )
+
+
+def _annotate_track_end_3d(
+    ax,
+    x: float,
+    y: float,
+    z: float,
+    x2: float,
+    y2: float,
+    z2: float,
+    label: str,
+    font_size: float,
+    text_color: str = "black",
+) -> None:
+    """Annotate one track end in a 3D axis with a thin connector line."""
+    ax.plot([x, x2], [y, y2], [z, z2], color="black", linewidth=0.5, alpha=0.9)
+    ax.text(x2, y2, z2, str(label), fontsize=float(font_size), color=text_color)
+
+
+def _add_track_id_annotations(
+    ax3d,
+    ax_xy,
+    ax_xz,
+    df_plot: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    z_col: str,
+    font_size: float,
+    track_colors: dict[float, str] | None = None,
+) -> None:
+    """Add track-end ID labels to 3D, XY, and XZ comparison panels."""
+    if df_plot.empty or "TrackID" not in df_plot.columns:
+        return
+    fig = ax_xy.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    x_vals = pd.to_numeric(df_plot[x_col], errors="coerce").to_numpy(np.float64)
+    y_vals = pd.to_numeric(df_plot[y_col], errors="coerce").to_numpy(np.float64)
+    z_vals = pd.to_numeric(df_plot[z_col], errors="coerce").to_numpy(np.float64)
+    span_x = max(float(np.nanmax(x_vals) - np.nanmin(x_vals)), 1e-6)
+    span_y = max(float(np.nanmax(y_vals) - np.nanmin(y_vals)), 1e-6)
+    span_z = max(float(np.nanmax(z_vals) - np.nanmin(z_vals)), 1e-6)
+    dx = 0.018 * span_x
+    dy = 0.018 * span_y
+    dz = 0.018 * span_z
+    used_3d: list[tuple[float, float, float, float]] = []
+    used_xy: list[tuple[float, float, float, float]] = []
+    used_xz: list[tuple[float, float, float, float]] = []
+
+    for track_id, grp in df_plot.groupby("TrackID", sort=True):
+        g = grp.sort_values("Time")
+        if g.empty:
+            continue
+        x = float(g.iloc[-1][x_col])
+        y = float(g.iloc[-1][y_col])
+        z = float(g.iloc[-1][z_col])
+        label = int(track_id) if float(track_id).is_integer() else f"{float(track_id):g}"
+        text_color = "black"
+        if COLOR_TRACK_ID_TEXT_BY_TRACK and track_colors is not None:
+            text_color = str(track_colors.get(float(track_id), "black"))
+        x3, y3, z3 = _choose_label_position_3d(ax3d, renderer, x, y, z, label, dx, dy, dz, used_3d, font_size)
+        xxy, yxy = _choose_label_position_2d(ax_xy, renderer, x, y, label, dx, dy, used_xy, font_size)
+        xxz, yxz = _choose_label_position_2d(ax_xz, renderer, x, z, label, dx, dz, used_xz, font_size)
+        _annotate_track_end_3d(ax3d, x, y, z, x3, y3, z3, label, font_size, text_color=text_color)
+        _annotate_track_end_2d(ax_xy, x, y, xxy, yxy, label, font_size, text_color=text_color)
+        _annotate_track_end_2d(ax_xz, x, z, xxz, yxz, label, font_size, text_color=text_color)
+
+
+def _plot_tracks_comparison_for_joel(
+    df_orig: pd.DataFrame,
+    df_corr: pd.DataFrame,
+    out_path: Path,
+    title: str = "",
+    annotate_track_ids: bool = False,
+) -> Path:
+    """Create Joel-specific comparison plot with optional TrackID annotations."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig = plt.figure(figsize=(16, 18))
+    x_min, x_max, y_min, y_max, z_min, z_max = _compute_track_limits(df_orig, df_corr)
+    orig_track_colors: dict[float, str] = {}
+    corr_track_colors: dict[float, str] = {}
+
+    ax1 = fig.add_subplot(321, projection="3d")
+    for tid in df_orig["TrackID"].unique():
+        d = df_orig[df_orig["TrackID"] == tid].sort_values("Time")
+        line = ax1.plot(d["Position X"], d["Position Y"], d["Position Z"], alpha=0.9)[0]
+        orig_track_colors[float(tid)] = str(line.get_color())
+    ax1.set_title("Original (3D)")
+    ax1.set_xlim(x_min, x_max)
+    ax1.set_ylim(y_min, y_max)
+    ax1.set_zlim(z_min, z_max)
+    ax1.set_xlabel("X")
+    ax1.set_ylabel("Y")
+    ax1.set_zlabel("Z")
+
+    ax2 = fig.add_subplot(322, projection="3d")
+    for tid in df_corr["TrackID"].unique():
+        d = df_corr[df_corr["TrackID"] == tid].sort_values("Time")
+        line = ax2.plot(d["Position X_corr"], d["Position Y_corr"], d["Position Z_corr"], alpha=0.9)[0]
+        corr_track_colors[float(tid)] = str(line.get_color())
+    ax2.set_title("Corrected (3D)")
+    ax2.set_xlim(x_min, x_max)
+    ax2.set_ylim(y_min, y_max)
+    ax2.set_zlim(z_min, z_max)
+    ax2.set_xlabel("X")
+    ax2.set_ylabel("Y")
+    ax2.set_zlabel("Z")
+
+    ax3 = fig.add_subplot(323)
+    for tid in df_orig["TrackID"].unique():
+        d = df_orig[df_orig["TrackID"] == tid].sort_values("Time")
+        ax3.plot(d["Position X"], d["Position Y"], alpha=0.7, color=orig_track_colors.get(float(tid)))
+    ax3.set_title("Original XY")
+    ax3.set_aspect("equal", adjustable="box")
+    ax3.set_xlim(x_min, x_max)
+    ax3.set_ylim(y_min, y_max)
+    ax3.set_xlabel("X")
+    ax3.set_ylabel("Y")
+
+    ax4 = fig.add_subplot(324)
+    for tid in df_corr["TrackID"].unique():
+        d = df_corr[df_corr["TrackID"] == tid].sort_values("Time")
+        ax4.plot(d["Position X_corr"], d["Position Y_corr"], alpha=0.7, color=corr_track_colors.get(float(tid)))
+    ax4.set_title("Corrected XY")
+    ax4.set_aspect("equal", adjustable="box")
+    ax4.set_xlim(x_min, x_max)
+    ax4.set_ylim(y_min, y_max)
+    ax4.set_xlabel("X")
+    ax4.set_ylabel("Y")
+
+    ax5 = fig.add_subplot(325)
+    for tid in df_orig["TrackID"].unique():
+        d = df_orig[df_orig["TrackID"] == tid].sort_values("Time")
+        ax5.plot(d["Position X"], d["Position Z"], alpha=0.7, color=orig_track_colors.get(float(tid)))
+    ax5.set_title("Original XZ")
+    ax5.set_aspect("equal", adjustable="box")
+    ax5.set_xlim(x_min, x_max)
+    ax5.set_ylim(z_min, z_max)
+    ax5.set_xlabel("X")
+    ax5.set_ylabel("Z")
+
+    ax6 = fig.add_subplot(326)
+    for tid in df_corr["TrackID"].unique():
+        d = df_corr[df_corr["TrackID"] == tid].sort_values("Time")
+        ax6.plot(d["Position X_corr"], d["Position Z_corr"], alpha=0.7, color=corr_track_colors.get(float(tid)))
+    ax6.set_title("Corrected XZ")
+    ax6.set_aspect("equal", adjustable="box")
+    ax6.set_xlim(x_min, x_max)
+    ax6.set_ylim(z_min, z_max)
+    ax6.set_xlabel("X")
+    ax6.set_ylabel("Z")
+
+    if annotate_track_ids:
+        _add_track_id_annotations(
+            ax1,
+            ax3,
+            ax5,
+            df_orig,
+            "Position X",
+            "Position Y",
+            "Position Z",
+            font_size=TRACK_ID_ANNOTATION_FONTSIZE,
+            track_colors=orig_track_colors,
+        )
+        _add_track_id_annotations(
+            ax2,
+            ax4,
+            ax6,
+            df_corr,
+            "Position X_corr",
+            "Position Y_corr",
+            "Position Z_corr",
+            font_size=TRACK_ID_ANNOTATION_FONTSIZE,
+            track_colors=corr_track_colors,
+        )
+
+    fig.suptitle(title, fontsize=14)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=600)
+    plt.close(fig)
+    return out_path
+
+
+def _cleanup_minimal_outputs(out_prefix: Path) -> None:
+    """Keep only corrected-coordinate CSVs, comparison plots, and timeseries directories."""
+    base_dir = out_prefix.parent
+    stem = out_prefix.name
+    if not base_dir.exists():
+        return
+
+    keep_files = {
+        f"{stem}_input_duplicate_track_time_rows.csv",
+        f"{stem}_input_deduplication_summary.csv",
+        f"{stem}_failure_diagnostics_summary.csv",
+        f"{stem}_failure_duplicate_track_time_rows.csv",
+        f"{stem}_failure_reference_time_duplicate_track_ids.csv",
+        f"{stem}_failure_traceback.txt",
+    }
+    keep_prefixes = [
+        f"{stem}_positions_corrected_",
+        f"{stem}_tracks_comparison_",
+    ]
+    keep_dir_prefix = f"{stem}_timeseries_"
+
+    for path in base_dir.iterdir():
+        if path.is_dir():
+            if path.name.startswith(keep_dir_prefix):
+                continue
+            continue
+        if path.name in keep_files:
+            continue
+        if any(path.name.startswith(prefix) for prefix in keep_prefixes):
+            continue
+        path.unlink(missing_ok=True)
 
 
 def _collect_track_table_diagnostics(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -339,8 +718,6 @@ def run_methods_for_dataframe(
             weight_abort_threshold=opts["weight_abort_threshold"],
         )
         df_rbf.to_csv(str(out_prefix) + "_positions_corrected_rbf.csv", index=False)
-        tf_table.to_csv(str(out_prefix) + "_rbf_fit_table.csv", index=False)
-        make_rbf_diagnostic_plots(tf_table, out_prefix)
         corr_by_method["rbf"] = df_rbf
 
     if "rigid" in methods:
@@ -354,7 +731,6 @@ def run_methods_for_dataframe(
         )
         ref_time = float(times.min()) if opts["reference_time"] is None else float(opts["reference_time"])
         df_rigid = apply_rigid_correction_to_tracks(df, step, times, ref_time)
-        tf_rigid.to_csv(str(out_prefix) + "_rigid_transforms.csv", index=False)
         df_rigid.to_csv(str(out_prefix) + "_positions_corrected_rigid.csv", index=False)
         corr_by_method["rigid"] = df_rigid
         if bool(opts.get("rigid_smooth_enable", 0)):
@@ -455,7 +831,6 @@ def run_methods_for_dataframe(
             refine_tol=opts["st_refine_tol"],
         )
         df_st = apply_spacetime_correction(df, st_model)
-        pd.DataFrame([st_info]).to_csv(str(out_prefix) + "_st_rbf_fit_info.csv", index=False)
         df_st.to_csv(str(out_prefix) + "_positions_corrected_st_rbf.csv", index=False)
         corr_by_method["st_rbf"] = df_st
 
@@ -467,12 +842,22 @@ def postprocess_outputs(
     out_prefix: Path,
     corr_by_method: dict[str, pd.DataFrame],
 ) -> None:
-    """Create standard evaluation summaries and qualitative inspection plots."""
-    summary_df, details = run_all_methods_and_compare(df_orig, corr_by_method)
-    save_evaluation_outputs(out_prefix, summary_df, details)
-
+    """Create Joel-specific qualitative plots and optionally trim auxiliary outputs."""
     for method_name, df_corr in corr_by_method.items():
-        save_visual_inspection_plots(df_orig, df_corr, out_prefix, method_name)
+        vis_outputs = save_visual_inspection_plots(df_orig, df_corr, out_prefix, method_name)
+        if ANNOTATE_TRACK_IDS_IN_COMPARISON_PLOTS:
+            annotated_path = vis_outputs["tracks_comparison"].with_name(
+                vis_outputs["tracks_comparison"].stem + "_with_ids" + vis_outputs["tracks_comparison"].suffix
+            )
+            _plot_tracks_comparison_for_joel(
+                df_orig=df_orig,
+                df_corr=df_corr,
+                out_path=annotated_path,
+                title=f"Track comparison: {method_name} (with IDs)",
+                annotate_track_ids=True,
+            )
+    if SAVE_ONLY_MINIMAL_OUTPUTS:
+        _cleanup_minimal_outputs(out_prefix)
 # %% HOW TO RUN A SINGLE FILE
 RUN_SINGLE_FILE = False
 if RUN_SINGLE_FILE:
@@ -484,7 +869,8 @@ if RUN_SINGLE_FILE:
     df_single = _read_joel_imaris_file(file_path)
 
     out_prefix_single = RESULTS_ROOT / "single_file" / file_path.stem / file_path.stem
-    _write_input_summary(df_single, out_prefix_single)
+    if WRITE_INPUT_SUMMARY:
+        _write_input_summary(df_single, out_prefix_single)
 
     corr_single = run_methods_for_dataframe(
         df=df_single,
@@ -541,7 +927,8 @@ if RUN_BATCH:
             dedup_summary.to_csv(str(out_prefix_batch) + "_input_deduplication_summary.csv", index=False)
             df_batch = df_batch_dedup
 
-        _write_input_summary(df_batch, out_prefix_batch)
+        if WRITE_INPUT_SUMMARY:
+            _write_input_summary(df_batch, out_prefix_batch)
         try:
             corr_batch = run_methods_for_dataframe(
                 df=df_batch,

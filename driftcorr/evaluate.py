@@ -185,16 +185,25 @@ def _plot_corr_hist(details: dict[str, dict[str, Any]], out_path: str | Path) ->
 
 
 def _plot_msd(details: dict[str, dict[str, Any]], out_path: str | Path) -> None:
+    def _aligned_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        n = min(int(x.size), int(y.size))
+        if n <= 0:
+            return np.zeros((0,), dtype=float), np.zeros((0,), dtype=float)
+        return x[:n], y[:n]
+
     fig = plt.figure(figsize=(8, 5))
     first = next(iter(details.values()))
     tau = np.asarray(first.get("msd_tau", []), dtype=float)
     m0 = np.asarray(first.get("msd_median_orig", []), dtype=float)
-    if tau.size and m0.size:
-        plt.plot(tau, m0, marker="o", label="original")
+    x0, y0 = _aligned_xy(tau, m0)
+    if x0.size and y0.size:
+        plt.plot(x0, y0, marker="o", label="original")
     for name, res in details.items():
+        tau_i = np.asarray(res.get("msd_tau", tau), dtype=float)
         mc = np.asarray(res.get("msd_median_corr", []), dtype=float)
-        if tau.size and mc.size:
-            plt.plot(tau, mc, marker="o", label=name)
+        xi, yi = _aligned_xy(tau_i, mc)
+        if xi.size and yi.size:
+            plt.plot(xi, yi, marker="o", label=name)
     plt.xlabel("lag (frames)")
     plt.ylabel("MSD (um^2)")
     plt.title("MSD median curve: original vs corrected")

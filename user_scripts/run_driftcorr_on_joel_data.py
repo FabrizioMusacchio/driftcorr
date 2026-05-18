@@ -85,6 +85,16 @@ ANNOTATE_TRACK_IDS_IN_COMPARISON_PLOTS = True
 TRACK_ID_ANNOTATION_FONTSIZE = 4
 COLOR_TRACK_ID_TEXT_BY_TRACK = True
 
+METHOD_COLORS = {
+    "original": "#7A7A7A",
+    "rigid": "#4C78A8",
+    "local": "#59A14F",
+    "rbf": "#F28E2B",
+    "st_rbf": "#B07AA1",
+    "rigid_smooth": "#76B7B2",
+    "local_smooth": "#E15759",
+}
+
 OPTIONS = {
     "reference_time": None,
     "seed": 0,
@@ -673,6 +683,384 @@ def _write_failure_diagnostics(
         fh.write(traceback.format_exc())
 
 
+def _compute_step_displacement_table(
+    df: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    z_col: str,
+    method_name: str,
+    eps: float = 1e-6,
+) -> pd.DataFrame:
+    """Compute consecutive-step planar and axial displacement metrics per track."""
+    d = ensure_numeric_tracks(df)
+    rows: list[dict[str, float | int | str]] = []
+    for track_id, grp in d.groupby("TrackID", sort=True):
+        g = grp.sort_values("Time").copy()
+        coords = g[[x_col, y_col, z_col]].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+        times = pd.to_numeric(g["Time"], errors="coerce").to_numpy(dtype=float)
+        valid = np.isfinite(times) & np.all(np.isfinite(coords), axis=1)
+        if int(np.sum(valid)) < 2:
+            continue
+        coords = coords[valid]
+        times = times[valid]
+        delta = coords[1:] - coords[:-1]
+        delta_t = times[1:] - times[:-1]
+        keep = np.isfinite(delta_t) & (delta_t > 0)
+        if int(np.sum(keep)) == 0:
+            continue
+        delta = delta[keep]
+        delta_t = delta_t[keep]
+        t0 = times[:-1][keep]
+        t1 = times[1:][keep]
+        d_xy = np.sqrt(delta[:, 0] ** 2 + delta[:, 1] ** 2)
+        d_z = np.abs(delta[:, 2])
+        ratio = d_z / np.maximum(d_xy, eps)
+        for idx in range(delta.shape[0]):
+            rows.append(
+                {
+                    "method": method_name,
+                    "TrackID": float(track_id),
+                    "time_start": float(t0[idx]),
+                    "time_end": float(t1[idx]),
+                    "delta_t": float(delta_t[idx]),
+                    "dx": float(delta[idx, 0]),
+                    "dy": float(delta[idx, 1]),
+                    "dz_signed": float(delta[idx, 2]),
+                    "d_xy": float(d_xy[idx]),
+                    "d_z": float(d_z[idx]),
+                    "d_z_over_d_xy": float(ratio[idx]),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _summarize_track_displacement_metrics(step_df: pd.DataFrame, eps: float = 1e-6) -> pd.DataFrame:
+    """Aggregate stepwise displacement metrics into one robust row per track."""
+    if step_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "method",
+                "TrackID",
+                "n_steps",
+                "mean_d_xy",
+                "median_d_xy",
+                "std_d_xy",
+                "mean_d_z",
+                "median_d_z",
+                "std_d_z",
+                "mean_d_z_over_d_xy_stepwise",
+                "median_d_z_over_d_xy_stepwise",
+                "ratio_mean_d_z_over_d_xy",
+                "ratio_median_d_z_over_d_xy",
+            ]
+        )
+
+    rows: list[dict[str, float | int | str]] = []
+    for (method_name, track_id), grp in step_df.groupby(["method", "TrackID"], sort=True):
+        dxy = pd.to_numeric(grp["d_xy"], errors="coerce").to_numpy(dtype=float)
+        dz = pd.to_numeric(grp["d_z"], errors="coerce").to_numpy(dtype=float)
+        ratio_step = pd.to_numeric(grp["d_z_over_d_xy"], errors="coerce").to_numpy(dtype=float)
+        rows.append(
+            {
+                "method": str(method_name),
+                "TrackID": float(track_id),
+                "n_steps": int(grp.shape[0]),
+                "mean_d_xy": float(np.nanmean(dxy)),
+                "median_d_xy": float(np.nanmedian(dxy)),
+                "std_d_xy": float(np.nanstd(dxy)),
+                "mean_d_z": float(np.nanmean(dz)),
+                "median_d_z": float(np.nanmedian(dz)),
+                "std_d_z": float(np.nanstd(dz)),
+                "mean_d_z_over_d_xy_stepwise": float(np.nanmean(ratio_step)),
+                "median_d_z_over_d_xy_stepwise": float(np.nanmedian(ratio_step)),
+                "ratio_mean_d_z_over_d_xy": float(np.nanmean(dz) / max(np.nanmean(dxy), eps)),
+                "ratio_median_d_z_over_d_xy": float(np.nanmedian(dz) / max(np.nanmedian(dxy), eps)),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _summarize_metrics_across_tracks(track_df: pd.DataFrame, metric_cols: list[str]) -> pd.DataFrame:
+    """Summarize one or more track-level metrics across tracks for each method."""
+    rows: list[dict[str, float | int | str]] = []
+    for method_name, grp in track_df.groupby("method", sort=False):
+        for metric in metric_cols:
+            vals = pd.to_numeric(grp[metric], errors="coerce").to_numpy(dtype=float)
+            vals = vals[np.isfinite(vals)]
+            if vals.size == 0:
+                continue
+            rows.append(
+                {
+                    "method": str(method_name),
+                    "metric": metric,
+                    "n_tracks": int(vals.size),
+                    "mean": float(np.mean(vals)),
+                    "median": float(np.median(vals)),
+                    "std": float(np.std(vals)),
+                    "sem": float(np.std(vals, ddof=1) / np.sqrt(vals.size)) if vals.size > 1 else float("nan"),
+                    "q25": float(np.percentile(vals, 25)),
+                    "q75": float(np.percentile(vals, 75)),
+                    "min": float(np.min(vals)),
+                    "max": float(np.max(vals)),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _get_method_color(method_name: str) -> str:
+    """Return a stable, muted color for a method name."""
+    if method_name in METHOD_COLORS:
+        return METHOD_COLORS[method_name]
+    fallback = plt.get_cmap("tab10")
+    return fallback(abs(hash(method_name)) % 10)
+
+
+def _plot_violin_with_points(
+    track_df: pd.DataFrame,
+    methods: list[str],
+    metrics: list[tuple[str, str]],
+    out_path: Path,
+) -> Path:
+    """Plot per-track metric distributions as violin plots with jittered points."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, len(metrics), figsize=(3.5 * len(metrics), 3.2), constrained_layout=True)
+    if len(metrics) == 1:
+        axes = [axes]
+
+    rng = np.random.default_rng(0)
+    max_val = 0.0
+    for metric_col, _ in metrics:
+        vals = pd.to_numeric(track_df[metric_col], errors="coerce").to_numpy(dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if vals.size > 0:
+            max_val = max(max_val, float(np.max(vals)))
+    y_max = max(max_val, 1.0)
+
+    for ax, (metric_col, title) in zip(axes, metrics):
+        values_by_method: list[np.ndarray] = []
+        for method_name in methods:
+            vals = pd.to_numeric(
+                track_df.loc[track_df["method"] == method_name, metric_col],
+                errors="coerce",
+            ).to_numpy(dtype=float)
+            vals = vals[np.isfinite(vals)]
+            values_by_method.append(vals)
+
+        positions = np.arange(1, len(methods) + 1)
+        non_empty = [(pos, vals) for pos, vals in zip(positions, values_by_method) if vals.size > 0]
+        if non_empty:
+            non_empty_pos = [pos for pos, _ in non_empty]
+            non_empty_vals = [vals for _, vals in non_empty]
+            parts = ax.violinplot(non_empty_vals, positions=non_empty_pos, widths=0.85, showmedians=True)
+            for body, pos in zip(parts["bodies"], non_empty_pos):
+                body.set_facecolor(_get_method_color(methods[int(pos) - 1]))
+                body.set_edgecolor(_get_method_color(methods[int(pos) - 1]))
+                body.set_alpha(0.35)
+            for key in ("cbars", "cmins", "cmaxes", "cmedians"):
+                if key in parts:
+                    parts[key].set_color("black")
+                    parts[key].set_linewidth(0.9)
+
+        for pos, vals, method_name in zip(positions, values_by_method, methods):
+            if vals.size == 0:
+                continue
+            x_jitter = pos + rng.uniform(-0.12, 0.12, size=vals.size)
+            ax.scatter(
+                x_jitter,
+                vals,
+                s=14,
+                alpha=0.7,
+                color=_get_method_color(method_name),
+                edgecolors="none",
+            )
+
+        ax.set_title(title)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(methods, rotation=25, ha="right")
+        ax.set_ylim(0.0, y_max)
+        if "ratio" in metric_col:
+            ax.set_ylabel("value (unitless)")
+        else:
+            ax.set_ylabel("distance (IMARIS units)")
+        ax.grid(axis="y", alpha=0.2)
+
+    fig.suptitle("Per-track displacement summaries", fontsize=13)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return out_path
+
+
+def _plot_metric_histograms_by_method(
+    track_df: pd.DataFrame,
+    methods: list[str],
+    metric_col: str,
+    metric_title: str,
+    out_path: Path,
+) -> Path:
+    """Plot one histogram panel per method for a selected track-level metric."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(len(methods), 1, figsize=(7.0, 2.2 * len(methods)), constrained_layout=True)
+    if len(methods) == 1:
+        axes = [axes]
+
+    all_vals = pd.to_numeric(track_df[metric_col], errors="coerce").to_numpy(dtype=float)
+    all_vals = all_vals[np.isfinite(all_vals)]
+    if all_vals.size > 0:
+        x_max = float(np.max(all_vals))
+        if not np.isfinite(x_max) or x_max <= 0:
+            x_max = 1.0
+    else:
+        x_max = 1.0
+
+    for ax, method_name in zip(axes, methods):
+        vals = pd.to_numeric(
+            track_df.loc[track_df["method"] == method_name, metric_col],
+            errors="coerce",
+        ).to_numpy(dtype=float)
+        vals = vals[np.isfinite(vals)]
+        if vals.size > 0:
+            ax.hist(vals, bins=20, color=_get_method_color(method_name), alpha=0.8, edgecolor="white")
+            ax.axvline(float(np.median(vals)), color="black", linestyle="--", linewidth=1.0, label="median")
+        ax.set_xlim(left=0.0, right=x_max)
+        ax.set_ylabel(method_name)
+        ax.grid(axis="y", alpha=0.2)
+        if vals.size > 0:
+            ax.legend(loc="upper right", fontsize=8, frameon=False)
+    axes[0].set_title(metric_title)
+    if "ratio" in metric_col:
+        axes[-1].set_xlabel(f"{metric_col} (unitless)")
+    else:
+        axes[-1].set_xlabel(f"{metric_col} (IMARIS units)")
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return out_path
+
+
+def _plot_method_summary_vs_original(
+    summary_df: pd.DataFrame,
+    methods: list[str],
+    metrics: list[tuple[str, str]],
+    out_path: Path,
+) -> Path:
+    """Plot method-level medians/IQR against the original-data baseline."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig, axes = plt.subplots(1, len(metrics), figsize=(5.3 * len(metrics), 4.7), constrained_layout=True)
+    if len(metrics) == 1:
+        axes = [axes]
+
+    positions = np.arange(1, len(methods) + 1)
+    for ax, (metric_col, title) in zip(axes, metrics):
+        s_method = summary_df[(summary_df["metric"] == metric_col) & (summary_df["method"].isin(methods))].copy()
+        s_method = s_method.set_index("method").reindex(methods).reset_index()
+        s_orig = summary_df[(summary_df["metric"] == metric_col) & (summary_df["method"] == "original")]
+        if not s_orig.empty:
+            orig_med = float(s_orig.iloc[0]["median"])
+            ax.axhline(orig_med, color="#C44E52", linestyle="--", linewidth=1.4, label="original median")
+
+        med = pd.to_numeric(s_method["median"], errors="coerce").to_numpy(dtype=float)
+        q25 = pd.to_numeric(s_method["q25"], errors="coerce").to_numpy(dtype=float)
+        q75 = pd.to_numeric(s_method["q75"], errors="coerce").to_numpy(dtype=float)
+        yerr = np.vstack([med - q25, q75 - med])
+        ax.errorbar(positions, med, yerr=yerr, fmt="o", color="black", capsize=4, linewidth=1.1)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(methods, rotation=25, ha="right")
+        ax.set_title(title)
+        ax.grid(axis="y", alpha=0.2)
+        if not s_orig.empty:
+            ax.legend(loc="upper right", fontsize=8, frameon=False)
+
+    fig.suptitle("Method summary against original baseline", fontsize=13)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return out_path
+
+
+def _save_displacement_metric_outputs(
+    df_orig: pd.DataFrame,
+    corr_by_method: dict[str, pd.DataFrame],
+    out_prefix: Path,
+) -> None:
+    """Compute and save Joel-specific planar/axial displacement comparison outputs."""
+    out_dir = out_prefix.parent / "displacement_metrics"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    corr_methods = [name for name in DEFAULT_METHODS if name in corr_by_method]
+    if not corr_methods:
+        return
+    display_methods = ["original"] + corr_methods
+
+    step_tables = [
+        _compute_step_displacement_table(
+            df_orig,
+            x_col="Position X",
+            y_col="Position Y",
+            z_col="Position Z",
+            method_name="original",
+        )
+    ]
+    for method_name in corr_methods:
+        step_tables.append(
+            _compute_step_displacement_table(
+                corr_by_method[method_name],
+                x_col="Position X_corr",
+                y_col="Position Y_corr",
+                z_col="Position Z_corr",
+                method_name=method_name,
+            )
+        )
+
+    step_df = pd.concat(step_tables, ignore_index=True) if step_tables else pd.DataFrame()
+    track_df = _summarize_track_displacement_metrics(step_df)
+    summary_df = _summarize_metrics_across_tracks(
+        track_df,
+        metric_cols=[
+            "median_d_xy",
+            "median_d_z",
+            "ratio_median_d_z_over_d_xy",
+            "mean_d_xy",
+            "mean_d_z",
+            "ratio_mean_d_z_over_d_xy",
+        ],
+    )
+
+    step_df.to_csv(out_dir / f"{out_prefix.name}_displacement_metrics_per_step.csv", index=False)
+    track_df.to_csv(out_dir / f"{out_prefix.name}_displacement_metrics_per_track.csv", index=False)
+    summary_df.to_csv(out_dir / f"{out_prefix.name}_displacement_metrics_summary.csv", index=False)
+
+    plot_metrics = [
+        ("median_d_xy", r"median $d_{xy}$ per track"),
+        ("median_d_z", r"median $d_z$ per track"),
+        ("ratio_median_d_z_over_d_xy", r"median $d_z/d_{xy}$ per track"),
+    ]
+
+    _plot_violin_with_points(
+        track_df=track_df[track_df["method"].isin(display_methods)].copy(),
+        methods=display_methods,
+        metrics=plot_metrics,
+        out_path=out_dir / f"{out_prefix.name}_violin_displacement_metrics.png",
+    )
+    _plot_metric_histograms_by_method(
+        track_df=track_df[track_df["method"].isin(display_methods)].copy(),
+        methods=display_methods,
+        metric_col="median_d_xy",
+        metric_title=r"Distribution of median $d_{xy}$ per track",
+        out_path=out_dir / f"{out_prefix.name}_histogram_d_xy.png",
+    )
+    _plot_metric_histograms_by_method(
+        track_df=track_df[track_df["method"].isin(display_methods)].copy(),
+        methods=display_methods,
+        metric_col="median_d_z",
+        metric_title=r"Distribution of median $d_z$ per track",
+        out_path=out_dir / f"{out_prefix.name}_histogram_d_z.png",
+    )
+    _plot_metric_histograms_by_method(
+        track_df=track_df[track_df["method"].isin(display_methods)].copy(),
+        methods=display_methods,
+        metric_col="ratio_median_d_z_over_d_xy",
+        metric_title=r"Distribution of median $d_z/d_{xy}$ per track",
+        out_path=out_dir / f"{out_prefix.name}_histogram_dz_over_dxy.png",
+    )
+
+
 def run_methods_for_dataframe(
     df: pd.DataFrame,
     out_prefix: Path,
@@ -856,12 +1244,13 @@ def postprocess_outputs(
                 title=f"Track comparison: {method_name} (with IDs)",
                 annotate_track_ids=True,
             )
+    _save_displacement_metric_outputs(df_orig=df_orig, corr_by_method=corr_by_method, out_prefix=out_prefix)
     if SAVE_ONLY_MINIMAL_OUTPUTS:
         _cleanup_minimal_outputs(out_prefix)
 # %% HOW TO RUN A SINGLE FILE
-RUN_SINGLE_FILE = False
+RUN_SINGLE_FILE = True
 if RUN_SINGLE_FILE:
-    SINGLE_FILE_NAME = "registered_stack_5D_251008_P2_565um_v1.xls"
+    SINGLE_FILE_NAME = "registered_stack_5D_251008_P2_485um_analysis.xls"
     METHODS_SINGLE = list(DEFAULT_METHODS)
     USE_STATIONARY_SUBSET_SINGLE = False
 
@@ -880,6 +1269,7 @@ if RUN_SINGLE_FILE:
         use_stationary_subset=USE_STATIONARY_SUBSET_SINGLE,
     )
     postprocess_outputs(df_single, out_prefix_single, corr_single)
+print("Completed single-file run.")
 # %% HOW TO BATCH RUN ALL JOEL FILES
 RUN_BATCH = True
 if RUN_BATCH:

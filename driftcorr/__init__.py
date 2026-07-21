@@ -40,12 +40,14 @@ except Exception:
     pass
 
 from .io_imaris import list_imaris_xls_files, load_imaris_directory, read_imaris_position_xls
+from .iterative import run_iterative_drift_correction
 from .benchmarks import paper_regression, synthetic_benchmark, synthetic_generate, synthetic_regime_benchmark
 
 __all__ = [
     "list_imaris_xls_files",
     "load_imaris_directory",
     "read_imaris_position_xls",
+    "run_iterative_drift_correction",
     "synthetic_generate",
     "synthetic_benchmark",
     "synthetic_regime_benchmark",

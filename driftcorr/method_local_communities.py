@@ -34,7 +34,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -51,8 +51,7 @@ from scipy.stats import pearsonr
 from .drift_smoothing import detect_stage_jumps, plot_drift_timeseries, smooth_drift_timeseries
 from .io_imaris import ensure_numeric_tracks
 from .metrics import pivot_tracks
-
-
+# %% DATA CLASSES
 @dataclass
 class CommunityResult:
     """Graph community partition for tracks."""
@@ -61,7 +60,6 @@ class CommunityResult:
     graph: nx.Graph
     node_index_to_track_id: dict[int, float]
     track_id_to_node_index: dict[float, int]
-
 
 @dataclass
 class DriftModel:
@@ -74,8 +72,7 @@ class DriftModel:
     ell_um: float
     cluster_sizes: np.ndarray
     node_to_cluster: dict[int, int]
-
-
+# %% FUNCTIONS
 def _compute_displacements_to_ref(
     times: np.ndarray,
     track_ids: np.ndarray,
@@ -100,7 +97,6 @@ def _compute_displacements_to_ref(
     p0 = np.nanmean(xk, axis=1)
     return keep_ids, p0, d
 
-
 def _corr_1d(a: np.ndarray, b: np.ndarray) -> float:
     m = np.isfinite(a) & np.isfinite(b)
     if np.sum(m) < 3:
@@ -114,7 +110,6 @@ def _corr_1d(a: np.ndarray, b: np.ndarray) -> float:
         return 0.0
     return r
 
-
 def displacement_similarity(di: np.ndarray, dj: np.ndarray) -> float:
     """Sum of positive Pearson correlations along x,y,z displacement traces."""
     rx = _corr_1d(di[:, 0], dj[:, 0])
@@ -123,14 +118,12 @@ def displacement_similarity(di: np.ndarray, dj: np.ndarray) -> float:
     s = max(0.0, rx) + max(0.0, ry) + max(0.0, rz)
     return float(s)
 
-
 def spatial_weight(pi: np.ndarray, pj: np.ndarray, ell_um: float) -> float:
     """Gaussian spatial weighting for graph edges."""
     d2 = float(np.sum((pi - pj) ** 2))
     if ell_um <= 0:
         return 1.0
     return float(np.exp(-d2 / (2.0 * ell_um * ell_um)))
-
 
 def build_similarity_graph(
     p0: np.ndarray,
@@ -216,7 +209,6 @@ def build_similarity_graph(
         track_id_to_node_index=track_id_to_node_index,
     )
 
-
 def cluster_drift_traces(
     p0: np.ndarray,
     d: np.ndarray,
@@ -246,7 +238,6 @@ def cluster_drift_traces(
 
     return centers, drift, sizes, node_to_cluster
 
-
 def predict_drift_at_positions(
     p: np.ndarray,
     cluster_centers: np.ndarray,
@@ -275,7 +266,6 @@ def predict_drift_at_positions(
     out = wn @ cluster_drift_t
     return out
 
-
 def build_drift_model(
     times: np.ndarray,
     reference_time: float,
@@ -295,7 +285,6 @@ def build_drift_model(
         cluster_sizes=sizes,
         node_to_cluster=node_to_cluster,
     )
-
 
 def apply_drift_correction(
     df: pd.DataFrame,
@@ -340,7 +329,6 @@ def apply_drift_correction(
     dfc["Position Z_corr"] = xcorr[:, 2]
     return dfc
 
-
 def summarize_communities(
     p0: np.ndarray,
     d: np.ndarray,
@@ -381,7 +369,6 @@ def summarize_communities(
         drop=True
     )
 
-
 def plot_cluster_drifts(model: DriftModel, out_prefix: str | Path) -> None:
     """Save per-axis community drift traces."""
     out_prefix = str(out_prefix)
@@ -398,7 +385,6 @@ def plot_cluster_drifts(model: DriftModel, out_prefix: str | Path) -> None:
         plt.tight_layout()
         plt.savefig(out_prefix + f"_cluster_drifts_{name}.png", dpi=300)
         plt.close(fig)
-
 
 def run_local_drift_correction_for_file(
     df: pd.DataFrame,
@@ -477,7 +463,6 @@ def run_local_drift_correction_for_file(
 
     return df_corr, model, comm_res, comm_table, drift_table
 
-
 def _estimate_time_drift_from_corrected(
     df_orig: pd.DataFrame,
     df_corr: pd.DataFrame,
@@ -513,7 +498,6 @@ def _estimate_time_drift_from_corrected(
         )
     return tab["Time"].to_numpy(float), tab[["dx", "dy", "dz"]].to_numpy(float)
 
-
 def _smooth_drift_piecewise(
     times: np.ndarray,
     drift_raw: np.ndarray,
@@ -535,7 +519,6 @@ def _smooth_drift_piecewise(
             continue
         out[a:b] = smooth_drift_timeseries(times[a:b], drift_raw[a:b], method=method, params=params)
     return out, jump_mask
-
 
 def run_local_drift_correction_for_file_with_optional_smoothing(
     df: pd.DataFrame,
@@ -611,3 +594,4 @@ def run_local_drift_correction_for_file_with_optional_smoothing(
 
     df_sm.to_csv(str(out_prefix) + "_positions_corrected_localdrift_smooth.csv", index=False)
     return df_sm, model, comm_res, comm_table, drift_table
+# %% END

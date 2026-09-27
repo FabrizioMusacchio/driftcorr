@@ -20,7 +20,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 import argparse
@@ -33,12 +33,10 @@ from .cli import (
     run_synthetic_generate,
     run_synthetic_regime_benchmark,
 )
-
-
+# %% FUNCTIONS
 def _namespace_for_command(command: str) -> argparse.Namespace:
     parser = build_parser()
     return parser.parse_args([command])
-
 
 def _apply_overrides(args: argparse.Namespace, overrides: dict[str, Any]) -> argparse.Namespace:
     for key, value in overrides.items():
@@ -47,13 +45,11 @@ def _apply_overrides(args: argparse.Namespace, overrides: dict[str, Any]) -> arg
         setattr(args, key, value)
     return args
 
-
 def synthetic_generate(**kwargs: Any) -> int:
     """Generate synthetic IMARIS-like datasets using Python API options."""
     args = _namespace_for_command("synthetic-generate")
     args = _apply_overrides(args, kwargs)
     return run_synthetic_generate(args)
-
 
 def synthetic_benchmark(**kwargs: Any) -> int:
     """Run one synthetic benchmark dataset end-to-end (generate + methods + evaluation)."""
@@ -61,13 +57,11 @@ def synthetic_benchmark(**kwargs: Any) -> int:
     args = _apply_overrides(args, kwargs)
     return run_synthetic_benchmark(args)
 
-
 def synthetic_regime_benchmark(**kwargs: Any) -> int:
     """Run the 3-regime synthetic suite across seeds with fixed dataset reuse support."""
     args = _namespace_for_command("synthetic-regime-benchmark")
     args = _apply_overrides(args, kwargs)
     return run_synthetic_regime_benchmark(args)
-
 
 def paper_regression(**kwargs: Any) -> int:
     """Run the paper-output regression harness against artifact/column manifests."""
@@ -75,3 +69,4 @@ def paper_regression(**kwargs: Any) -> int:
     args = _apply_overrides(args, kwargs)
     return run_paper_output_regression(args)
 
+# %% END

@@ -31,7 +31,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from pathlib import Path
@@ -50,14 +50,12 @@ try:
     from statsmodels.nonparametric.smoothers_lowess import lowess as _sm_lowess
 except Exception:  # pragma: no cover
     _sm_lowess = None
-
-
+# %% SMOOTHING UTILITIES
 def _ensure_xyz_array(drift_xyz: np.ndarray) -> np.ndarray:
     arr = np.asarray(drift_xyz, dtype=float)
     if arr.ndim != 2 or arr.shape[1] != 3:
         raise ValueError("drift_xyz must have shape (n_times, 3).")
     return arr
-
 
 def _resolve_odd_window(n: int, win: int) -> int:
     w = int(max(1, min(int(win), int(n))))
@@ -68,7 +66,6 @@ def _resolve_odd_window(n: int, win: int) -> int:
     if w > n:
         w = n if n % 2 == 1 else max(1, n - 1)
     return int(max(1, w))
-
 
 def _smooth_1d(values: np.ndarray, times: np.ndarray, method: str, params: dict[str, Any]) -> np.ndarray:
     y = np.asarray(values, dtype=float)
@@ -102,7 +99,6 @@ def _smooth_1d(values: np.ndarray, times: np.ndarray, method: str, params: dict[
     if m in {"none", "identity"}:
         return y.copy()
     raise ValueError(f"Unsupported smoothing method: {method}")
-
 
 def smooth_drift_timeseries(
     times: np.ndarray,
@@ -138,7 +134,6 @@ def smooth_drift_timeseries(
     for ax in range(3):
         out[:, ax] = _smooth_1d(d[:, ax], t, method=method, params=p)
     return out
-
 
 def detect_stage_jumps(
     times: np.ndarray,
@@ -178,7 +173,6 @@ def detect_stage_jumps(
     mask[jump_idx] = True
     return mask
 
-
 def plot_drift_timeseries(
     times: np.ndarray,
     drift_xyz: np.ndarray,
@@ -214,4 +208,4 @@ def plot_drift_timeseries(
     fig.savefig(out_path, dpi=300)
     plt.close(fig)
     return out_path
-
+# %% END

@@ -10,7 +10,7 @@ Author
 author: Fabrizio Musacchio
 date: Jul 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -20,20 +20,18 @@ import numpy as np
 import pandas as pd
 
 from .io_imaris import ensure_numeric_tracks
-
-POS_COLS = ("Position X", "Position Y", "Position Z")
-CORR_COLS = ("Position X_corr", "Position Y_corr", "Position Z_corr")
+# %% CONSTANTS
+POS_COLS   = ("Position X", "Position Y", "Position Z")
+CORR_COLS  = ("Position X_corr", "Position Y_corr", "Position Z_corr")
 ROW_ID_COL = "_driftcorr_iter_row_id"
 
 
 CorrectionFn = Callable[[pd.DataFrame, int, Path | None], pd.DataFrame]
-
-
+# %% FUNCTIONS
 def _require_corrected_columns(df_corr: pd.DataFrame, iteration: int) -> None:
     missing = [col for col in CORR_COLS if col not in df_corr.columns]
     if missing:
         raise ValueError(f"Iteration {iteration} correction output missing columns: {missing}")
-
 
 def _as_cumulative_output(original_df: pd.DataFrame, current_df: pd.DataFrame) -> pd.DataFrame:
     out = original_df.drop(columns=[ROW_ID_COL], errors="ignore").copy()
@@ -41,14 +39,12 @@ def _as_cumulative_output(original_df: pd.DataFrame, current_df: pd.DataFrame) -
     out.loc[:, CORR_COLS] = current_xyz
     return out
 
-
 def _coerce_corrected_table(corrected_df: pd.DataFrame) -> pd.DataFrame:
     out = corrected_df.copy()
     for col in [*CORR_COLS, "TrackID", "Time"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
     return out
-
 
 def _align_corrected_xyz(
     current_df: pd.DataFrame,
@@ -84,7 +80,6 @@ def _align_corrected_xyz(
     corrected_xyz[valid] = corr_values[valid]
     return corrected_xyz, valid
 
-
 def _next_iteration_input(current_df: pd.DataFrame, corrected_xyz: np.ndarray) -> pd.DataFrame:
     nxt = current_df.copy()
     nxt.loc[:, POS_COLS] = corrected_xyz
@@ -92,7 +87,6 @@ def _next_iteration_input(current_df: pd.DataFrame, corrected_xyz: np.ndarray) -
         if col in nxt.columns:
             nxt = nxt.drop(columns=[col])
     return ensure_numeric_tracks(nxt)
-
 
 def run_iterative_drift_correction(
     df: pd.DataFrame,
@@ -206,3 +200,4 @@ def run_iterative_drift_correction(
     if stopped:
         final.attrs["iterative_stopped_by_tol"] = True
     return final, summary
+# %% END

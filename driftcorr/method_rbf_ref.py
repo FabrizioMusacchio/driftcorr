@@ -32,7 +32,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -44,8 +44,7 @@ import numpy as np
 import pandas as pd
 
 from .io_imaris import ensure_numeric_tracks
-
-
+# %% DATA CLASSES AND FUNCTIONS
 @dataclass
 class RBFField:
     """RBF drift field parameters with augmented bias and optional Stage-1 shift."""
@@ -60,12 +59,10 @@ class RBFField:
     space_input_mode: str
     rbf_linear_terms: bool
 
-
 def _rbf_kernel(x: np.ndarray, c: np.ndarray, sigma: float) -> np.ndarray:
     diff = x[:, None, :] - c[None, :, :]
     r2 = np.sum(diff * diff, axis=2)
     return np.exp(-r2 / (2.0 * sigma * sigma))
-
 
 def _augment_kernel(
     k: np.ndarray,
@@ -81,14 +78,12 @@ def _augment_kernel(
     cols.append(np.ones((n, 1), dtype=float))
     return np.hstack(cols)
 
-
 def _choose_centers_random(x: np.ndarray, m: int, seed: int = 0) -> np.ndarray:
     rng = np.random.default_rng(seed)
     if x.shape[0] <= m:
         return x.copy()
     idx = rng.choice(x.shape[0], size=m, replace=False)
     return x[idx].copy()
-
 
 def _kmeans_simple(points: np.ndarray, k: int, seed: int = 0, n_iters: int = 30) -> np.ndarray:
     """Small NumPy-only k-means used for kmeans_pooled center mode."""
@@ -118,7 +113,6 @@ def _kmeans_simple(points: np.ndarray, k: int, seed: int = 0, n_iters: int = 30)
 
     return centers
 
-
 def _default_sigma(c: np.ndarray) -> float:
     m = c.shape[0]
     if m < 2:
@@ -135,7 +129,6 @@ def _default_sigma(c: np.ndarray) -> float:
         s = 1.0
     return s
 
-
 def _ridge_solve_aug(k_aug: np.ndarray, d: np.ndarray, lam: float, lam_bias: float = 0.0) -> np.ndarray:
     m_aug = k_aug.shape[1]
     a = k_aug.T @ k_aug
@@ -145,7 +138,6 @@ def _ridge_solve_aug(k_aug: np.ndarray, d: np.ndarray, lam: float, lam_bias: flo
     b = k_aug.T @ d
     return _stable_solve(a, b)
 
-
 def _stable_solve(a: np.ndarray, b: np.ndarray, jitter: float = 1e-9) -> np.ndarray:
     try:
         return np.linalg.solve(a, b)
@@ -153,7 +145,6 @@ def _stable_solve(a: np.ndarray, b: np.ndarray, jitter: float = 1e-9) -> np.ndar
         aa = a.copy()
         aa.flat[:: aa.shape[0] + 1] += jitter
         return np.linalg.solve(aa, b)
-
 
 def _merge_with_reference(
     df: pd.DataFrame,
@@ -168,7 +159,6 @@ def _merge_with_reference(
         ids = set(np.asarray(fit_track_ids, dtype=float).tolist())
         mdf = mdf[mdf["TrackID"].astype(float).isin(ids)]
     return mdf
-
 
 def _build_track_space_table(df: pd.DataFrame, reference_time: float, space_input_mode: str) -> pd.DataFrame:
     mode = str(space_input_mode)
@@ -199,7 +189,6 @@ def _build_track_space_table(df: pd.DataFrame, reference_time: float, space_inpu
 
     raise ValueError(f"Unknown space_input_mode: {mode}")
 
-
 def _input_positions_for_pairs(
     mdf: pd.DataFrame,
     track_space_table: pd.DataFrame,
@@ -216,7 +205,6 @@ def _input_positions_for_pairs(
         x[miss] = xt[miss]
     return x
 
-
 def _input_positions_for_rows(
     df_rows: pd.DataFrame,
     track_space_table: pd.DataFrame,
@@ -232,7 +220,6 @@ def _input_positions_for_rows(
         x[miss] = xobs[miss]
     return x
 
-
 def _condition_proxy(k_aug: np.ndarray, lam: float, lam_bias: float = 0.0) -> float:
     m_aug = int(k_aug.shape[1])
     a = k_aug.T @ k_aug
@@ -244,7 +231,6 @@ def _condition_proxy(k_aug: np.ndarray, lam: float, lam_bias: float = 0.0) -> fl
     except np.linalg.LinAlgError:
         return float("inf")
 
-
 def _reference_track_ids(df: pd.DataFrame, reference_time: float, fit_track_ids: np.ndarray | None = None) -> np.ndarray:
     dfr = df[df["Time"] == float(reference_time)][["TrackID"]].copy()
     ids = np.array(sorted(dfr["TrackID"].astype(float).unique()), dtype=float)
@@ -252,7 +238,6 @@ def _reference_track_ids(df: pd.DataFrame, reference_time: float, fit_track_ids:
         wanted = set(np.asarray(fit_track_ids, dtype=float).tolist())
         ids = np.array([tid for tid in ids if float(tid) in wanted], dtype=float)
     return ids
-
 
 def _choose_centers(
     df: pd.DataFrame,
@@ -301,7 +286,6 @@ def _choose_centers(
 
     raise ValueError(f"Unknown center_mode: {center_mode}")
 
-
 def _nearest_center_median_distance(x: np.ndarray, centers: np.ndarray) -> float:
     if x.shape[0] == 0 or centers.shape[0] == 0:
         return float("nan")
@@ -309,14 +293,12 @@ def _nearest_center_median_distance(x: np.ndarray, centers: np.ndarray) -> float
     dmin = np.sqrt(np.min(d2, axis=1))
     return float(np.median(dmin))
 
-
 def _nearest_center_p90_distance(x: np.ndarray, centers: np.ndarray) -> float:
     if x.shape[0] == 0 or centers.shape[0] == 0:
         return float("nan")
     d2 = np.sum((x[:, None, :] - centers[None, :, :]) ** 2, axis=2)
     dmin = np.sqrt(np.min(d2, axis=1))
     return float(np.percentile(dmin, 90))
-
 
 def robust_fit_rbf_field(
     x: np.ndarray,
@@ -414,7 +396,6 @@ def robust_fit_rbf_field(
     )
     return field, inlier_mask, res
 
-
 def predict_rbf_field(field: RBFField, x: np.ndarray, t: np.ndarray | float) -> np.ndarray:
     """Predict drift vectors at positions x."""
     if np.isscalar(t):
@@ -426,7 +407,6 @@ def predict_rbf_field(field: RBFField, x: np.ndarray, t: np.ndarray | float) -> 
     k = _rbf_kernel(x, field.centers, field.sigma)
     k_aug = _augment_kernel(k, x=x, t=tt, rbf_linear_terms=field.rbf_linear_terms)
     return k_aug @ field.W_aug + field.global_stage1[None, :]
-
 
 def _solve_temporal_block_tridiagonal(
     diag_blocks: list[np.ndarray],
@@ -454,7 +434,6 @@ def _solve_temporal_block_tridiagonal(
     for i in range(t_count - 2, -1, -1):
         w[i] = y[i] - g[i] @ w[i + 1]
     return w
-
 
 def _collect_pair_blocks(
     df: pd.DataFrame,
@@ -492,7 +471,6 @@ def _collect_pair_blocks(
         t_blocks.append(ts)
 
     return valid_times, x_blocks, d_blocks, tid_blocks, t_blocks
-
 
 def fit_temporal_rbf_fields_to_reference(
     df: pd.DataFrame,
@@ -668,7 +646,6 @@ def fit_temporal_rbf_fields_to_reference(
 
     return fields_by_time, rows_by_time
 
-
 def estimate_rbf_field_to_reference(
     df: pd.DataFrame,
     t: float,
@@ -779,7 +756,6 @@ def estimate_rbf_field_to_reference(
     }
     return field, info
 
-
 def _compute_track_trim_residuals(
     df: pd.DataFrame,
     reference_time: float,
@@ -814,7 +790,6 @@ def _compute_track_trim_residuals(
         med = float(np.median(vals)) if vals else float("inf")
         rows.append({"TrackID": float(tid), "track_residual_median": med})
     return pd.DataFrame(rows)
-
 
 def _fit_fields_once(
     df: pd.DataFrame,
@@ -981,7 +956,6 @@ def _fit_fields_once(
                     fields_by_time[t] = field
 
     return fields_by_time, tf_rows
-
 
 def correct_positions_rbf_to_reference(
     df: pd.DataFrame,
@@ -1196,7 +1170,6 @@ def correct_positions_rbf_to_reference(
 
     return df_corr, tf_table, fields_by_time, times, reference_time
 
-
 def make_rbf_diagnostic_plots(tf_table: pd.DataFrame, out_prefix: str | Path) -> None:
     """Save per-timepoint RBF diagnostics, including center coverage and track-trim stats."""
     out_prefix = str(out_prefix)
@@ -1396,7 +1369,6 @@ def make_rbf_diagnostic_plots(tf_table: pd.DataFrame, out_prefix: str | Path) ->
                     plt.savefig(out_prefix + "_rbf_track_trim_spatial_xy.png", dpi=300)
                     plt.close(fig)
 
-
 def plot_rbf_residuals_by_space_input_mode(
     tf_tables: dict[str, pd.DataFrame],
     out_path: str | Path,
@@ -1430,3 +1402,4 @@ def plot_rbf_residuals_by_space_input_mode(
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
     plt.close(fig)
+# %% END

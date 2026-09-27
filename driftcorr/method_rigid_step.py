@@ -34,7 +34,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -47,7 +47,7 @@ import pandas as pd
 from .drift_smoothing import detect_stage_jumps, plot_drift_timeseries, smooth_drift_timeseries
 from .io_imaris import ensure_numeric_tracks
 
-
+# %% PIECEWISE RIGID MODEL DATA CLASS
 @dataclass
 class PiecewiseRigidModel:
     """Spatially partitioned rigid model with Gaussian blending."""
@@ -60,7 +60,7 @@ class PiecewiseRigidModel:
     ref_time: float
     blend_sigma_um: float
 
-
+# %% RIGID FITTING FUNCTIONS
 def kabsch_rigid(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Estimate rigid transform y ~= R x + b via Kabsch."""
     xc = x - x.mean(axis=0)
@@ -73,7 +73,6 @@ def kabsch_rigid(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         r = vt.T @ u.T
     b = y.mean(axis=0) - r @ x.mean(axis=0)
     return r, b
-
 
 def rotz_only_fit(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
     """Rigid fit constrained to z-axis rotation plus translation."""
@@ -93,7 +92,6 @@ def rotz_only_fit(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray,
     r = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=float)
     b = y.mean(axis=0) - r @ x.mean(axis=0)
     return r, b, float(theta)
-
 
 def robust_rigid_trimmed(
     x: np.ndarray,
@@ -126,7 +124,6 @@ def robust_rigid_trimmed(
     yp = (x @ r.T) + b
     res = np.linalg.norm(yp - y, axis=1)
     return r, b, inlier_mask, res, theta
-
 
 def estimate_step_rigid_from_tracks(
     df: pd.DataFrame,
@@ -171,20 +168,17 @@ def estimate_step_rigid_from_tracks(
     }
     return r, b, info
 
-
 def compose_rb(r2: np.ndarray, b2: np.ndarray, r1: np.ndarray, b1: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Compose two rigid transforms (r1,b1) then (r2,b2)."""
     r = r2 @ r1
     b = r2 @ b1 + b2
     return r, b
 
-
 def invert_rb(r: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Invert rigid transform y = r x + b."""
     ri = r.T
     bi = -ri @ b
     return ri, bi
-
 
 def build_step_transforms(
     df: pd.DataFrame,
@@ -217,7 +211,6 @@ def build_step_transforms(
             step[(t0, t1)] = (r, b)
     return step, pd.DataFrame(rows), times
 
-
 def cumulative_transform_to_ref(
     step: dict[tuple[float, float], tuple[np.ndarray, np.ndarray]],
     times: np.ndarray,
@@ -245,7 +238,6 @@ def cumulative_transform_to_ref(
         inv[t] = invert_rb(rft, bft)
     return inv
 
-
 def apply_rigid_correction_to_tracks(
     df: pd.DataFrame,
     step: dict[tuple[float, float], tuple[np.ndarray, np.ndarray]],
@@ -268,7 +260,6 @@ def apply_rigid_correction_to_tracks(
     df_corr["Position Y_corr"] = xcorr[:, 1]
     df_corr["Position Z_corr"] = xcorr[:, 2]
     return df_corr
-
 
 def _estimate_time_drift_from_corrected(
     df_orig: pd.DataFrame,
@@ -308,7 +299,6 @@ def _estimate_time_drift_from_corrected(
     drift = tab[["dx", "dy", "dz"]].to_numpy(float)
     return times, drift
 
-
 def _smooth_drift_piecewise(
     times: np.ndarray,
     drift_raw: np.ndarray,
@@ -332,7 +322,6 @@ def _smooth_drift_piecewise(
             continue
         out[a:b] = smooth_drift_timeseries(times[a:b], drift_raw[a:b], method=method, params=params)
     return out, jump_mask
-
 
 def apply_rigid_correction_with_optional_smoothing(
     df: pd.DataFrame,
@@ -394,7 +383,6 @@ def apply_rigid_correction_with_optional_smoothing(
 
     return df_sm
 
-
 def _cluster_tracks_by_mean_position(
     df: pd.DataFrame,
     n_groups: int,
@@ -418,7 +406,6 @@ def _cluster_tracks_by_mean_position(
 
     track_to_group = {float(tid): int(labels[i]) for i, tid in enumerate(tids)}
     return track_to_group, centers
-
 
 def build_piecewise_rigid_model(
     df: pd.DataFrame,
@@ -484,7 +471,6 @@ def build_piecewise_rigid_model(
         table_piecewise["center_z"] = float(centers[0, 2]) if centers.size else 0.0
     return model, table_piecewise
 
-
 def apply_piecewise_rigid_correction_to_tracks(
     df: pd.DataFrame,
     model: PiecewiseRigidModel,
@@ -535,7 +521,6 @@ def apply_piecewise_rigid_correction_to_tracks(
     d["Position Z_corr"] = xcorr[:, 2]
     return d
 
-
 def run_rigid_global_vs_piecewise(
     df: pd.DataFrame,
     n_groups: int = 3,
@@ -578,3 +563,4 @@ def run_rigid_global_vs_piecewise(
         "table_piecewise": table_piecewise,
         "piecewise_model": piecewise_model,
     }
+# %% END

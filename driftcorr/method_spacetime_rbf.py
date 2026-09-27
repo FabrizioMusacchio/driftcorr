@@ -18,7 +18,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,8 +29,7 @@ import numpy as np
 import pandas as pd
 
 from .io_imaris import ensure_numeric_tracks
-
-
+# %% DATA CLASSES
 @dataclass
 class SpaceTimeStageModel:
     """One refinement stage of the space-time RBF model."""
@@ -57,7 +56,6 @@ class SpaceTimeStageModel:
     cond_proxy: float
     per_time_table: pd.DataFrame
 
-
 @dataclass
 class SpaceTimeRBFModel:
     """Full model with one or multiple refinement stages."""
@@ -67,8 +65,7 @@ class SpaceTimeRBFModel:
     space_input_mode: str
     n_refine: int
     stage_infos: list[dict[str, float | int | str | bool]]
-
-
+# %% FUNCTION
 def _kernel_spacetime(
     u: np.ndarray,
     c: np.ndarray,
@@ -90,10 +87,8 @@ def _kernel_spacetime(
     et2 = max(float(ell_time) ** 2, 1e-12)
     return np.exp(-(d2_space + dt2 / (2.0 * et2)))
 
-
 def _augment_kernel(k: np.ndarray) -> np.ndarray:
     return np.hstack([k, np.ones((k.shape[0], 1), dtype=float)])
-
 
 def _augment_kernel_with_linear(
     k: np.ndarray,
@@ -114,14 +109,12 @@ def _augment_kernel_with_linear(
     cols.append(np.ones((n, 1), dtype=float))
     return np.hstack(cols)
 
-
 def _choose_centers(u: np.ndarray, m: int, seed: int = 0) -> np.ndarray:
     rng = np.random.default_rng(seed)
     if u.shape[0] <= m:
         return u.copy()
     idx = rng.choice(u.shape[0], size=m, replace=False)
     return u[idx].copy()
-
 
 def _weighted_ridge_aug(k_aug: np.ndarray, d: np.ndarray, w: np.ndarray, lam: float, lam_bias: float = 0.0) -> np.ndarray:
     sw = np.sqrt(np.clip(w, 0.0, np.inf))[:, None]
@@ -140,7 +133,6 @@ def _weighted_ridge_aug(k_aug: np.ndarray, d: np.ndarray, w: np.ndarray, lam: fl
         a2.flat[:: a2.shape[0] + 1] += 1e-8
         return np.linalg.solve(a2, b)
 
-
 def _condition_proxy(k_aug: np.ndarray, lam: float, lam_bias: float = 0.0) -> float:
     m_aug = int(k_aug.shape[1])
     a = k_aug.T @ k_aug
@@ -152,7 +144,6 @@ def _condition_proxy(k_aug: np.ndarray, lam: float, lam_bias: float = 0.0) -> fl
     except np.linalg.LinAlgError:
         return float("inf")
 
-
 def _robust_spatial_scale(x: np.ndarray) -> np.ndarray:
     c = np.nanmedian(x, axis=0)
     mad = 1.4826 * np.nanmedian(np.abs(x - c[None, :]), axis=0)
@@ -162,7 +153,6 @@ def _robust_spatial_scale(x: np.ndarray) -> np.ndarray:
     s = np.where(np.isfinite(mad) & (mad > 1e-9), mad, ext)
     s = np.where(np.isfinite(s) & (s > 1e-9), s, 1.0)
     return s.astype(float)
-
 
 def _normalize_inputs(
     spatial: np.ndarray,
@@ -184,7 +174,6 @@ def _normalize_inputs(
     xn = (spatial - c[None, :]) / s[None, :]
     tn = (t - tmin) / tr
     return xn, tn, c, s, tmin, tmax
-
 
 def _spatial_inputs_for_rows(df: pd.DataFrame, reference_time: float, mode: str) -> np.ndarray:
     d = df.copy()
@@ -213,7 +202,6 @@ def _spatial_inputs_for_rows(df: pd.DataFrame, reference_time: float, mode: str)
         return dm[["X_ref", "Y_ref", "Z_ref"]].to_numpy(float)
 
     raise ValueError(f"Unknown space_input_mode: {mode}")
-
 
 def _build_training_samples(
     df: pd.DataFrame,
@@ -269,7 +257,6 @@ def _build_training_samples(
     u = np.column_stack([xn, tn])
     return u, d_target, t, spatial, d_total
 
-
 def _build_fit_table(
     df: pd.DataFrame,
     reference_time: float,
@@ -303,7 +290,6 @@ def _build_fit_table(
     mdf = mdf[["TrackID", "Time", "Position X", "Position Y", "Position Z", "X_ref", "Y_ref", "Z_ref"]].copy()
     mdf = mdf.merge(sp, on=["TrackID", "Time"], how="left")
     return mdf
-
 
 def _fit_stage_weights(
     k_aug: np.ndarray,
@@ -428,7 +414,6 @@ def _fit_stage_weights(
         mask_final = np.ones((n,), dtype=bool)
     w_aug = _weighted_ridge_aug(k_aug[mask_final], d_target[mask_final], np.ones((int(np.sum(mask_final)),), dtype=float), lam=lam, lam_bias=0.0)
     return w_aug, mask_final
-
 
 def _fit_stage(
     df: pd.DataFrame,
@@ -612,7 +597,6 @@ def _fit_stage(
     }
     return stage, info
 
-
 def _interp_global_drift(times: np.ndarray, g_time: np.ndarray, g_drift: np.ndarray) -> np.ndarray:
     if g_time.size == 0:
         return np.zeros((times.size, 3), dtype=float)
@@ -620,7 +604,6 @@ def _interp_global_drift(times: np.ndarray, g_time: np.ndarray, g_drift: np.ndar
     for ax in range(3):
         out[:, ax] = np.interp(times, g_time, g_drift[:, ax])
     return out
-
 
 def _predict_stage_drift(
     stage: SpaceTimeStageModel,
@@ -664,7 +647,6 @@ def _predict_stage_drift(
         g = np.zeros_like(pred_res)
 
     return pred_res + g
-
 
 def fit_spacetime_rbf_model(
     df: pd.DataFrame,
@@ -913,7 +895,6 @@ def fit_spacetime_rbf_model(
     }
     return model, info_out
 
-
 def predict_spacetime_drift(model: SpaceTimeRBFModel, u: np.ndarray) -> np.ndarray:
     """Predict drift for raw u=(x,y,z,t) using the first stage as approximation.
 
@@ -945,7 +926,6 @@ def predict_spacetime_drift(model: SpaceTimeRBFModel, u: np.ndarray) -> np.ndarr
         g = np.zeros_like(pred_res)
     return pred_res + g
 
-
 def apply_correction(df: pd.DataFrame, model: SpaceTimeRBFModel) -> pd.DataFrame:
     """Apply space-time RBF correction (all refinement stages sequentially)."""
     d = ensure_numeric_tracks(df)
@@ -970,7 +950,6 @@ def apply_correction(df: pd.DataFrame, model: SpaceTimeRBFModel) -> pd.DataFrame
     out["Position Y_corr"] = xyz_current[:, 1]
     out["Position Z_corr"] = xyz_current[:, 2]
     return out
-
 
 def make_spacetime_diagnostic_plots(model: SpaceTimeRBFModel, out_prefix: str | Path) -> None:
     """Save ST-RBF diagnostics: center coverage and predicted drift magnitude over time."""
@@ -1030,7 +1009,6 @@ def make_spacetime_diagnostic_plots(model: SpaceTimeRBFModel, out_prefix: str | 
         plt.tight_layout()
         plt.savefig(str(out_prefix) + "_st_rbf_refinement_residual_rms.png", dpi=300)
         plt.close(fig)
-
 
 def search_st_rbf_hyperparams(
     df_obs: pd.DataFrame,
@@ -1106,3 +1084,4 @@ def search_st_rbf_hyperparams(
     if out.shape[0]:
         out = out.sort_values("objective", na_position="last").reset_index(drop=True)
     return out
+# %% END

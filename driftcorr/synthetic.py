@@ -24,13 +24,12 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-
-
+# %% FUNCTIONS
 def make_synthetic_tracks(
     n_tracks: int = 40,
     n_times: int = 20,
@@ -83,3 +82,4 @@ def make_synthetic_tracks(
             )
 
     return pd.DataFrame(rows)
+# %% END

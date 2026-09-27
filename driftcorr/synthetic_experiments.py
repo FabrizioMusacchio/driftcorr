@@ -55,7 +55,6 @@ import pandas as pd
 from .io_imaris import ensure_numeric_tracks
 from .metrics import per_time_groundtruth_metrics
 # %% FUNCTIONS
-
 def _smooth_random_series(
     rng: np.random.Generator,
     t: int,
@@ -71,7 +70,6 @@ def _smooth_random_series(
         out[i] = temporal_smoothness * out[i - 1] + (1.0 - temporal_smoothness) * noise
     return out
 
-
 def _rbf_kernel(points: np.ndarray, centers: np.ndarray, lengthscale: float) -> np.ndarray:
     diff = points[:, None, :] - centers[None, :, :]
     d2 = np.sum(diff * diff, axis=2)
@@ -79,7 +77,6 @@ def _rbf_kernel(points: np.ndarray, centers: np.ndarray, lengthscale: float) -> 
     ksum = np.sum(k, axis=1, keepdims=True)
     ksum[ksum <= 1e-12] = 1.0
     return k / ksum
-
 
 def _rotate_about_z(points: np.ndarray, center_xyz: np.ndarray, angle_rad: float) -> np.ndarray:
     """Rotate 3D points around z axis with fixed center."""
@@ -91,7 +88,6 @@ def _rotate_about_z(points: np.ndarray, center_xyz: np.ndarray, angle_rad: float
     xr = c * x - s * y + float(center_xyz[0])
     yr = s * x + c * y + float(center_xyz[1])
     return np.column_stack([xr, yr, z])
-
 
 def generate_controlled_drift_dataset(
     n_tracks: int = 80,
@@ -783,7 +779,6 @@ def generate_controlled_drift_dataset(
     drift_field_groundtruth = pd.DataFrame(rows_drift)
     return df_orig, df_groundtruth, drift_field_groundtruth
 
-
 def _to_imaris_position_table(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     out["Unit"] = "um"
@@ -792,7 +787,6 @@ def _to_imaris_position_table(df: pd.DataFrame) -> pd.DataFrame:
     cols = ["Position X", "Position Y", "Position Z", "Unit", "Category", "Collection", "Time", "TrackID", "ID"]
     return out[cols]
 
-
 def write_synthetic_imaris_table(df_orig: pd.DataFrame, out_path: str | Path) -> Path:
     """Write synthetic observed tracks as IMARIS-like Position table (.csv)."""
     out_path = Path(out_path)
@@ -800,7 +794,6 @@ def write_synthetic_imaris_table(df_orig: pd.DataFrame, out_path: str | Path) ->
     table = _to_imaris_position_table(df_orig)
     table.to_csv(out_path, index=False)
     return out_path
-
 
 def generate_synthetic_imaris_folder(
     out_dir: str | Path,
@@ -1048,7 +1041,6 @@ def generate_synthetic_imaris_folder(
 
     return {"imaris_dir": out_dir, "groundtruth_dir": gt_dir, "files": written_files}
 
-
 def load_groundtruth_for_imaris_file(imaris_file: str | Path) -> pd.DataFrame | None:
     """Load matching groundtruth CSV for one IMARIS file if available."""
     p = Path(imaris_file)
@@ -1057,7 +1049,6 @@ def load_groundtruth_for_imaris_file(imaris_file: str | Path) -> pd.DataFrame | 
         return None
     return pd.read_csv(gt_path)
 
-
 def load_drift_field_for_imaris_file(imaris_file: str | Path) -> pd.DataFrame | None:
     """Load matching drift-field groundtruth CSV for one IMARIS file if available."""
     p = Path(imaris_file)
@@ -1065,7 +1056,6 @@ def load_drift_field_for_imaris_file(imaris_file: str | Path) -> pd.DataFrame | 
     if not drift_path.exists():
         return None
     return pd.read_csv(drift_path)
-
 
 def load_meta_for_imaris_file(imaris_file: str | Path) -> dict[str, Any] | None:
     """Load matching synthetic meta CSV as dict for one IMARIS file if available."""
@@ -1078,7 +1068,6 @@ def load_meta_for_imaris_file(imaris_file: str | Path) -> dict[str, Any] | None:
         return None
     row = tab.iloc[0].to_dict()
     return {str(k): v for k, v in row.items()}
-
 
 def evaluate_corrected_vs_groundtruth(
     df_corr: pd.DataFrame,
@@ -1159,7 +1148,6 @@ def evaluate_corrected_vs_groundtruth(
             else:
                 summary[f"overall_rms_error_{ct}"] = float("nan")
     return summary, merged, per_track, per_time
-
 
 def save_groundtruth_evaluation_outputs(
     base_out_prefix: str | Path,

@@ -23,17 +23,17 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Mapping
 
 import pandas as pd
-
+# %% CONSTANTS
 REQUIRED_TRACK_COLUMNS = ["Position X", "Position Y", "Position Z", "Time", "TrackID"]
 
-
+# %% I/O FUNCTIONS
 def read_imaris_position_xls(
     path: str | Path,
     sheet_name: str = "Position",
@@ -50,13 +50,11 @@ def read_imaris_position_xls(
         raise ValueError(f"Missing required columns in {p}: {missing}")
     return df
 
-
 def list_imaris_xls_files(imaris_dir: str | Path) -> list[Path]:
     """List IMARIS-like tracking files (.xls/.xlsx/.csv) in deterministic order."""
     d = Path(imaris_dir)
     files = sorted([*d.glob("*.xls"), *d.glob("*.xlsx"), *d.glob("*.csv")])
     return files
-
 
 def load_imaris_directory(imaris_dir: str | Path) -> Mapping[str, pd.DataFrame]:
     """Load all IMARIS exports in a directory, keyed by filename."""
@@ -64,7 +62,6 @@ def load_imaris_directory(imaris_dir: str | Path) -> Mapping[str, pd.DataFrame]:
     for path in list_imaris_xls_files(imaris_dir):
         out[path.name] = read_imaris_position_xls(path)
     return out
-
 
 def ensure_numeric_tracks(
     df: pd.DataFrame,
@@ -78,3 +75,4 @@ def ensure_numeric_tracks(
         out[col] = pd.to_numeric(out[col], errors="coerce")
     out = out.dropna(subset=[*pos_cols, time_col, tid_col]).copy()
     return out
+# %% END

@@ -26,7 +26,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from pathlib import Path
@@ -46,16 +46,13 @@ from .metrics import (
     pairwise_trace_correlation,
     rms_displacement_per_track,
     scalarize_metrics,
-    summarize_msd,
-)
-
-
+    summarize_msd,)
+# %% EVALUATION FUNCTIONS
 def _nanmedian_no_warning(a: np.ndarray, axis: int | None = None) -> np.ndarray:
     """NaN-median that avoids all-NaN RuntimeWarning noise."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         return np.nanmedian(a, axis=axis)
-
 
 def evaluate_method(
     df_orig: pd.DataFrame,
@@ -115,7 +112,6 @@ def evaluate_method(
     }
     return metrics
 
-
 def run_all_methods_and_compare(
     df_orig: pd.DataFrame,
     methods: (
@@ -162,7 +158,6 @@ def run_all_methods_and_compare(
         summary = summary.sort_values("method").reset_index(drop=True)
     return summary, details
 
-
 def _plot_corr_hist(details: dict[str, dict[str, Any]], out_path: str | Path) -> None:
     fig = plt.figure(figsize=(8, 5))
     first = next(iter(details.values()))
@@ -182,7 +177,6 @@ def _plot_corr_hist(details: dict[str, dict[str, Any]], out_path: str | Path) ->
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
     plt.close(fig)
-
 
 def _plot_msd(details: dict[str, dict[str, Any]], out_path: str | Path) -> None:
     def _aligned_xy(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -213,7 +207,6 @@ def _plot_msd(details: dict[str, dict[str, Any]], out_path: str | Path) -> None:
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
     plt.close(fig)
-
 
 def _plot_neighbor_bars(details: dict[str, dict[str, Any]], out_path: str | Path) -> None:
     methods = list(details.keys())
@@ -247,7 +240,6 @@ def _plot_neighbor_bars(details: dict[str, dict[str, Any]], out_path: str | Path
     plt.savefig(out_path, dpi=300)
     plt.close(fig)
 
-
 def save_evaluation_outputs(
     base_out_prefix: str | Path,
     summary_df: pd.DataFrame,
@@ -274,3 +266,4 @@ def save_evaluation_outputs(
         "plot_msd_curve": out_msd,
         "plot_neighbor_stats": out_neighbor,
     }
+# %% END

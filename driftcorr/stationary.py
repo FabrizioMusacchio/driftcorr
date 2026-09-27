@@ -14,7 +14,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -25,14 +25,12 @@ import pandas as pd
 
 from .io_imaris import ensure_numeric_tracks
 from .metrics import displacements_relative_to_anchor, pivot_tracks, rms_displacement_per_track
-
-
+# %% FUNCTIONS AND CLASSES
 @dataclass
 class StationarySelection:
     track_ids: set[float]
     table: pd.DataFrame
     diagnostics: dict[str, float | int]
-
 
 def _knn_from_points(p: np.ndarray, k: int = 6) -> np.ndarray:
     n = p.shape[0]
@@ -47,7 +45,6 @@ def _knn_from_points(p: np.ndarray, k: int = 6) -> np.ndarray:
         take = order[:k]
         nbrs[i, : len(take)] = take
     return nbrs
-
 
 def _per_track_neighbor_relstd(x: np.ndarray, k_neighbors: int = 6) -> np.ndarray:
     p = np.nanmean(x, axis=1)
@@ -75,7 +72,6 @@ def _per_track_neighbor_relstd(x: np.ndarray, k_neighbors: int = 6) -> np.ndarra
             out[i] = float(np.nanmedian(vals))
     return out
 
-
 def _msd_tau_per_track(x: np.ndarray, tau: int) -> np.ndarray:
     n, t, _ = x.shape
     out = np.full((n,), np.nan, dtype=float)
@@ -90,7 +86,6 @@ def _msd_tau_per_track(x: np.ndarray, tau: int) -> np.ndarray:
         dx = xi[tau:][v] - xi[:-tau][v]
         out[i] = float(np.mean(np.sum(dx * dx, axis=1)))
     return out
-
 
 def _corr_outlier_score(d: np.ndarray, min_overlap: int = 4) -> np.ndarray:
     """Per-track outlier score based on displacement-norm correlations.
@@ -123,7 +118,6 @@ def _corr_outlier_score(d: np.ndarray, min_overlap: int = 4) -> np.ndarray:
         if vals:
             out[i] = 1.0 - float(np.median(vals))
     return out
-
 
 def find_stationary_tracks(
     df: pd.DataFrame,
@@ -256,7 +250,6 @@ def find_stationary_tracks(
 
     return StationarySelection(track_ids=selected_ids, table=table, diagnostics=diagnostics)
 
-
 def evaluate_stationary_selection_impact(
     metrics_without_subset: dict[str, float | int | bool],
     metrics_with_subset: dict[str, float | int | bool],
@@ -277,7 +270,6 @@ def evaluate_stationary_selection_impact(
         except Exception:
             out[f"delta_{k}"] = float("nan")
     return out
-
 
 def plot_stationary_spatial_distribution(selection_table: pd.DataFrame, out_path: str) -> None:
     """Plot selected vs non-selected tracks in mean XY and XZ space."""
@@ -311,3 +303,4 @@ def plot_stationary_spatial_distribution(selection_table: pd.DataFrame, out_path
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
     plt.close(fig)
+# %% END

@@ -27,7 +27,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 import argparse
@@ -43,42 +43,35 @@ from .io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris
 from .metrics import msd_per_track, pivot_tracks
 from .method_local_communities import (
     run_local_drift_correction_for_file,
-    run_local_drift_correction_for_file_with_optional_smoothing,
-)
+    run_local_drift_correction_for_file_with_optional_smoothing,)
 from .method_rbf_ref import (
     correct_positions_rbf_to_reference,
     make_rbf_diagnostic_plots,
-    plot_rbf_residuals_by_space_input_mode,
-)
+    plot_rbf_residuals_by_space_input_mode,)
 from .method_rigid_step import (
     apply_piecewise_rigid_correction_to_tracks,
     apply_rigid_correction_to_tracks,
     apply_rigid_correction_with_optional_smoothing,
     build_piecewise_rigid_model,
-    build_step_transforms,
-)
+    build_step_transforms,)
 from .method_spacetime_rbf import apply_correction as apply_spacetime_correction
 from .method_spacetime_rbf import fit_spacetime_rbf_model
 from .method_spacetime_rbf import make_spacetime_diagnostic_plots
 from .method_spacetime_rbf_moe import (
     apply_spacetime_rbf_moe_correction,
     fit_spacetime_rbf_moe_model,
-    make_st_moe_diagnostic_plots,
-)
+    make_st_moe_diagnostic_plots,)
 from .stationary import evaluate_stationary_selection_impact, find_stationary_tracks, plot_stationary_spatial_distribution
 from .synthetic_experiments import (
     generate_synthetic_imaris_folder,
     load_drift_field_for_imaris_file,
     load_groundtruth_for_imaris_file,
     load_meta_for_imaris_file,
-    save_groundtruth_evaluation_outputs,
-)
+    save_groundtruth_evaluation_outputs,)
 from .visualization import save_visual_inspection_plots
-
-
+# %% FUNCTIONS
 def _base_from_path(path: Path) -> str:
     return path.stem
-
 
 def _parse_float_list(raw: str) -> list[float]:
     vals: list[float] = []
@@ -89,7 +82,6 @@ def _parse_float_list(raw: str) -> list[float]:
         vals.append(float(tok))
     return vals
 
-
 def _result_prefix_for_input_file(out_dir: Path, input_file: Path) -> Path:
     """Return per-file output prefix inside a dedicated file subfolder."""
     base = _base_from_path(input_file)
@@ -97,18 +89,15 @@ def _result_prefix_for_input_file(out_dir: Path, input_file: Path) -> Path:
     file_dir.mkdir(parents=True, exist_ok=True)
     return file_dir / base
 
-
 def _resolve_output_dir_for_single(args: argparse.Namespace, in_path: Path) -> Path:
     if args.out is not None:
         return Path(args.out)
     return in_path.parent / "driftcorr_results"
 
-
 def _resolve_output_dir_for_batch(args: argparse.Namespace, imaris_dir: Path) -> Path:
     if args.out is not None:
         return Path(args.out)
     return imaris_dir / "driftcorr_results"
-
 
 def _count_synthetic_celltypes(groundtruth_df: pd.DataFrame | None) -> tuple[int | None, int | None]:
     if groundtruth_df is None or "CellType" not in groundtruth_df.columns:
@@ -117,7 +106,6 @@ def _count_synthetic_celltypes(groundtruth_df: pd.DataFrame | None) -> tuple[int
     n_stat = int(np.sum(tab["CellType"] == "stationary"))
     n_migr = int(np.sum(tab["CellType"] == "migrating"))
     return n_stat, n_migr
-
 
 def _snapshot_method_config(args: argparse.Namespace, method: str) -> dict[str, object]:
     cfg = {
@@ -176,7 +164,6 @@ def _snapshot_method_config(args: argparse.Namespace, method: str) -> dict[str, 
         )
     return cfg
 
-
 def _print_run_config(
     method: str,
     args: argparse.Namespace,
@@ -196,7 +183,6 @@ def _print_run_config(
     }
     print("[RUN_CONFIG] " + json.dumps(payload, ensure_ascii=True, sort_keys=True))
 
-
 def _assert_no_nan_corrected(df_orig: pd.DataFrame, df_corr: pd.DataFrame, method_name: str) -> None:
     req = ["Position X_corr", "Position Y_corr", "Position Z_corr"]
     if not set(req).issubset(df_corr.columns):
@@ -209,7 +195,6 @@ def _assert_no_nan_corrected(df_orig: pd.DataFrame, df_corr: pd.DataFrame, metho
     bad = valid_in & (~np.all(np.isfinite(xyzc), axis=1))
     if np.any(bad):
         raise ValueError(f"{method_name}: corrected coordinates contain NaN/Inf on {int(np.sum(bad))} valid rows.")
-
 
 def _save_pred_drift_sanity(df_orig: pd.DataFrame, df_corr: pd.DataFrame, out_prefix: Path, method_name: str) -> None:
     req = ["Position X_corr", "Position Y_corr", "Position Z_corr"]
@@ -231,12 +216,10 @@ def _save_pred_drift_sanity(df_orig: pd.DataFrame, df_corr: pd.DataFrame, out_pr
     )
     tab.to_csv(str(out_prefix) + f"_pred_drift_sanity_{method_name}.csv", index=False)
 
-
 def _collect_output_manifest(out_root: Path) -> list[str]:
     files = [p for p in out_root.rglob("*") if p.is_file()]
     rel = [str(p.relative_to(out_root)) for p in files]
     return sorted(rel)
-
 
 def _write_manifest(manifest_path: Path, entries: list[str]) -> None:
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -244,12 +227,10 @@ def _write_manifest(manifest_path: Path, entries: list[str]) -> None:
         for x in sorted(entries):
             f.write(str(x) + "\n")
 
-
 def _read_manifest(manifest_path: Path) -> list[str]:
     with manifest_path.open("r", encoding="utf-8") as f:
         lines = [ln.strip() for ln in f.readlines()]
     return sorted([ln for ln in lines if ln])
-
 
 def _validate_manifest(out_root: Path, manifest_path: Path) -> None:
     expected = set(_read_manifest(manifest_path))
@@ -258,7 +239,6 @@ def _validate_manifest(out_root: Path, manifest_path: Path) -> None:
     if missing:
         preview = ", ".join(missing[:12])
         raise RuntimeError(f"Regression manifest mismatch: {len(missing)} expected artifacts missing. First: {preview}")
-
 
 def _prepare_stationary_subset(
     df: pd.DataFrame,
@@ -298,7 +278,6 @@ def _prepare_stationary_subset(
     if use_subset:
         return sel.table, sel.track_ids
     return sel.table, None
-
 
 def _run_rbf(
     df: pd.DataFrame,
@@ -373,7 +352,6 @@ def _run_rbf(
             plot_rbf_residuals_by_space_input_mode(tf_by_mode, str(out_prefix) + "_rbf_residuals_by_space_input_mode.png")
     return {"rbf": df_corr}
 
-
 def _run_rigid(
     df: pd.DataFrame,
     out_prefix: Path,
@@ -426,7 +404,6 @@ def _run_rigid(
 
     return out
 
-
 def _run_local(
     df: pd.DataFrame,
     out_prefix: Path,
@@ -445,7 +422,6 @@ def _run_local(
         use_track_mean_position=not args.use_row_position,
     )
     return {"local": df_corr}
-
 
 def _run_st_rbf(
     df: pd.DataFrame,
@@ -486,7 +462,6 @@ def _run_st_rbf(
         df_corr.to_csv(str(out_prefix) + "_positions_corrected_st_rbf.csv", index=False)
         make_spacetime_diagnostic_plots(model, out_prefix)
     return {"st_rbf": df_corr}
-
 
 def _run_st_rbf_moe(
     df: pd.DataFrame,
@@ -553,7 +528,6 @@ def _run_st_rbf_moe(
             make_st_moe_diagnostic_plots(expert_table, str(out_prefix) + f"_{name}")
     return out
 
-
 def _run_method(
     method: str,
     df: pd.DataFrame,
@@ -573,7 +547,6 @@ def _run_method(
     if method == "st_rbf_moe":
         return _run_st_rbf_moe(df, out_prefix, args, fit_track_ids=fit_track_ids, save_outputs=save_outputs)
     raise ValueError(f"Unknown method: {method}")
-
 
 def _maybe_save_stationary_impact(
     df_orig: pd.DataFrame,
@@ -648,7 +621,6 @@ def _maybe_save_stationary_impact(
 
     pd.DataFrame(rows).to_csv(str(out_prefix) + f"_stationary_impact_{method}.csv", index=False)
 
-
 def _maybe_groundtruth_eval(
     imaris_file: Path,
     out_prefix: Path,
@@ -660,7 +632,6 @@ def _maybe_groundtruth_eval(
         return
     drift_gt = load_drift_field_for_imaris_file(imaris_file)
     save_groundtruth_evaluation_outputs(out_prefix, gt, corrected_by_method, drift_field_groundtruth=drift_gt)
-
 
 def _run_batch_for_folder(
     imaris_dir: Path,
@@ -710,7 +681,6 @@ def _run_batch_for_folder(
 
     return 0
 
-
 def run_single(args: argparse.Namespace) -> int:
     in_path = Path(args.imaris_xls)
     out_dir = _resolve_output_dir_for_single(args, in_path)
@@ -748,13 +718,11 @@ def run_single(args: argparse.Namespace) -> int:
     print(f"Done: {in_path.name} with method={args.method} -> {out_prefix.parent}")
     return 0
 
-
 def run_batch(args: argparse.Namespace) -> int:
     imaris_dir = Path(args.imaris_dir)
     out_dir = _resolve_output_dir_for_batch(args, imaris_dir)
     methods = [m.strip() for m in args.methods.split(",") if m.strip()]
     return _run_batch_for_folder(imaris_dir, out_dir, args, methods)
-
 
 def run_smooth(args: argparse.Namespace) -> int:
     """Run rigid/local correction with optional drift smoothing wrapper."""
@@ -829,7 +797,6 @@ def run_smooth(args: argparse.Namespace) -> int:
     print(f"Done: smoothing run for {in_path.name} -> {out_prefix.parent}")
     return 0
 
-
 def run_st_sweep(args: argparse.Namespace) -> int:
     """Run ST-RBF sweep over ell-time and lambda on all files in input dir."""
     imaris_dir = Path(args.input_dir)
@@ -879,7 +846,6 @@ def run_st_sweep(args: argparse.Namespace) -> int:
         print(f"ST sweep summary -> {out_csv}")
     return 0
 
-
 def run_synthetic_benchmark(args: argparse.Namespace) -> int:
     synthetic_dir = Path(args.synthetic_dir)
     if not (bool(getattr(args, "reuse_existing", 0)) and list_imaris_xls_files(synthetic_dir)):
@@ -908,7 +874,6 @@ def run_synthetic_benchmark(args: argparse.Namespace) -> int:
     print(f"Synthetic IMARIS folder generated: {synthetic_dir}")
     return _run_batch_for_folder(synthetic_dir, out_dir, args, methods)
 
-
 def run_synthetic_generate(args: argparse.Namespace) -> int:
     """Generate synthetic IMARIS data only (no correction run)."""
     synthetic_dir = Path(args.synthetic_dir)
@@ -931,7 +896,6 @@ def run_synthetic_generate(args: argparse.Namespace) -> int:
     )
     print(f"Synthetic dataset generated: {synthetic_dir}")
     return 0
-
 
 def _regime_presets() -> dict[str, dict[str, object]]:
     """Fixed synthetic regimes to compare where each correction family should excel."""
@@ -961,7 +925,6 @@ def _regime_presets() -> dict[str, dict[str, object]]:
             "measurement_noise_um": 0.15,
         },
     }
-
 
 def run_synthetic_regime_benchmark(args: argparse.Namespace) -> int:
     """Run fixed 3-regime synthetic suite over multiple seeds and aggregate RMS summaries."""
@@ -1145,7 +1108,6 @@ def run_synthetic_regime_benchmark(args: argparse.Namespace) -> int:
     print(f"Regime benchmark summary -> {out_agg}")
     return 0
 
-
 def run_paper_output_regression(args: argparse.Namespace) -> int:
     """Run one fixed synthetic benchmark and validate output artifacts against a manifest."""
     synthetic_dir = Path(args.synthetic_dir)
@@ -1209,7 +1171,6 @@ def run_paper_output_regression(args: argparse.Namespace) -> int:
 
     print("Paper output regression passed.")
     return 0
-
 
 def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--reference-time", type=float, default=None)
@@ -1306,7 +1267,6 @@ def _add_common_method_options(p: argparse.ArgumentParser) -> None:
     p.add_argument("--synthetic-n-rbf-centers", type=int, default=10)
     p.add_argument("--synthetic-measurement-noise-um", type=float, default=0.2)
     p.add_argument("--reuse-existing", type=int, choices=[0, 1], default=0)
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="driftcorr", description="Drift correction for IMARIS tracking exports")
@@ -1425,8 +1385,7 @@ def build_parser() -> argparse.ArgumentParser:
         _add_common_method_options(p)
 
     return parser
-
-
+# %% MAIN FUNCTION
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1448,7 +1407,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_paper_output_regression(args)
     parser.error(f"Unknown command: {args.command}")
     return 2
-
-
+# %% MAIN ENTRY POINT
 if __name__ == "__main__":
     raise SystemExit(main())
+# %% END

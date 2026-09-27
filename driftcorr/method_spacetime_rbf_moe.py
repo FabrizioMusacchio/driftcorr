@@ -16,7 +16,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -29,14 +29,13 @@ import pandas as pd
 from .io_imaris import ensure_numeric_tracks
 from .method_spacetime_rbf import SpaceTimeRBFModel, apply_correction, fit_spacetime_rbf_model
 
-
+# %% DATA CLASSES
 @dataclass
 class SpaceTimeRBFExpert:
     center_xyz: np.ndarray
     track_ids: np.ndarray
     model: SpaceTimeRBFModel
     fit_info: dict[str, float | int | str | bool]
-
 
 @dataclass
 class SpaceTimeRBFMoEModel:
@@ -48,8 +47,7 @@ class SpaceTimeRBFMoEModel:
     shared_global_drift_values: np.ndarray
     drift_cap_um: float
     group_coupling_alpha: float
-
-
+# %% FUNCTIONS
 def _fit_table_total_drift(df: pd.DataFrame, reference_time: float, fit_track_ids: np.ndarray | None = None) -> pd.DataFrame:
     """Build table with total drift targets D(t)=X(t)-X(ref) for residual diagnostics."""
     d = ensure_numeric_tracks(df)
@@ -65,7 +63,6 @@ def _fit_table_total_drift(df: pd.DataFrame, reference_time: float, fit_track_id
     tab["dy_true"] = tab["Position Y"].to_numpy(float) - tab["Y_ref"].to_numpy(float)
     tab["dz_true"] = tab["Position Z"].to_numpy(float) - tab["Z_ref"].to_numpy(float)
     return tab
-
 
 def _estimate_global_translation(
     df: pd.DataFrame,
@@ -84,7 +81,6 @@ def _estimate_global_translation(
     )
     return gtab["Time"].to_numpy(float), gtab[["dx", "dy", "dz"]].to_numpy(float)
 
-
 def _interp_global_drift(times: np.ndarray, g_time: np.ndarray, g_drift: np.ndarray) -> np.ndarray:
     if g_time.size == 0:
         return np.zeros((times.size, 3), dtype=float)
@@ -92,7 +88,6 @@ def _interp_global_drift(times: np.ndarray, g_time: np.ndarray, g_drift: np.ndar
     for ax in range(3):
         out[:, ax] = np.interp(times, g_time, g_drift[:, ax])
     return out
-
 
 def _subtract_global_from_positions(df: pd.DataFrame, g_time: np.ndarray, g_drift: np.ndarray) -> pd.DataFrame:
     d = ensure_numeric_tracks(df).copy()
@@ -106,7 +101,6 @@ def _subtract_global_from_positions(df: pd.DataFrame, g_time: np.ndarray, g_drif
     d.loc[:, "Position Y"] = xyz_res[:, 1]
     d.loc[:, "Position Z"] = xyz_res[:, 2]
     return d
-
 
 def _kmeans_simple(points: np.ndarray, k: int, seed: int = 0, n_iters: int = 30) -> tuple[np.ndarray, np.ndarray]:
     pts = np.asarray(points, dtype=float)
@@ -136,7 +130,6 @@ def _kmeans_simple(points: np.ndarray, k: int, seed: int = 0, n_iters: int = 30)
         centers = new_centers
     return centers, labels
 
-
 def _track_anchor_table(df: pd.DataFrame, reference_time: float, mode: str) -> pd.DataFrame:
     d = ensure_numeric_tracks(df)
     mode = str(mode)
@@ -156,7 +149,6 @@ def _track_anchor_table(df: pd.DataFrame, reference_time: float, mode: str) -> p
         return out[["TrackID", "ax", "ay", "az"]]
     raise ValueError(f"Unknown cluster_mode: {mode}")
 
-
 def _anchors_for_rows(df: pd.DataFrame, anchor_table: pd.DataFrame) -> np.ndarray:
     d = ensure_numeric_tracks(df)
     m = d[["TrackID"]].merge(anchor_table, on="TrackID", how="left")
@@ -165,7 +157,6 @@ def _anchors_for_rows(df: pd.DataFrame, anchor_table: pd.DataFrame) -> np.ndarra
     if np.any(miss):
         a[miss] = d.loc[miss, ["Position X", "Position Y", "Position Z"]].to_numpy(float)
     return a
-
 
 def fit_spacetime_rbf_moe_model(
     df: pd.DataFrame,
@@ -357,7 +348,6 @@ def fit_spacetime_rbf_moe_model(
 
     return model, et
 
-
 def apply_spacetime_rbf_moe_correction(df: pd.DataFrame, model: SpaceTimeRBFMoEModel) -> pd.DataFrame:
     """Apply blended ST-RBF expert correction to all rows."""
     d = ensure_numeric_tracks(df)
@@ -408,7 +398,6 @@ def apply_spacetime_rbf_moe_correction(df: pd.DataFrame, model: SpaceTimeRBFMoEM
     out["Position Z_corr"] = xyz_corr[:, 2]
     return out
 
-
 def make_st_moe_diagnostic_plots(expert_table: pd.DataFrame, out_prefix: str | Path) -> None:
     """Save ST-RBF-MoE expert-size and per-expert residual plots."""
     if expert_table is None or expert_table.shape[0] == 0:
@@ -450,3 +439,4 @@ def make_st_moe_diagnostic_plots(expert_table: pd.DataFrame, out_prefix: str | P
         plt.tight_layout()
         plt.savefig(out_prefix + "_st_rbf_moe_blended_residuals.png", dpi=300)
         plt.close(fig)
+# %% END

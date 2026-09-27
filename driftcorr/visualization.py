@@ -36,7 +36,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 # %% FUNCTIONS
-
 def _compute_limits(
     df_orig: pd.DataFrame,
     df_corr: pd.DataFrame,
@@ -57,7 +56,6 @@ def _compute_limits(
         z_max = max(z_max, float(df_groundtruth["Position Z"].max()))
     return x_min, x_max, y_min, y_max, z_min, z_max
 
-
 def _compute_box_aspect_from_limits(
     x_min: float,
     x_max: float,
@@ -71,7 +69,6 @@ def _compute_box_aspect_from_limits(
     span_y = max(float(y_max) - float(y_min), 1e-6)
     span_z = max(float(z_max) - float(z_min), 1e-6)
     return span_x, span_y, span_z
-
 
 def _apply_box_aspect_from_limits(
     ax,
@@ -87,7 +84,6 @@ def _apply_box_aspect_from_limits(
         ax.set_box_aspect(_compute_box_aspect_from_limits(x_min, x_max, y_min, y_max, z_min, z_max))
     except Exception:
         pass
-
 
 def plot_tracks_comparison(
     df_orig: pd.DataFrame,
@@ -176,11 +172,9 @@ def plot_tracks_comparison(
     plt.savefig(out_path, dpi=300)
     plt.close(fig)
 
-
 def _format_time_for_filename(t: float) -> str:
     s = f"{float(t):.6f}".rstrip("0").rstrip(".")
     return s.replace("-", "m").replace(".", "p")
-
 
 def _save_frames_as_gif(frame_paths: list[Path], gif_path: Path, fps: float = 4.0) -> Path | None:
     """Create a GIF animation from frame images if Pillow is available."""
@@ -216,7 +210,6 @@ def _save_frames_as_gif(frame_paths: list[Path], gif_path: Path, fps: float = 4.
                 im.close()
             except Exception:
                 pass
-
 
 def plot_timepoint_side_by_side_3d(
     df_orig: pd.DataFrame,
@@ -331,7 +324,6 @@ def plot_timepoint_side_by_side_3d(
         saved.append(out_path)
 
     return saved
-
 
 def plot_tracks_over_time_panels(
     df_orig: pd.DataFrame,
@@ -636,7 +628,6 @@ def plot_tracks_over_time_panels(
     
     
     return out_path
-
 
 def save_visual_inspection_plots(
     df_orig: pd.DataFrame,

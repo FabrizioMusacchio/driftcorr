@@ -26,7 +26,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from typing import Any
@@ -36,8 +36,7 @@ import numpy as np
 import pandas as pd
 
 from .io_imaris import ensure_numeric_tracks
-
-
+# %% FUNCTIONS
 def pivot_tracks(
     df: pd.DataFrame,
     xcol: str = "Position X",
@@ -82,7 +81,6 @@ def pivot_tracks(
 
     return times, track_ids, x
 
-
 def displacements_relative_to_anchor(
     x: np.ndarray,
     anchor_index: int | None = None,
@@ -107,7 +105,6 @@ def displacements_relative_to_anchor(
                 d[i, j] = xi[j] - x0
     return d
 
-
 def pairwise_trace_correlation(d: np.ndarray, min_overlap: int = 4) -> np.ndarray:
     """Pairwise correlation of displacement norms across tracks."""
     n, _, _ = d.shape
@@ -131,10 +128,8 @@ def pairwise_trace_correlation(d: np.ndarray, min_overlap: int = 4) -> np.ndarra
                 corrs.append(c)
     return np.array(corrs, dtype=float)
 
-
 def _mean_position_per_track(x: np.ndarray) -> np.ndarray:
     return np.nanmean(x, axis=1)
-
 
 def _knn_from_points(p: np.ndarray, k: int = 8) -> np.ndarray:
     n = p.shape[0]
@@ -155,7 +150,6 @@ def _knn_from_points(p: np.ndarray, k: int = 8) -> np.ndarray:
         take = order[:k]
         nbrs[ii, : len(take)] = idx[take]
     return nbrs
-
 
 def neighbor_distance_stats(
     x: np.ndarray,
@@ -202,7 +196,6 @@ def neighbor_distance_stats(
         "rel_std_p90": float(np.nanpercentile(arr, 90)),
     }
 
-
 def msd_per_track(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Compute per-track MSD curves for all valid lags."""
     n, t, _ = x.shape
@@ -222,7 +215,6 @@ def msd_per_track(x: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
             msd[i, dt - 1] = float(np.mean(np.sum(dx * dx, axis=1)))
     return tau.astype(float), msd
 
-
 def summarize_msd(msd: np.ndarray) -> dict[str, float | bool]:
     """Summarize MSD via medians across tracks."""
     if msd.size == 0:
@@ -238,11 +230,9 @@ def summarize_msd(msd: np.ndarray) -> dict[str, float | bool]:
         "msd_last_median": float(med[-1]) if med.size >= 1 else float("nan"),
     }
 
-
 def msd_summary(msd: np.ndarray) -> dict[str, float | bool]:
     """Alias for summarize_msd for API clarity."""
     return summarize_msd(msd)
-
 
 def rms_displacement_per_track(
     x: np.ndarray,
@@ -254,7 +244,6 @@ def rms_displacement_per_track(
     rms = np.sqrt(np.nanmean(mag * mag, axis=1))
     return rms
 
-
 def fraction_near_stationary(rms_per_track: np.ndarray, threshold_um: float = 2.0) -> float:
     """Fraction of tracks with RMS displacement below threshold."""
     a = np.asarray(rms_per_track, dtype=float)
@@ -262,7 +251,6 @@ def fraction_near_stationary(rms_per_track: np.ndarray, threshold_um: float = 2.
     if not np.any(m):
         return float("nan")
     return float(np.mean(a[m] < float(threshold_um)))
-
 
 def align_orig_and_corr(
     df_orig: pd.DataFrame,
@@ -294,7 +282,6 @@ def align_orig_and_corr(
     xc2 = xc[i_c][:, j_c]
     return common_t, common_id, xo2, xc2
 
-
 def scalarize_metrics(metrics: dict[str, Any]) -> dict[str, float | int | str | bool]:
     """Return only scalar metric entries for tabular summaries."""
     out: dict[str, float | int | str | bool] = {}
@@ -302,7 +289,6 @@ def scalarize_metrics(metrics: dict[str, Any]) -> dict[str, float | int | str | 
         if np.isscalar(v) or isinstance(v, (str, bool)):
             out[k] = v
     return out
-
 
 def _rms_ci_from_squared_errors(e2: np.ndarray, z: float = 1.96) -> tuple[float, float, float]:
     """Approximate RMS confidence interval from per-sample squared errors."""
@@ -318,7 +304,6 @@ def _rms_ci_from_squared_errors(e2: np.ndarray, z: float = 1.96) -> tuple[float,
     lo = max(mu - z * se, 0.0)
     hi = max(mu + z * se, 0.0)
     return float(np.sqrt(mu)), float(np.sqrt(lo)), float(np.sqrt(hi))
-
 
 def per_time_groundtruth_metrics(
     df_corr: pd.DataFrame,
@@ -427,3 +412,4 @@ def per_time_groundtruth_metrics(
     if out.shape[0]:
         out = out.sort_values(["group", "Time"]).reset_index(drop=True)
     return out
+# %% END

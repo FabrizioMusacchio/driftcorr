@@ -26,7 +26,6 @@ def _frames_to_points_df(frames: list[PointCloudFrame]) -> pd.DataFrame:
             rows.append({"Time": float(f.time), "PointIndex": int(i), "x": float(p[0]), "y": float(p[1]), "z": float(p[2])})
     return pd.DataFrame(rows)
 
-
 def _plot_tracks(ax, df: pd.DataFrame, color_col: str, xyz_cols: tuple[str, str, str], linewidth: float = 1.0, alpha: float = 0.7) -> None:
     if df.empty or color_col not in df.columns:
         return
@@ -48,7 +47,6 @@ def _plot_tracks(ax, df: pd.DataFrame, color_col: str, xyz_cols: tuple[str, str,
                 color=cmap(idx % 20),
                 linewidth=linewidth,
                 alpha=alpha)
-
 
 def _canonical_track_df(df: pd.DataFrame | None, prefer_track_col: str = "TrackID") -> pd.DataFrame:
     """Normalize track tables to columns `TrackID`, `Time`, `x`, `y`, `z`."""
@@ -87,7 +85,6 @@ def _canonical_track_df(df: pd.DataFrame | None, prefer_track_col: str = "TrackI
     d = d.dropna(subset=["TrackID", "Time", "x", "y", "z"]).copy()
     return d[["TrackID", "Time", "x", "y", "z", "PointIndex"]]
 
-
 def _xyz_from_df(df: pd.DataFrame | None) -> np.ndarray:
     """Return Nx3 xyz array from canonical or points dataframes."""
     if df is None or df.empty or not {"x", "y", "z"}.issubset(df.columns):
@@ -96,7 +93,6 @@ def _xyz_from_df(df: pd.DataFrame | None) -> np.ndarray:
     if xyz.ndim != 2 or xyz.shape[1] != 3:
         return np.empty((0, 3), dtype=float)
     return xyz
-
 
 def _set_data_box_aspect(ax, xyz: np.ndarray) -> None:
     """Set 3D box aspect from data spans if supported by the backend."""
@@ -110,7 +106,6 @@ def _set_data_box_aspect(ax, xyz: np.ndarray) -> None:
     except Exception:
         pass
 
-
 def _set_xyz_limits(ax, xyz: np.ndarray, pad_fraction: float = 0.06) -> None:
     """Set padded cubic XYZ limits from data extents."""
     if xyz.size == 0:
@@ -123,7 +118,6 @@ def _set_xyz_limits(ax, xyz: np.ndarray, pad_fraction: float = 0.06) -> None:
     ax.set_xlim(float(center[0] - half), float(center[0] + half))
     ax.set_ylim(float(center[1] - half), float(center[1] + half))
     ax.set_zlim(float(center[2] - half), float(center[2] + half))
-
 
 def _apply_axis_geometry(
     ax,
@@ -149,7 +143,6 @@ def _apply_axis_geometry(
         if kwargs:
             ax.view_init(**kwargs)
 
-
 def _extract_regime_and_file_stem(title: str, out_path: Path) -> tuple[str, str]:
     """Infer regime and file stem from panel title or output filename."""
     regime = ""
@@ -162,7 +155,6 @@ def _extract_regime_and_file_stem(title: str, out_path: Path) -> tuple[str, str]
     if not file_stem and "_panel_3d_" in stem:
         file_stem = stem.split("_panel_3d_")[0]
     return str(regime), str(file_stem)
-
 
 def _find_drift_schedule_path(out_path: Path, file_stem: str) -> Path | None:
     """Find drift schedule CSV near output path, preferring run-local copies."""
@@ -178,7 +170,6 @@ def _find_drift_schedule_path(out_path: Path, file_stem: str) -> Path | None:
         if p2.exists():
             return p2
     return None
-
 
 def _apply_drift_schedule_to_gt(gt_tracks: pd.DataFrame, drift_tab: pd.DataFrame) -> pd.DataFrame:
     """Apply per-time rigid drift (rotation around z + translation) to GT tracks.
@@ -247,7 +238,6 @@ def _apply_drift_schedule_to_gt(gt_tracks: pd.DataFrame, drift_tab: pd.DataFrame
     merged["y"] = yr + pd.to_numeric(merged["_ty"], errors="coerce").to_numpy(float)
     merged["z"] = zr + pd.to_numeric(merged["_tz"], errors="coerce").to_numpy(float)
     return merged[["TrackID", "Time", "x", "y", "z", "PointIndex"]]
-
 
 def plot_3d_frames_comparison(
     frames_gt: list[PointCloudFrame] | None,
@@ -433,7 +423,6 @@ def plot_3d_frames_comparison(
     
     return out
 
-
 def _infer_dominant_gt_map(gt_tracks_df: pd.DataFrame, inferred_tracks_df: pd.DataFrame) -> dict[float, float]:
     gt = gt_tracks_df[["Time", "PointIndex", "TrackID"]].rename(columns={"TrackID": "GT_TrackID"}).copy()
     inf = inferred_tracks_df[["Time", "PointIndex", "TrackID"]].rename(columns={"TrackID": "INF_TrackID"}).copy()
@@ -444,7 +433,6 @@ def _infer_dominant_gt_map(gt_tracks_df: pd.DataFrame, inferred_tracks_df: pd.Da
     for tid, grp in m.groupby("INF_TrackID"):
         mp[float(tid)] = float(grp["GT_TrackID"].value_counts().idxmax())
     return mp
-
 
 def plot_rms_over_time(gt_tracks_df: pd.DataFrame, inferred_tracks_df: pd.DataFrame, out_path: str | Path) -> Path:
     """Plot RMS position mismatch over time after dominant-ID remapping."""
@@ -491,7 +479,6 @@ def plot_rms_over_time(gt_tracks_df: pd.DataFrame, inferred_tracks_df: pd.DataFr
     fig.savefig(out, dpi=300)
     plt.close(fig)
     return out
-
 
 def plot_accuracy_over_time(gt_tracks_df: pd.DataFrame, inferred_tracks_df: pd.DataFrame, out_path: str | Path) -> Path:
     """Plot per-time GT-ID-consistent association accuracy.

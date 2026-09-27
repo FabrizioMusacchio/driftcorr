@@ -1,0 +1,40 @@
+cff-version: 1.2.0
+message: "If you use DriftCorr in your research, please cite the archived software version used in your analysis and the associated preprint."
+title: "DriftCorr: Robust geometric drift correction and identity reconstruction in 3D time-lapse point clouds"
+version: 0.1.0
+date-released: 2026-09-27
+
+authors:
+  - family-names: Musacchio
+    given-names: Fabrizio
+    orcid: https://orcid.org/0000-0002-9043-3349
+  - family-names: Fuhrmann
+    given-names: Martin
+
+repository-code: https://github.com/FabrizioMusacchio/driftcorr
+license: GPL-3.0-or-later
+abstract: "A Python toolkit for coordinate-based drift correction and identity reconstruction in time-lapse microscopy point clouds."
+
+preferred-citation:
+  type: article
+  authors:
+    - family-names: Musacchio
+      given-names: Fabrizio
+      orcid: https://orcid.org/0000-0002-9043-3349
+    - family-names: Fuhrmann
+      given-names: Martin
+  title: "Robust geometric drift correction and identity reconstruction in 3D time-lapse point clouds"
+  year: 2026
+  journal: bioRxiv
+  publisher: Cold Spring Harbor Laboratory
+  url: https://github.com/FabrizioMusacchio/driftcorr
+
+keywords:
+  - drift correction
+  - point-cloud association
+  - time-lapse microscopy
+  - cell tracking
+  - identity reconstruction
+  - synthetic benchmarking
+  - Python
+  - scientific software

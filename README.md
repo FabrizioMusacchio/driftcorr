@@ -1,172 +1,190 @@
-# driftcorr
+# DriftCorr: Correcting geometric drift in time-lapse microscopy data
 
-`driftcorr` is a Python toolkit for drift correction in IMARIS spot-track exports (`.xls`, `.xlsx`, and synthetic `.csv` tables).
-It is designed for 4D microscopy tracking data (`time + x/y/z`) where observed motion contains both true biological migration and imaging-related drift artifacts.
+DriftCorr is a Python toolkit for coordinate-based analysis of time-lapse microscopy data. It focuses on two coupled problems that arise after segmentation or spot detection: reconstructing object identities from frame-wise point clouds and correcting geometric drift in reconstructed trajectories.
 
-## Problem Setting
-Typical trajectories contain three motion components:
-1. Global imaging drift (many cells move similarly).
-2. Spatially varying but smooth drift (not piecewise constant, not just linear in `z`).
-3. Genuine biological migration that must be preserved.
+The package was developed for 3D+t microscopy workflows in which image data are reduced to centroid tables, for example IMARIS spot exports or synthetic IMARIS-like tables. It can also be applied to 2D+t data by embedding planar coordinates into 3D with `Position Z = 0`.
 
-The goal is to remove (1) and (2) while preserving (3).
+## Motivation
+Structural time-lapse microscopy often contains both real biological motion and acquisition-related geometric artifacts. Standard image-registration workflows are not always appropriate once cells move, appear, disappear, or change morphology, because overly flexible image warps can absorb real biology into the correction field.
 
-## Implemented Methods
+DriftCorr therefore works directly on exported coordinates. It provides:
 
-### `rbf`: RBF-to-reference drift correction
-For each timepoint `t` (relative to a reference time `t_ref`), fit a smooth drift field:
-- Training target: `D_t = X_t - X_ref`
-- Model: `D_t ≈ [K(X_t, C), 1] W_t` (bias-augmented kernel)
-- Kernel: Gaussian RBF
-- Correction: `X_corr = X - d_hat(X,t)`
+- drift-correction models for identity-labeled trajectories,
+- point-cloud association methods for recovering identities from unlabeled detections,
+- synthetic benchmark generators with known ground truth,
+- reproducibility scripts for the benchmark and biological-example analyses reported in the preprint.
 
-Optional temporal consistency (`--temporal-gamma`):
-- shared centers across time,
-- jointly fit `W(t)` with penalty:
-  `sum_t ||K_t W(t)-D_t||^2 + lambda ||W(t)||^2 + gamma ||W(t)-W(t-1)||^2`
+## Main features
+- Rigid step-wise drift correction with robust pair selection.
+- Local community-based drift correction for spatially heterogeneous drift.
+- Per-timepoint RBF drift correction.
+- Joint space-time RBF drift correction.
+- Optional residual iterative drift correction.
+- Hungarian, nearest-neighbor, tracklet, Kalman, and HCV point-cloud association variants.
+- Synthetic data generators for drift-correction and association benchmarks.
+- IMARIS `.xls` / `.xlsx` position-table parsing.
+- Diagnostic plots, corrected-coordinate exports, and benchmark summaries.
 
-Additional controls:
-- center selection: `--center-mode {ref,pooled,kmeans_pooled}`
-- robust fitting: `--robust-mode {sample_trim,track_trim}`
-- two-stage translation + residual field: `--two-stage 0/1`
+## Repository structure
 
-### `rigid`: rigid step-wise correction
-Between consecutive times `t0 -> t1`:
-- fit `Y ≈ R X + b` (Kabsch, optional `rotz` mode),
-- robust trimmed inlier re-estimation (`--inlier-reestimate-iters`),
-- compose transforms back to reference frame.
-
-Optional piecewise rigid (`--rigid-spatial-groups > 1`):
-- cluster tracks in space,
-- fit per-group rigid transforms,
-- blend corrections spatially with Gaussian weights.
-
-### `local`: community-based local drift field
-- Build displacement traces relative to reference time.
-- Build spatial neighbor graph.
-- Edge weight = displacement similarity × spatial proximity.
-- Detect communities.
-- Estimate one robust drift trace per community.
-- Blend community drifts into a smooth local field.
-
-### `st_rbf`: space-time RBF drift model
-Jointly fit drift in 4D input space `(x,y,z,t)`:
-- `d(u) ≈ K(u, C) W`
-- Bias-augmented kernel (`[K,1]`) and optional two-stage decomposition
-- Space input modes: `--space-input-mode {row_position,track_anchor,ref_position}`
-- Normalized coordinates (space robustly scaled, time mapped to `[0,1]`)
-- Optional iterative refinement (`--st-refine-iters`)
-- Robust trimming / reweighting to reduce influence of migrating tracks.
-
-### Stationary subset discovery
-Optional for `rbf` and `st_rbf` (`--use-stationary-subset`):
-- Select likely stationary tracks using displacement and neighborhood-stability criteria.
-- Fit drift model using selected subset.
-- Save selection diagnostics and metric impact tables.
-
-## Evaluation Outputs
-For each file and method:
-- pairwise displacement-trace correlation,
-- neighbor distance stability,
-- MSD comparison,
-- RMS displacement statistics,
-- near-stationary fractions.
-
-Standard files:
-- `<base>_metrics_summary.csv`
-- `<base>_plots_corr_hist.png`
-- `<base>_plots_msd_curve.png`
-- `<base>_plots_neighbor_stats.png`
-
-## Visual Inspection Outputs
-Per method:
-- trajectory comparison panel:
-  - `<base>_tracks_comparison_<method>.png`
-- frame-by-frame 3D snapshots:
-  - folder: `<base>_timeseries_<method>/`
-  - files: `frame_0000_t_...png`, `frame_0001_t_...png`, ...
-  - GIF animation: `<base>_timeseries_<method>/timeseries.gif`
-  - full-track summary panel: `<base>_timeseries_<method>/tracks_over_time_panels.png`
-
-For synthetic runs (ground truth available), frame plots include:
-- `Ground Truth | Original | Corrected`
-
-(3D frame plots intentionally have no colorbar.)
-
-## Synthetic Benchmark Mode
-`synthetic-benchmark` creates controlled synthetic datasets and runs the normal pipeline end-to-end.
-
-Generated synthetic components:
-- stationary + migrating subsets,
-- global drift,
-- smooth spatially varying local drift,
-- optional temporal smoothness,
-- measurement noise.
-
-Ground-truth sidecar outputs are written to `_groundtruth` and include:
-- drift-free trajectories,
-- per-row drift vectors (global/local/total).
-
-Additional ground-truth evaluation outputs:
-- `<base>_gt_metrics_summary.csv`
-- `<base>_gt_rms_per_track_hist.png`
-- `<base>_gt_rms_over_time.png`
-- `<base>_gt_rms_stationary_over_time.png`
-- `<base>_gt_rms_migrating_over_time.png`
-- plus per-method CSV tables for per-track/per-time RMS errors.
-
-## Result Folder Structure
-If `--out` is not provided:
-- `run`: `<input-file-directory>/driftcorr_results`
-- `run-all`: `<imaris-dir>/driftcorr_results`
-
-Inside that folder, each input file gets its own subfolder:
-- `<results>/<input_stem>/...all outputs for that file...`
-
-## Usage
-
-### 1) Run one method on one file
-```bash
-conda run -n manual_registration env PYTHONPATH="$PWD" python -m driftcorr.cli run \
-  --method rbf \
-  --imaris-xls "IMARIS xls files/registered_stack_5D_251008_P2_565um_v1.xls"
+```text
+driftcorr/                  Core Python package
+  association/              Point-cloud association algorithms and scoring
+  *.py                      Drift-correction methods, metrics, visualization, CLI
+user_scripts/               Reproducibility and example scripts
+papers/preprint/            Manuscript source and figure PDFs, if included locally
+tests/                      Unit and smoke tests
 ```
 
-### 2) Batch run on a folder
+The most relevant user scripts are:
+
+- `user_scripts/tutorial_pipeline_usage.py`: Minimal Python workflow examples.
+- `user_scripts/parameter_sweep_on_synthetic_data.py`: Synthetic drift-correction benchmark and sweep scripts.
+- `user_scripts/parameter_sweep_on_synthetic_non_rigid_data.py`: Structured non-rigid stress benchmarks.
+- `user_scripts/benchmark_point_cloud_association.py`: Synthetic point-cloud association benchmarks.
+- `user_scripts/segment_carcinoma_3dt_and_build_gt.py`: Biological 3D+t carcinoma example workflow.
+- `user_scripts/segment_b1_04_2_1_dapi_with_cellpose.py`: Cellpose segmentation for the DAPI example.
+- `user_scripts/segment_b1_04_2_1_dapi_2dt_and_run_pipeline.py`: DAPI PCA and DriftCorr downstream workflow.
+
+Private or unpublished exploratory scripts should live in `user_scripts_private/`, which is ignored by Git.
+
+## Installation
+Clone the repository and install it in editable mode:
+
 ```bash
-conda run -n manual_registration env PYTHONPATH="$PWD" python -m driftcorr.cli run-all \
-  --imaris-dir "IMARIS xls files" \
-  --methods rbf,rigid,local,st_rbf
+git clone https://github.com/FabrizioMusacchio/driftcorr.git
+cd driftcorr
+python -m pip install -e .
 ```
 
-### 3) Generate and benchmark synthetic data
+A conda environment similar to the one used during development can be created with:
+
 ```bash
-conda run -n manual_registration env PYTHONPATH="$PWD" python -m driftcorr.cli synthetic-benchmark \
-  --synthetic-dir "Synthetic IMARIS files" \
+conda create -n manual_registration python=3.11 -y
+conda activate manual_registration
+python -m pip install -e .
+```
+
+For the core package and synthetic benchmarks, the required dependencies are listed in `pyproject.toml`. Biological segmentation workflows may require additional packages such as `tifffile`, `scikit-image`, and optionally `cellpose`.
+
+## Quick start
+### Run drift correction on one IMARIS export
+
+```bash
+python -m driftcorr.cli run \
+  --method rigid \
+  --imaris-xls path/to/imaris_position_export.xls \
+  --out driftcorr_results
+```
+
+Available correction methods include:
+
+```text
+rigid, local, rbf, st_rbf
+```
+
+### Run several methods on a folder
+
+```bash
+python -m driftcorr.cli run-all \
+  --imaris-dir path/to/imaris_exports \
+  --methods rigid,local,rbf,st_rbf \
+  --out driftcorr_results
+```
+
+### Generate synthetic drift-correction data
+
+```bash
+python -m driftcorr.cli synthetic-generate \
+  --synthetic-dir synthetic_imaris_files \
   --synthetic-n-files 5 \
   --synthetic-n-tracks 80 \
   --synthetic-n-times 20 \
-  --methods rbf,rigid,local,st_rbf
+  --synthetic-seed 42
 ```
 
-## Python Tutorial Script
-A notebook-style tutorial script is provided here:
-- `user_scripts/tutorial_pipeline_usage.py`
-- `user_scripts/param_sweep_synthetic.py` (RBF/ST-RBF parameter sweep on synthetic data)
+### Run an end-to-end synthetic drift-correction benchmark
 
-It contains these sections:
-- `# %% HOW TO RUN A SIGNLE FILE`
-- `# %% HOW TO BTACH RUN MULTIPLE FILES`
-- `# %% HOW TO GENERATE AND RUN SYNTHETIC DATA`
+```bash
+python -m driftcorr.cli synthetic-benchmark \
+  --synthetic-dir synthetic_imaris_files \
+  --synthetic-n-files 5 \
+  --synthetic-n-tracks 80 \
+  --synthetic-n-times 20 \
+  --methods rigid,local,rbf,st_rbf
+```
 
-## Commonly Tuned Options
-- RBF: `--m-centers`, `--lam`, `--sigma`, `--temporal-gamma`, `--center-mode`, `--robust-mode`, `--two-stage`
-- Rigid: `--inlier-reestimate-iters`, `--rigid-spatial-groups`, `--rigid-compare-piecewise`
-- Local: `--k-neighbors`, `--ell-um-graph`, `--ell-um-field`
-- ST-RBF: `--st-m-centers`, `--st-ell-space`, `--st-ell-time`, `--space-input-mode`, `--st-refine-iters`, `--two-stage`
-- Stationary subset: `--use-stationary-subset` or `--use-stationary-only 1`
-- Disable visual plots: `--skip-visual-plots`
+### Run the point-cloud association benchmark scripts
 
-Current tuned defaults (Feb 2026):
-- RBF defaults: `--m-centers 45 --lam 3e-4 --sigma 180 --temporal-gamma 0`
-- ST-RBF defaults: `--st-m-centers 70 --st-ell-space 4.0 --st-ell-time 0.4 --st-robust-keep-fraction 0.83 --st-refine-iters 3 --st-lam 8.5e-4`
+The association benchmarks used in the paper are implemented as notebook-style Python scripts with `# %%` cells:
+
+```bash
+PYTHONPATH="$PWD" python user_scripts/benchmark_point_cloud_association.py
+```
+
+The scripts are designed so that synthetic inputs are generated from fixed seeds and configuration parameters. Large output folders are intentionally not tracked in Git.
+
+## Input data format
+For real-data drift correction, DriftCorr expects an IMARIS-like position table with at least these columns:
+
+```text
+Position X, Position Y, Position Z, Time, TrackID
+```
+
+The parser reads the `Position` sheet from IMARIS `.xls` / `.xlsx` exports. Synthetic benchmark tables use the same coordinate convention.
+
+## Output files
+For each input file and method, DriftCorr writes corrected coordinate tables and diagnostic plots. Typical outputs include:
+
+- corrected coordinate CSV files,
+- method-specific fit summaries,
+- trajectory comparison plots,
+- per-frame or full-track visualizations,
+- metric summary CSV files,
+- ground-truth error summaries for synthetic data.
+
+If no output directory is provided, batch workflows write results into a `driftcorr_results/` folder next to the input data.
+
+## Reproducing the preprint analyses
+The synthetic benchmark datasets reported in the preprint are generated by the code itself. They do not need to be downloaded separately. The relevant scripts are:
+
+```text
+user_scripts/parameter_sweep_on_synthetic_data.py
+user_scripts/parameter_sweep_on_synthetic_non_rigid_data.py
+user_scripts/benchmark_point_cloud_association.py
+```
+
+The biological example datasets are external public datasets and are referenced in the manuscript. Download those datasets from the cited Zenodo records before running the biological-example scripts. The scripts assume the local paths shown in their docstrings unless edited.
+
+Because generated benchmark folders can be large, synthetic outputs, biological raw data, and local result folders are ignored by Git. Reproducibility is intended to come from the scripts, fixed seeds, and documented parameter grids rather than from committing generated data products.
+
+## Testing
+Run the test suite with:
+
+```bash
+python -m pytest
+```
+
+The tests cover command-line parsing, core drift-correction smoke checks, smoothing behavior, and metric calculations.
+
+## License
+This project is released under the GNU General Public License v3.0 or later. See `LICENSE` for details.
+
+## How to cite
+If you use DriftCorr, please cite the associated preprint
+
+> Fabrizio Musacchio and Martin Fuhrmann, "DriftCorr: Robust geometric drift correction and identity reconstruction in 3D time-lapse point clouds," forthcoming.
+
+and the software repository:
+
+```bibtex
+@software{musacchio_driftcorr_2026,
+  author = {Musacchio, Fabrizio and Fuhrmann, Martin},
+  title = {DriftCorr: Robust geometric drift correction and identity reconstruction in 3D time-lapse point clouds},
+  year = {2026},
+  url = {https://github.com/FabrizioMusacchio/driftcorr},
+  license = {GPL-3.0-or-later}
+}
+```
+
+A citation file is provided in `CITATION.cff`.

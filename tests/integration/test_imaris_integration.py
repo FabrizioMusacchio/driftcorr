@@ -1,10 +1,10 @@
+# %% IMPORTS
 from pathlib import Path
 
 from driftcorr.evaluate import run_all_methods_and_compare, save_evaluation_outputs
 from driftcorr.io_imaris import ensure_numeric_tracks, list_imaris_xls_files, read_imaris_position_xls
 from driftcorr.method_rbf_ref import correct_positions_rbf_to_reference
-
-
+# %% TEST FUNCTIONS
 def test_imaris_xls_rbf_integration(tmp_path):
     root = Path(__file__).resolve().parents[2]
     imaris_dir = root / "IMARIS xls files"
@@ -31,3 +31,4 @@ def test_imaris_xls_rbf_integration(tmp_path):
     assert outputs["plot_corr_hist"].exists()
     assert outputs["plot_msd_curve"].exists()
     assert outputs["plot_neighbor_stats"].exists()
+# %% END

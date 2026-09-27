@@ -1,11 +1,11 @@
+# %% IMPORTS
 import numpy as np
 
 from driftcorr.association.kalman import associate_kalman_cv
 from driftcorr.association.min_cost_flow import associate_min_cost_flow
 from driftcorr.association.tracklets import associate_tracklet_stitching
 from driftcorr.association.types import PointCloudFrame
-
-
+# %% TEST FUNCTIONS
 def _make_frames(n_times: int = 4) -> list[PointCloudFrame]:
     frames: list[PointCloudFrame] = []
     for t in range(n_times):
@@ -20,7 +20,6 @@ def _make_frames(n_times: int = 4) -> list[PointCloudFrame]:
         frames.append(PointCloudFrame(time=float(t + 1), xyz=xyz))
     return frames
 
-
 def test_associate_min_cost_flow_runs_and_returns_tables():
     frames = _make_frames()
     res = associate_min_cost_flow(
@@ -32,7 +31,6 @@ def test_associate_min_cost_flow_runs_and_returns_tables():
     assert not res.tracks_df.empty
     assert "TrackID" in res.tracks_df.columns
     assert "Time" in res.tracks_df.columns
-
 
 def test_associate_tracklet_stitching_runs_and_returns_tables():
     frames = _make_frames()
@@ -47,7 +45,6 @@ def test_associate_tracklet_stitching_runs_and_returns_tables():
     assert "TrackID" in res.tracks_df.columns
     assert "Time" in res.tracks_df.columns
 
-
 def test_associate_kalman_cv_runs_and_returns_tables():
     frames = _make_frames()
     res = associate_kalman_cv(
@@ -58,3 +55,4 @@ def test_associate_kalman_cv_runs_and_returns_tables():
     assert not res.tracks_df.empty
     assert "TrackID" in res.tracks_df.columns
     assert "Time" in res.tracks_df.columns
+# %% END

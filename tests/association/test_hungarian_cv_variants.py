@@ -1,3 +1,4 @@
+# %% IMPORTS
 import numpy as np
 
 from driftcorr.association.hungarian_cv_variants import (
@@ -7,11 +8,9 @@ from driftcorr.association.hungarian_cv_variants import (
     associate_hungarian_switch_penalty_nis_cv,
     associate_hungarian_switch_penalty_cv,
     associate_hungarian_two_stage_nis_cv,
-    associate_hungarian_two_stage_cv,
-)
+    associate_hungarian_two_stage_cv)
 from driftcorr.association.types import PointCloudFrame
-
-
+# %% TEST FUNCTIONS
 def _make_frames() -> list[PointCloudFrame]:
     frames: list[PointCloudFrame] = []
     for t in range(4):
@@ -26,14 +25,12 @@ def _make_frames() -> list[PointCloudFrame]:
         frames.append(PointCloudFrame(time=float(t + 1), xyz=xyz))
     return frames
 
-
 def _assert_basic_result(res) -> None:
     assert hasattr(res, "tracks_df")
     assert hasattr(res, "links_df")
     assert hasattr(res, "frame_stats_df")
     assert not res.tracks_df.empty
     assert {"TrackID", "Time", "PointIndex"}.issubset(set(res.tracks_df.columns))
-
 
 def test_hungarian_adaptive_maxdist_cv_smoke():
     frames = _make_frames()
@@ -44,7 +41,6 @@ def test_hungarian_adaptive_maxdist_cv_smoke():
     )
     _assert_basic_result(res)
 
-
 def test_hungarian_innovation_percentile_cv_smoke():
     frames = _make_frames()
     res = associate_hungarian_innovation_percentile_cv(
@@ -54,7 +50,6 @@ def test_hungarian_innovation_percentile_cv_smoke():
     )
     _assert_basic_result(res)
 
-
 def test_hungarian_switch_penalty_cv_smoke():
     frames = _make_frames()
     res = associate_hungarian_switch_penalty_cv(
@@ -63,7 +58,6 @@ def test_hungarian_switch_penalty_cv_smoke():
         params={"motion_refine_iters": 2, "dx_scale": 1.0, "max_dist_factor": 3.0, "lambda_switch": 0.2},
     )
     _assert_basic_result(res)
-
 
 def test_hungarian_two_stage_cv_smoke():
     frames = _make_frames()
@@ -81,7 +75,6 @@ def test_hungarian_two_stage_cv_smoke():
     )
     _assert_basic_result(res)
 
-
 def test_hungarian_nis_gating_cv_smoke():
     frames = _make_frames()
     res = associate_hungarian_nis_gating_cv(
@@ -91,7 +84,6 @@ def test_hungarian_nis_gating_cv_smoke():
     )
     _assert_basic_result(res)
 
-
 def test_hungarian_switch_penalty_nis_cv_smoke():
     frames = _make_frames()
     res = associate_hungarian_switch_penalty_nis_cv(
@@ -100,7 +92,6 @@ def test_hungarian_switch_penalty_nis_cv_smoke():
         params={"motion_refine_iters": 2, "dx_scale": 1.0, "gating_mode": "nis", "nis_alpha": 0.997, "lambda_switch": 0.2},
     )
     _assert_basic_result(res)
-
 
 def test_hungarian_two_stage_nis_cv_smoke():
     frames = _make_frames()
@@ -118,7 +109,6 @@ def test_hungarian_two_stage_nis_cv_smoke():
         },
     )
     _assert_basic_result(res)
-
 
 def test_hungarian_nis_gating_nn_based_sigma_init_logs_params():
     frames = _make_frames()
@@ -139,3 +129,4 @@ def test_hungarian_nis_gating_nn_based_sigma_init_logs_params():
     assert np.isfinite(float(res.params["initial_sigma_estimate"]))
     assert "median_sigma_over_time" in res.params
     assert np.isfinite(float(res.params["median_sigma_over_time"]))
+# %% END

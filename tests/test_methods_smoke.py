@@ -1,3 +1,4 @@
+# %% IMPORTS
 import numpy as np
 
 from driftcorr.method_local_communities import run_local_drift_correction_for_file
@@ -13,8 +14,7 @@ from driftcorr.method_spacetime_rbf_moe import apply_spacetime_rbf_moe_correctio
 from driftcorr.stationary import find_stationary_tracks
 from driftcorr.synthetic import make_synthetic_tracks
 from driftcorr.synthetic_experiments import evaluate_corrected_vs_groundtruth, generate_controlled_drift_dataset
-
-
+# %% TEST FUNCTIONS
 def test_spacetime_choose_centers_returns_subset_rows():
     u = np.arange(60, dtype=float).reshape(15, 4)
     c = _choose_centers(u, m=6, seed=7)
@@ -25,7 +25,6 @@ def test_spacetime_choose_centers_returns_subset_rows():
     u_rows = {tuple(row.tolist()) for row in u}
     c_rows = {tuple(row.tolist()) for row in c}
     assert c_rows.issubset(u_rows)
-
 
 def test_rbf_rigid_local_smoke(tmp_path):
     df = make_synthetic_tracks(n_tracks=22, n_times=10, seed=2)
@@ -92,7 +91,6 @@ def test_rbf_rigid_local_smoke(tmp_path):
     sel = find_stationary_tracks(df, rms_quantile=0.5, neighbor_quantile=0.6)
     assert len(sel.track_ids) > 0
 
-
 def test_st_refinement_changes_output_for_ref_position():
     df = make_synthetic_tracks(n_tracks=28, n_times=12, seed=5)
     model0, _ = fit_spacetime_rbf_model(
@@ -121,7 +119,6 @@ def test_st_refinement_changes_output_for_ref_position():
     diff = np.linalg.norm(p0 - p2, axis=1)
     assert float(np.nanmedian(diff)) > 1e-6
 
-
 def test_st_moe_smoke():
     df = make_synthetic_tracks(n_tracks=30, n_times=10, seed=9)
     model, expert_table = fit_spacetime_rbf_moe_model(
@@ -138,7 +135,6 @@ def test_st_moe_smoke():
     assert {"Position X_corr", "Position Y_corr", "Position Z_corr"}.issubset(out.columns)
     assert expert_table.shape[0] >= 1
 
-
 def test_groundtruth_eval_reports_stationary_and_migrating_rms():
     df_obs, df_gt, _ = generate_controlled_drift_dataset(n_tracks=30, n_times=10, seed=3)
     df_corr = df_obs.copy()
@@ -148,3 +144,4 @@ def test_groundtruth_eval_reports_stationary_and_migrating_rms():
     summary, *_ = evaluate_corrected_vs_groundtruth(df_corr, df_gt)
     assert "overall_rms_error_stationary" in summary
     assert "overall_rms_error_migrating" in summary
+# %% END

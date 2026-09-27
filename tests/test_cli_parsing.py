@@ -1,6 +1,6 @@
+# %% IMPORTS
 from driftcorr.cli import build_parser
-
-
+# %% TEST FUNCTIONS
 def test_cli_parses_smooth_command():
     parser = build_parser()
     args = parser.parse_args(
@@ -25,7 +25,6 @@ def test_cli_parses_smooth_command():
     assert args.polyorder == 3
     assert bool(args.detect_jumps) is True
 
-
 def test_cli_parses_st_sweep_command():
     parser = build_parser()
     args = parser.parse_args(
@@ -45,4 +44,4 @@ def test_cli_parses_st_sweep_command():
     assert args.input_dir == "imaris_dir"
     assert args.ell_time == "0.3,0.4,0.8"
     assert args.lam == "5e-4,8.5e-4"
-
+# %% END

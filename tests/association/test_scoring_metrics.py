@@ -1,9 +1,9 @@
+# %% IMPORTS
 import numpy as np
 import pandas as pd
 
 from driftcorr.association.scoring import evaluate_against_groundtruth
-
-
+# %% TEST FUNCTIONS
 def _make_gt_mapping_and_tracks() -> tuple[pd.DataFrame, pd.DataFrame]:
     # Two GT tracks over 3 frames.
     rows_map = []
@@ -16,7 +16,6 @@ def _make_gt_mapping_and_tracks() -> tuple[pd.DataFrame, pd.DataFrame]:
         rows_map.append({"Time": t, "PointIndex": 1, "GT_TrackID": 20.0})
         rows_gt.append({"Time": t, "TrackID": 20.0, "Position X": 5.0 + t, "Position Y": 6.0, "Position Z": 7.0})
     return pd.DataFrame(rows_map), pd.DataFrame(rows_gt)
-
 
 def test_per_time_metrics_columns_and_summary_fields_present():
     mapping, gt_tracks = _make_gt_mapping_and_tracks()
@@ -72,7 +71,6 @@ def test_per_time_metrics_columns_and_summary_fields_present():
     ]:
         assert key in summary
 
-
 def test_fragmentation_and_switch_metrics_positive_when_ids_split():
     mapping, gt_tracks = _make_gt_mapping_and_tracks()
 
@@ -104,7 +102,6 @@ def test_fragmentation_and_switch_metrics_positive_when_ids_split():
     # With GT-track splitting, link F1 must drop below 1.
     assert float(summary["link_f1_mean"]) < 1.0
 
-
 def test_rms_reports_unmatched_tracks():
     mapping, gt_tracks = _make_gt_mapping_and_tracks()
 
@@ -125,3 +122,4 @@ def test_rms_reports_unmatched_tracks():
     assert "unmatched_rate_mean" in summary
     assert per_time["n_unmatched_tracks"].max() >= 1
     assert np.isfinite(float(summary["rms_mean"])) or np.isnan(float(summary["rms_mean"]))
+# %% END

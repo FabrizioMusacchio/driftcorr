@@ -1,8 +1,8 @@
+# %% IMPORTS
 import numpy as np
 
 from driftcorr.drift_smoothing import detect_stage_jumps, smooth_drift_timeseries
-
-
+# %% TEST FUNCTIONS
 def test_smoothing_reduces_high_frequency_component_and_keeps_trend():
     rng = np.random.default_rng(0)
     times = np.arange(120, dtype=float)
@@ -33,7 +33,6 @@ def test_smoothing_reduces_high_frequency_component_and_keeps_trend():
     mae_sm = float(np.nanmean(np.abs(sm - trend)))
     assert mae_sm < mae_raw
 
-
 def test_jump_detection_and_piecewise_smoothing_preserves_jump():
     rng = np.random.default_rng(1)
     times = np.arange(80, dtype=float)
@@ -54,4 +53,4 @@ def test_jump_detection_and_piecewise_smoothing_preserves_jump():
     left_mean = np.nanmean(sm[:40], axis=0)
     right_mean = np.nanmean(sm[40:], axis=0)
     assert float(np.linalg.norm(right_mean - left_mean)) > 2.0
-
+# %% END

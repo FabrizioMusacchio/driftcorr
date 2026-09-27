@@ -1,3 +1,4 @@
+# %% IMPORTS
 import numpy as np
 
 from driftcorr.association.assignment import (
@@ -5,13 +6,11 @@ from driftcorr.association.assignment import (
     build_cost_matrix,
     compute_nis_cost_matrix,
     gate_by_nis,
-    hungarian_assignment,
-)
+    hungarian_assignment)
 from driftcorr.association.linking import link_assignments_to_tracks
 from driftcorr.association.registration import icp_rigid
 from driftcorr.association.types import PointCloudFrame
-
-
+# %% TEST FUNCTIONS
 def test_hungarian_assignment_shapes():
     x0 = np.array([[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 0.0, 0.0]], dtype=float)
     x1 = np.array([[0.2, 0.0, 0.0], [1.9, 0.1, 0.0], [4.2, 0.0, 0.0]], dtype=float)
@@ -22,7 +21,6 @@ def test_hungarian_assignment_shapes():
     assert out["costs"].shape[0] == out["row_ind"].shape[0]
     assert out["unmatched_t"].ndim == 1
     assert out["unmatched_tp1"].ndim == 1
-
 
 def test_gating_forbids_large_distances():
     x0 = np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float)
@@ -38,7 +36,6 @@ def test_gating_forbids_large_distances():
     assert out["row_ind"].size == 2
     assert out["unmatched_t"].size == 0
     assert out["unmatched_tp1"].size == 0
-
 
 def test_linking_produces_consistent_track_ids():
     f0 = PointCloudFrame(time=1.0, xyz=np.array([[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]], dtype=float))
@@ -64,7 +61,6 @@ def test_linking_produces_consistent_track_ids():
         assert tids.size == 3
         assert np.allclose(tids, tids[0])
 
-
 def test_icp_rigid_recovers_transform_on_synthetic_points():
     rng = np.random.default_rng(4)
     x = rng.normal(size=(120, 3))
@@ -81,7 +77,6 @@ def test_icp_rigid_recovers_transform_on_synthetic_points():
     assert residuals.size >= 3
     assert np.allclose(r_hat, r_true, atol=1e-1)
     assert np.allclose(b_hat, b_true, atol=1e-1)
-
 
 def test_hungarian_dummy_can_leave_points_unmatched():
     x0 = np.array([[0.0, 0.0, 0.0], [100.0, 0.0, 0.0]], dtype=float)
@@ -101,7 +96,6 @@ def test_hungarian_dummy_can_leave_points_unmatched():
     assert out["row_ind"].size <= 2
     assert out["unmatched_t"].size + out["row_ind"].size >= 2
 
-
 def test_nis_cost_matrix_and_gate_shapes():
     pred = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]], dtype=float)
     det = np.array([[0.1, 0.0, 0.0], [3.0, 3.0, 3.0]], dtype=float)
@@ -111,3 +105,4 @@ def test_nis_cost_matrix_and_gate_shapes():
     gate = gate_by_nis(nis, chi2_thresh=7.815)  # approx 95% for df=3
     assert gate.shape == (2, 2)
     assert gate.dtype == bool
+# %% END

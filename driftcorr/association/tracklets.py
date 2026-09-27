@@ -9,6 +9,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
+# %% IMPORTS
 
 from __future__ import annotations
 
@@ -22,8 +23,7 @@ from .assignment import apply_gating, build_cost_matrix, hungarian_assignment, n
 from .linking import link_assignments_to_tracks
 from .scoring import global_association_metrics, score_links_df
 from .types import AssociationResult, PointCloudFrame
-
-
+# %% CLASSES & FUNCTIONS
 @dataclass(slots=True)
 class _TrackletSummary:
     track_id: int
@@ -411,3 +411,4 @@ def associate_tracklet_stitching(
         quality=quality,
         params=params_out,
     )
+# %% END

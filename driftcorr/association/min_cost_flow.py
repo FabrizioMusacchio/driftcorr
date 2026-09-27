@@ -10,7 +10,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,7 +27,7 @@ try:
     import networkx as nx
 except Exception:  # pragma: no cover - optional dependency
     nx = None
-
+# %% FUNCTIONS
 
 @dataclass(slots=True)
 class _Det:
@@ -332,3 +332,4 @@ def associate_min_cost_flow(
             "solver": "networkx_max_weight_matching" if nx is not None else "greedy_fallback",
         },
     )
+# %% END

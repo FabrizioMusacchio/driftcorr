@@ -13,7 +13,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -27,8 +27,7 @@ from .linking import link_assignments_to_tracks
 from .registration import icp_rigid
 from .scoring import global_association_metrics, score_links_df
 from .types import AssociationResult, PointCloudFrame
-
-
+# %% FRAME/POINT CONVERSION FUNCTIONS
 def frames_to_points_df(frames: list[PointCloudFrame]) -> pd.DataFrame:
     """Convert frames to point table with Time/PointIndex and xyz columns."""
     rows: list[dict[str, float]] = []
@@ -611,3 +610,4 @@ def em_associate_and_driftfit(
     current_assoc.quality["em_final_mean_cost"] = float(cost_hist[-1]) if cost_hist else float("nan")
     current_assoc.params = {**current_assoc.params, "em_cost_history": cost_hist, "em_change_history": change_hist}
     return current_assoc, drift_models
+# %% END

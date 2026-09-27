@@ -10,7 +10,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from typing import Any
@@ -18,8 +18,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import warnings
-
-
+# %% FUNCTIONS
 def link_confidence(cost: np.ndarray | float, max_cost: float | None = None, scale: float | None = None) -> np.ndarray:
     """Convert assignment cost to [0,1] confidence.
 
@@ -577,3 +576,4 @@ def evaluate_against_groundtruth(
         )
 
     return summary, per_time, mapping
+# %% END

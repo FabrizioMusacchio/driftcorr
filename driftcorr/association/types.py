@@ -23,7 +23,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -31,8 +31,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-
-
+# %% CLASSES
 @dataclass(slots=True)
 class PointCloudFrame:
     """Single timepoint point cloud without identity labels.
@@ -124,3 +123,4 @@ class GroundTruthMapping:
     point_to_gt_df: pd.DataFrame
     gt_tracks_df: pd.DataFrame | None = None
     meta: dict[str, Any] = field(default_factory=dict)
+# %% END

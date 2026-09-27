@@ -14,7 +14,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from typing import Any
@@ -23,8 +23,7 @@ import numpy as np
 import pandas as pd
 
 from .types import PointCloudFrame
-
-
+# %% FUNCTIONS
 def _track_xyz_columns(df: pd.DataFrame) -> list[str]:
     """Return xyz column names present in a track table."""
     if {"x", "y", "z"}.issubset(df.columns):
@@ -306,3 +305,4 @@ def link_assignments_to_tracks(
         links_df = links_df.sort_values(["t", "src_index", "dst_index"]).reset_index(drop=True)
     tracks_df, links_df = _remap_track_ids_after_gap_stitch(tracks_df, links_df, max_gap=int(max_gap))
     return tracks_df, links_df, frame_stats_df
+# %% END

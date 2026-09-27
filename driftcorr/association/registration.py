@@ -10,7 +10,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -18,8 +18,7 @@ from typing import Any
 
 import numpy as np
 from scipy.spatial import cKDTree
-
-
+# %% FUNCTIONS
 def procrustes_rigid(
     x: np.ndarray,
     y: np.ndarray,
@@ -158,3 +157,4 @@ def optional_cpd_registrar() -> NonRigidRegistrar:
             return np.asarray(ty, dtype=float), {"backend": "pycpd", "kwargs": dict(kwargs)}
 
     return _CPDRegistrar()
+# %% END

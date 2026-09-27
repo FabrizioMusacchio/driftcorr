@@ -9,7 +9,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,7 +22,7 @@ from .assignment import apply_gating, hungarian_assignment
 from .scoring import global_association_metrics, score_links_df
 from .types import AssociationResult, PointCloudFrame
 
-
+# %% FUNCTIONS
 @dataclass(slots=True)
 class _TrackState:
     track_id: int
@@ -314,3 +314,4 @@ def associate_kalman_cv(
         quality=quality,
         params={"method": "kalman_cv_innovation_gating", **p, **{f"gating_{k}": v for k, v in g.items()}},
     )
+# %% END

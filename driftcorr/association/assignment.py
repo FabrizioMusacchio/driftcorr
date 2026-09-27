@@ -16,7 +16,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from typing import Any
@@ -26,8 +26,7 @@ from scipy.optimize import linear_sum_assignment
 
 from .costs import cost_euclidean, cost_huber, cost_mahalanobis, cost_sqeuclidean
 from .gating import apply_gate_to_cost, combine_gates, gate_by_max_cost, gate_by_max_distance, gate_by_percentile
-
-
+# %% FUNCTIONS
 def build_cost_matrix(
     x_t: np.ndarray,
     x_tp1: np.ndarray,
@@ -348,3 +347,4 @@ def nearest_neighbor_assignment(
         "unmatched_tp1": np.flatnonzero(~used_j).astype(int),
         "total_cost": float(np.sum(vv)) if vv.size else 0.0,
     }
+# %% END

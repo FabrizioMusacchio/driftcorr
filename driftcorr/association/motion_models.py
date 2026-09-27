@@ -12,14 +12,14 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
-
+# %% CLASSES
 
 class ConstantPositionModel:
     """State-free motion model with zero velocity assumption."""
@@ -32,7 +32,6 @@ class ConstantPositionModel:
 
     def update(self, *_: Any, **__: Any) -> None:
         return None
-
 
 @dataclass(slots=True)
 class ConstantVelocityModel:
@@ -97,7 +96,6 @@ class ConstantVelocityModel:
             self._last_pos_by_track[int(tid)] = np.asarray(next_pos[j], dtype=float)
             self._last_time_by_track[int(tid)] = float(t_next)
 
-
 class SimpleKalmanFilter3D:
     """Optional placeholder for a 3D Kalman model.
 
@@ -110,3 +108,5 @@ class SimpleKalmanFilter3D:
 
     def __init__(self, *_: Any, **__: Any) -> None:
         raise NotImplementedError("SimpleKalmanFilter3D is not implemented in this prototype.")
+
+# %% END

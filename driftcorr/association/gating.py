@@ -9,11 +9,11 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 import numpy as np
-
+# %% FUNCTIONS
 
 def gate_by_max_cost(cost_matrix: np.ndarray, max_cost: float) -> np.ndarray:
     """Allow only pairs with cost <= max_cost."""
@@ -78,3 +78,5 @@ def apply_gate_to_cost(cost_matrix: np.ndarray, gating_mask: np.ndarray | None, 
         forbidden_cost = max(1e9, base * 1e6 + 1.0)
     c[~g] = float(forbidden_cost)
     return c
+
+# %% END

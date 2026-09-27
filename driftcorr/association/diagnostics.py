@@ -13,7 +13,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 import numpy as np
@@ -21,7 +21,7 @@ import pandas as pd
 
 from .types import PointCloudFrame
 
-
+# %% FUNCTIONS
 def compute_nn_distance(frames: list[PointCloudFrame]) -> pd.DataFrame:
     """Compute per-frame nearest-neighbor distance statistics.
 
@@ -155,3 +155,4 @@ def compute_rho(nn_df: pd.DataFrame, disp_df: pd.DataFrame) -> pd.DataFrame:
         "disp_mean",
     ]
     return m[cols].sort_values("Time").reset_index(drop=True)
+# %% END

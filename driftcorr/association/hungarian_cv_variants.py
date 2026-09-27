@@ -21,7 +21,7 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 from typing import Any
@@ -40,8 +40,7 @@ from .assignment import (
 from .linking import link_assignments_to_tracks
 from .scoring import global_association_metrics, score_links_df
 from .types import AssociationResult, PointCloudFrame
-
-
+# %% FUNCTIONS
 def _median_nn_distance(xyz: np.ndarray) -> float:
     """Compute median nearest-neighbor distance for one frame."""
     x = np.asarray(xyz, dtype=float)
@@ -578,3 +577,4 @@ def associate_hungarian_two_stage_nis_cv(
     p = dict(params or {})
     p.setdefault("gating_mode", "nis")
     return _associate_variant(frames, variant="two_stage_nis", gating=gating, params=p)
+# %% END

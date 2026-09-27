@@ -14,11 +14,11 @@ Author
 author: Fabrizio Musacchio
 date: Feb 2026
 """
-
+# %% IMPORTS
 from __future__ import annotations
 
 import numpy as np
-
+# %% FUNCTIONS
 
 def _validate_xyz(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     aa = np.asarray(a, dtype=float)
@@ -101,3 +101,5 @@ def huberized_cost(x_t: np.ndarray, x_tp1: np.ndarray, delta: float = 1.0) -> np
 
 def mahalanobis_cost(x_t: np.ndarray, x_tp1: np.ndarray, cov: np.ndarray | None = None) -> np.ndarray:
     return cost_mahalanobis(x_t, x_tp1, cov=cov)
+
+# %% END

@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use DriftCorr in your research, please cite the archived software version used in your analysis and the associated preprint."
-title: "DriftCorr: Robust geometric drift correction and identity reconstruction in 3D time-lapse point clouds"
+title: "DriftCorr: Robust geometric drift correction and identity reconstruction for biological 3D time-lapse point clouds"
 version: 0.1.0
 date-released: 2026-09-27
 
@@ -23,7 +23,7 @@ preferred-citation:
       orcid: https://orcid.org/0000-0002-9043-3349
     - family-names: Fuhrmann
       given-names: Martin
-  title: "Robust geometric drift correction and identity reconstruction in 3D time-lapse point clouds"
+  title: "Robust geometric drift correction and identity reconstruction for biological 3D time-lapse point clouds"
   year: 2026
   journal: bioRxiv
   publisher: Cold Spring Harbor Laboratory

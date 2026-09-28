@@ -173,14 +173,14 @@ This project is released under the GNU General Public License v3.0 or later. See
 ## How to cite
 If you use DriftCorr, please cite the associated preprint
 
-> Fabrizio Musacchio and Martin Fuhrmann, "DriftCorr: Robust geometric drift correction and identity reconstruction in 3D time-lapse point clouds," forthcoming.
+> Fabrizio Musacchio and Martin Fuhrmann, "DriftCorr: Robust geometric drift correction and identity reconstruction for biological 3D time-lapse point clouds," forthcoming.
 
 and the software repository:
 
 ```bibtex
 @software{musacchio_driftcorr_2026,
   author = {Musacchio, Fabrizio and Fuhrmann, Martin},
-  title = {DriftCorr: Robust geometric drift correction and identity reconstruction in 3D time-lapse point clouds},
+  title = {DriftCorr: Robust geometric drift correction and identity reconstruction for biological 3D time-lapse point clouds},
   year = {2026},
   url = {https://github.com/FabrizioMusacchio/driftcorr},
   license = {GPL-3.0-or-later}

@@ -182,7 +182,8 @@ and the software repository:
   author = {Musacchio, Fabrizio and Fuhrmann, Martin},
   title = {DriftCorr: Robust geometric drift correction and identity reconstruction for biological 3D time-lapse point clouds},
   year = {2026},
-  url = {https://github.com/FabrizioMusacchio/driftcorr},
+  url = {https://doi.org/10.5281/zenodo.23438840},
+  doi = {10.5281/zenodo.23438840},
   license = {GPL-3.0-or-later}
 }
 ```

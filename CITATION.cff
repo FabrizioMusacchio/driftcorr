@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use DriftCorr in your research, please cite the archived software version used in your analysis and the associated preprint."
 title: "DriftCorr: Robust geometric drift correction and identity reconstruction for biological 3D time-lapse point clouds"
-version: 0.1.0
+version: 0.0.1
 date-released: 2026-09-27
 
 authors:
